@@ -1,0 +1,24 @@
+---
+# Ubuntu 24.04 may run sshd under socket activation (ssh.socket), where
+# `systemctl reload ssh` is not necessarily valid. Try the reload, and fall
+# back to restarting the socket unit. Neither drops established sessions.
+# The post-hardening reachability check in tasks/main.yml is the real proof
+# that this worked, so a failure here must not abort the run silently.
+- name: Reload sshd
+  ansible.builtin.systemd:
+    name: ssh
+    state: reloaded
+  register: sshd_reload
+  failed_when: false
+
+- name: Restart ssh.socket when the service reload did not apply
+  ansible.builtin.systemd:
+    name: ssh.socket
+    state: restarted
+  when: sshd_reload is failed
+  failed_when: false
+
+- name: Restart fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted

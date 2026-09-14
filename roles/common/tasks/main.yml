@@ -1,0 +1,207 @@
+---
+- name: Set hostname to the site name
+  ansible.builtin.hostname:
+    name: "{{ site }}"
+
+- name: Ensure hostname resolves locally
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ site }}"
+    state: present
+
+- name: Read current timezone
+  ansible.builtin.command: timedatectl show --property=Timezone --value
+  register: current_tz
+  check_mode: false
+  changed_when: false
+
+- name: Set timezone to UTC
+  ansible.builtin.command: timedatectl set-timezone UTC
+  when: current_tz.stdout | trim != 'UTC'
+  changed_when: true
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Upgrade all packages
+  ansible.builtin.apt:
+    upgrade: safe
+  register: apt_upgrade
+  retries: 3
+  delay: 10
+  until: apt_upgrade is succeeded
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - git
+      - jq
+      - htop
+      - iotop
+      - ncdu
+      - dnsutils
+      - net-tools
+      - rsync
+      - unzip
+      - chrony
+      - unattended-upgrades
+      - apt-listchanges
+      - python3-kubernetes   # lets Ansible drive k8s later without pip
+    state: present
+
+- name: Enable and start chrony for time sync
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# Swap off — kubelet behaves unpredictably with swap enabled, and with 123 GiB
+# of RAM there is no need for it.
+# ---------------------------------------------------------------------------
+- name: Check for active swap
+  ansible.builtin.command: swapon --noheadings --show=NAME
+  register: active_swap
+  check_mode: false
+  changed_when: false
+
+- name: Disable all active swap
+  ansible.builtin.command: swapoff -a
+  when: active_swap.stdout | trim | length > 0
+  changed_when: true
+
+- name: Remove swap entries from /etc/fstab
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(\s*[^#\n].*\s+swap\s+.*)$'
+    replace: '# \1  # disabled for kubernetes'
+
+- name: Detect Ubuntu cloud-image swapfile
+  ansible.builtin.stat:
+    path: /swap.img
+  register: swapimg
+
+- name: Remove the cloud-image swapfile
+  ansible.builtin.file:
+    path: /swap.img
+    state: absent
+  when: swapimg.stat.exists
+
+# ---------------------------------------------------------------------------
+# Kernel tuning for libp2p connection counts and QUIC/UDP throughput
+# ---------------------------------------------------------------------------
+# net.netfilter.nf_conntrack_max only exists once nf_conntrack is loaded. This
+# role runs before ufw and k3s (which would load it), so on a genuinely bare
+# host the sysctl key would be missing and the loop below would fail.
+- name: Ensure nf_conntrack is loaded before its sysctls are set
+  community.general.modprobe:
+    name: nf_conntrack
+    state: present
+
+# Persisted with copy rather than modprobe's `persistent: present`: in
+# community.general 8.3.0 that option writes /etc/modules-load.d even under
+# --check, which breaks the promise that a dry run touches nothing.
+- name: Load nf_conntrack on every boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/nf_conntrack.conf
+    content: "nf_conntrack\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply sysctl tuning
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-ipfs-tuning.conf
+    state: present
+    reload: true
+  loop: "{{ sysctl_tuning | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Raise file descriptor limits
+  ansible.builtin.copy:
+    dest: /etc/security/limits.d/99-ipfs.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible. libp2p holds very large numbers of open sockets.
+      *    soft nofile {{ nofile_limit }}
+      *    hard nofile {{ nofile_limit }}
+      root soft nofile {{ nofile_limit }}
+      root hard nofile {{ nofile_limit }}
+
+- name: Ensure the systemd manager drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Raise systemd default file descriptor limit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system.conf.d/99-nofile.conf
+    mode: "0644"
+    content: |
+      [Manager]
+      DefaultLimitNOFILE={{ nofile_limit }}
+  notify: Reload systemd daemon
+
+# ---------------------------------------------------------------------------
+# Postfix was found listening on 0.0.0.0:25 on a freshly provisioned host.
+# Nothing here needs to accept inbound mail; restrict it to loopback so local
+# cron and unattended-upgrades reports still work.
+# ---------------------------------------------------------------------------
+- name: Check whether Postfix is installed
+  ansible.builtin.stat:
+    path: /etc/postfix/main.cf
+  register: postfix_main_cf
+
+- name: Bind Postfix to loopback only
+  ansible.builtin.lineinfile:
+    path: /etc/postfix/main.cf
+    regexp: '^inet_interfaces\s*='
+    line: 'inet_interfaces = loopback-only'
+    state: present
+  when: postfix_main_cf.stat.exists
+  notify: Restart postfix
+
+- name: Restrict Postfix to IPv4 loopback to avoid IPv6 bind errors
+  ansible.builtin.lineinfile:
+    path: /etc/postfix/main.cf
+    regexp: '^inet_protocols\s*='
+    line: 'inet_protocols = ipv4'
+    state: present
+  when: postfix_main_cf.stat.exists
+  notify: Restart postfix
+
+# ---------------------------------------------------------------------------
+# Automatic security updates
+# ---------------------------------------------------------------------------
+- name: Enable unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+
+- name: Configure unattended-upgrades to security only, no auto-reboot
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/51-ipfs-unattended
+    mode: "0644"
+    content: |
+      // Managed by Ansible.
+      // Reboots are deliberately manual: these nodes serve IPFS content and
+      // should be drained intentionally rather than restarted unattended.
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";

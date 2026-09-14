@@ -1,0 +1,103 @@
+---
+# Each host has two ~894 GiB NVMe drives. One holds the OS; the second is
+# blank. Device naming is NOT consistent across hosts (chicago has the OS on
+# nvme1n1, singapore and lithuania on nvme0n1), so the target is identified by
+# shape, never by name.
+#
+# Every check below reads LIVE state (blkid/lsblk/findmnt) rather than
+# ansible_devices/ansible_mounts. Facts are cached for an hour (ansible.cfg),
+# and the cache for a host is written at the START of the run that creates
+# /data - so a cached fact set reports the in-use data disk as unpartitioned
+# and unmounted, i.e. as a blank candidate for reformatting. Only two
+# downstream safeties (the filesystem module refusing to reformat, and mkfs
+# refusing a mounted device) stood between that and data loss. The role's own
+# gate must not depend on stale data.
+
+- name: Look for an existing data volume by label
+  ansible.builtin.command:
+    argv: [blkid, -L, ipfsdata]
+  register: existing_label
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Record whether the data volume has already been provisioned
+  ansible.builtin.set_fact:
+    data_volume_exists: "{{ existing_label.rc == 0 }}"
+
+- name: Read live block device topology
+  ansible.builtin.command:
+    argv: [lsblk, -J, -o, "NAME,TYPE,MOUNTPOINT,FSTYPE"]
+  register: lsblk_raw
+  changed_when: false
+  check_mode: false
+
+# A candidate must be a whole NVMe disk with no children (no partition table),
+# no mountpoint, and no filesystem signature at all. Requiring fstype to be
+# empty is deliberate: any disk carrying a filesystem is not blank, even if it
+# happens to be unmounted right now.
+- name: Identify genuinely blank NVMe disks
+  ansible.builtin.set_fact:
+    data_disk_candidates: >-
+      {{
+        (lsblk_raw.stdout | from_json).blockdevices
+        | selectattr('type', 'eq', 'disk')
+        | selectattr('name', 'match', '^nvme')
+        | rejectattr('children', 'defined')
+        | selectattr('mountpoint', 'none')
+        | selectattr('fstype', 'none')
+        | map(attribute='name')
+        | list
+      }}
+
+- name: Show what was detected
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'data volume already provisioned (' ~ existing_label.stdout | trim ~ ')'
+         if data_volume_exists
+         else 'blank NVMe candidates: ' ~ data_disk_candidates }}
+
+# Safety gate: refuse to guess. Skipped entirely once the volume exists.
+- name: Fail if the blank disk cannot be identified unambiguously
+  ansible.builtin.fail:
+    msg: >-
+      Expected exactly one blank NVMe to use for {{ data_mount }}, found
+      {{ data_disk_candidates | length }}: {{ data_disk_candidates }}.
+      Refusing to format anything. Inspect the host manually.
+  when:
+    - not data_volume_exists
+    - data_disk_candidates | length != 1
+
+- name: Create an ext4 filesystem on the blank NVMe
+  community.general.filesystem:
+    fstype: ext4
+    dev: "/dev/{{ data_disk_candidates | first }}"
+    opts: -L ipfsdata -m 0   # no root reserve; this is data, not system space
+  when: not data_volume_exists
+
+# Mounting by label rather than UUID is deliberate: the label survives a
+# deliberate reformat, so fstab does not need rewriting alongside it.
+- name: Mount the data volume by label and persist it in fstab
+  ansible.posix.mount:
+    path: "{{ data_mount }}"
+    src: LABEL=ipfsdata
+    fstype: ext4
+    opts: defaults,noatime
+    state: mounted
+
+# local-path-provisioner resets its root to 0700 whenever it provisions a
+# volume. Matching that here stops Ansible and the provisioner flipping the
+# mode back and forth on every run, and 0700 is the right value anyway: it
+# holds every PVC's data.
+- name: Create service data directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ data_mount }}/local-path-provisioner", mode: "0700" }
+    - { path: "{{ data_mount }}/k3s", mode: "0755" }
+  loop_control:
+    label: "{{ item.path }}"

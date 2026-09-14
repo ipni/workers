@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ansible)",
+      "Bash(ansible *)",
+      "Bash(ansible-playbook)",
+      "Bash(ansible-playbook *)",
+      "Bash(ansible-vault *)",
+      "Bash(ansible-galaxy *)",
+      "Bash(ansible-inventory *)",
+      "Bash(ansible-doc *)",
+      "Bash(ansible-config *)",
+      "Bash(ansible-lint *)",
+      "Bash(./scripts/bootstrap-vault.sh *)"
+    ]
+  }
+}

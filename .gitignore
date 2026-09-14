@@ -1,0 +1,23 @@
+# Plaintext credentials — never commit
+servers.txt
+*.plaintext
+.vault_pass
+*.vault_pass
+
+# Fetched kubeconfigs contain cluster admin credentials
+kubeconfigs/
+*.kubeconfig
+
+# Personal Claude Code settings (and the writer's transient temp files)
+.claude/settings.local.json*
+
+# Ansible runtime artifacts
+*.retry
+.ansible/
+facts_cache/
+
+# Local working notes — reviews and task scratch, not part of the deliverable.
+# Anchored with a leading slash: an unanchored "tasks/" would also swallow
+# every role's roles/<role>/tasks/ directory.
+/reviews/
+/tasks/

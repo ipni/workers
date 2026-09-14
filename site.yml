@@ -1,0 +1,101 @@
+---
+# Base preparation for the three IPFS/IPNI hosts.
+#
+#   ansible-playbook site.yml                 # all three
+#   ansible-playbook site.yml -l chicago      # one host
+#   ansible-playbook site.yml --check --diff  # dry run
+#
+# Safe to re-run: it detects whether hardening has already happened and picks
+# the right credentials automatically.
+
+- name: Detect which credentials work for each host
+  hosts: ipfs_nodes
+  gather_facts: false
+  connection: local
+  tags: always
+  tasks:
+    - name: Probe key-based login as the admin user
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=10
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - PasswordAuthentication=no
+          - -p
+          - "{{ ssh_port }}"
+          - "{{ admin_user }}@{{ ansible_host }}"
+          - "true"
+      register: admin_probe
+      check_mode: false
+      changed_when: false
+      failed_when: false
+
+    - name: Use the admin account when key auth already works
+      ansible.builtin.set_fact:
+        ansible_user: "{{ admin_user }}"
+        ansible_become: true
+        bootstrap_mode: false
+      when: admin_probe.rc == 0
+
+    # no_log: set_fact echoes its arguments, so at -v or through any callback
+    # plugin the vaulted root password would be printed in cleartext.
+    - name: Fall back to root password auth on a freshly provisioned host
+      ansible.builtin.set_fact:
+        ansible_user: root
+        ansible_password: "{{ vault_root_password }}"
+        ansible_become: false
+        bootstrap_mode: true
+      when: admin_probe.rc != 0
+      no_log: true
+
+    - name: Report the connection mode
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ 'BOOTSTRAP (root + password)'
+          if bootstrap_mode else 'HARDENED (admin key + sudo)' }}
+
+- name: Prepare IPFS hosts
+  hosts: ipfs_nodes
+  gather_facts: true
+  any_errors_fatal: false   # one host failing must not abandon the other two
+  roles:
+    - role: common
+      tags: [common, base]
+    - role: storage
+      tags: [storage, disk]
+    - role: hardening
+      tags: [hardening, security]
+    - role: k3s
+      tags: [k3s, kubernetes]
+
+  post_tasks:
+    # Read live state rather than ansible_mounts: facts are cached for an hour
+    # (see ansible.cfg), so a cached fact set gathered before the data volume
+    # existed would report it missing on a later run.
+    - name: Read live data volume state
+      ansible.builtin.command:
+        # "SOURCE,SIZE" must stay quoted: in a YAML flow sequence an unquoted
+        # comma would split it into two separate arguments.
+        argv:
+          - findmnt
+          - -no
+          - "SOURCE,SIZE"
+          - "{{ data_mount }}"
+      register: live_data_mount
+      check_mode: false
+      changed_when: false
+      failed_when: false
+
+    - name: Summarise the finished host
+      ansible.builtin.debug:
+        msg:
+          - "site:       {{ site }} ({{ hostvars[inventory_hostname].ansible_host }})"
+          - "os:         {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "data disk:  {{ live_data_mount.stdout | trim | default('NOT MOUNTED', true) }}"
+          - "ssh:        key-only as {{ admin_user }}, root login disabled"
+          - "kubeconfig: kubeconfigs/{{ site }}.yaml (via SSH tunnel)"

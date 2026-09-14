@@ -1,0 +1,137 @@
+---
+# A standalone single-node k3s cluster per host. These clusters know nothing
+# about each other by design - see inventory/hosts.yml for why.
+
+- name: Create k3s config directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+
+- name: Write k3s server configuration
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible.
+      node-name: "{{ site }}"
+      # Single-node cluster: sqlite backend, no etcd, no cross-site quorum.
+      disable:
+      {% for component in k3s_disable_components %}
+        - {{ component }}
+      {% endfor %}
+      # PVCs land on the dedicated NVMe rather than the OS disk.
+      default-local-storage-path: "{{ data_mount }}/local-path-provisioner"
+      node-label:
+        - "site={{ site }}"
+      # The API server is not exposed publicly; ufw denies 6443 inbound and
+      # remote kubectl reaches it over an SSH tunnel.
+      write-kubeconfig-mode: "0600"
+  register: k3s_config
+
+- name: Check whether k3s is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary
+
+- name: Download the k3s installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /root/k3s-install.sh
+    mode: "0700"
+    owner: root
+    group: root
+  when: not k3s_binary.stat.exists
+
+- name: Install k3s server
+  ansible.builtin.command:
+    cmd: /root/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: "server"
+  when: not k3s_binary.stat.exists
+  changed_when: true
+
+- name: Restart k3s if configuration changed
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+  when:
+    - k3s_config is changed
+    - k3s_binary.stat.exists
+
+- name: Ensure k3s is enabled and running
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for the node to report Ready
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - wait
+      - --for=condition=Ready
+      - "node/{{ site }}"
+      - --timeout=300s
+  register: node_ready
+  changed_when: false
+
+- name: Wait for core system pods to settle
+  ansible.builtin.command:
+    cmd: k3s kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=180s
+  register: pods_ready
+  changed_when: false
+  failed_when: false
+
+- name: Read the generated kubeconfig
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: kubeconfig_raw
+
+- name: Ensure the local kubeconfig directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/kubeconfigs"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# The server URL is rewritten to localhost because access is via SSH tunnel:
+#   ssh -L 6443:127.0.0.1:6443 {{ admin_user }}@{{ ansible_host }}
+# k3s names its cluster, user and context all "default". Rename them per site
+# so the three kubeconfigs can be merged into one KUBECONFIG without colliding.
+#
+# This is done as a YAML round-trip rather than a text substitution: the
+# cluster/user/context names must stay internally consistent (a context refers
+# to its user by name), and a regex that misses one of the several spellings
+# silently produces a kubeconfig that prompts for a username instead of
+# authenticating. A blanket string replace would also risk corrupting the
+# embedded base64 certificate blobs.
+- name: Write a per-site kubeconfig locally
+  vars:
+    kc: "{{ kubeconfig_raw.content | b64decode | from_yaml }}"
+  ansible.builtin.copy:
+    content: >-
+      {{
+        kc | combine({
+          'clusters': [ kc.clusters[0] | combine({'name': site}) ],
+          'users':    [ kc.users[0]    | combine({'name': site}) ],
+          'contexts': [ kc.contexts[0] | combine({
+                          'name': site,
+                          'context': kc.contexts[0].context
+                                     | combine({'cluster': site, 'user': site})
+                        }) ],
+          'current-context': site
+        }) | to_nice_yaml(indent=2)
+      }}
+    dest: "{{ playbook_dir }}/kubeconfigs/{{ site }}.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false

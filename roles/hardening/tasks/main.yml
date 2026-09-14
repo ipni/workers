@@ -1,0 +1,255 @@
+---
+# ORDER IS LOAD-BEARING. Every step that removes an access path runs only
+# after the replacement path has been proven to work:
+#
+#   1. create admin user + install key + passwordless sudo
+#   2. PROVE key-based login works (hard gate - aborts the play if it does not)
+#   3. open SSH in the firewall, then enable the firewall
+#   4. only now disable root login and password authentication
+#
+# If step 2 fails the play stops with password auth still enabled, so the host
+# stays reachable. The provider KVM console is the final fallback.
+
+# ---------------------------------------------------------------------------
+# 1. Admin account
+# ---------------------------------------------------------------------------
+- name: Create the admin group
+  ansible.builtin.group:
+    name: "{{ admin_user }}"
+    state: present
+
+- name: Create the admin user
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    groups: sudo
+    append: true
+    shell: /bin/bash
+    create_home: true
+    state: present
+
+# exclusive: the key file is the single source of truth. Any extra key added to
+# this account by hand is REMOVED on the next run. To give a second operator
+# access, turn admin_pubkey_file into a list rather than editing the host.
+- name: Install the admin SSH public key
+  ansible.posix.authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ lookup('file', admin_pubkey_file) }}"
+    state: present
+    exclusive: true
+
+- name: Grant passwordless sudo to the admin user
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-{{ admin_user }}"
+    mode: "0440"
+    owner: root
+    group: root
+    content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    validate: 'visudo -cf %s'
+
+- name: Lock the admin account password (key-only, no password to guess)
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    password: '!'
+
+# ---------------------------------------------------------------------------
+# 2. HARD GATE - prove the new access path before removing the old one
+# ---------------------------------------------------------------------------
+- name: Verify key-based login as the admin user actually works
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=10
+      - -o
+      - StrictHostKeyChecking=accept-new
+      - -o
+      - PasswordAuthentication=no
+      - -p
+      - "{{ ssh_port }}"
+      - "{{ admin_user }}@{{ hostvars[inventory_hostname].ansible_host }}"
+      - "sudo -n true && echo HARDENING_GATE_OK"
+  delegate_to: localhost
+  become: false
+  register: access_gate
+  check_mode: false
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: "'HARDENING_GATE_OK' in (access_gate.stdout | default(''))"
+  failed_when: "'HARDENING_GATE_OK' not in (access_gate.stdout | default(''))"
+
+- name: Report that the access gate passed
+  ansible.builtin.debug:
+    msg: >-
+      Key-based login and passwordless sudo confirmed for
+      {{ admin_user }}@{{ hostvars[inventory_hostname].ansible_host }}.
+      Safe to lock down SSH.
+
+# ---------------------------------------------------------------------------
+# 3. Firewall - allow SSH BEFORE enabling, or we lock ourselves out
+# ---------------------------------------------------------------------------
+- name: Install ufw and fail2ban
+  ansible.builtin.apt:
+    name:
+      - ufw
+      - fail2ban
+    state: present
+
+- name: Set ufw default policies
+  community.general.ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { direction: incoming, policy: deny }
+    - { direction: outgoing, policy: allow }
+    - { direction: routed, policy: allow }   # k3s pod/service traffic is routed
+
+- name: Allow SSH through the firewall (must precede enabling it)
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port }}"
+    proto: tcp
+    comment: SSH
+
+- name: Allow additional TCP service ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ firewall_allowed_tcp | reject('equalto', ssh_port | string) | reject('equalto', ssh_port) | list }}"
+
+- name: Allow additional UDP service ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: udp
+  loop: "{{ firewall_allowed_udp }}"
+
+# k3s runs flannel/CNI on its own interfaces; blocking them breaks the cluster.
+- name: Allow traffic on k3s CNI interfaces
+  community.general.ufw:
+    rule: allow
+    interface: "{{ item }}"
+    direction: in
+  loop:
+    - cni0
+    - flannel.1
+
+- name: Allow the pod and service CIDRs
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+  loop:
+    - 10.42.0.0/16   # k3s default pod CIDR
+    - 10.43.0.0/16   # k3s default service CIDR
+
+- name: Enable ufw with logging
+  community.general.ufw:
+    state: enabled
+    logging: low
+
+# With password authentication disabled below there are few credential
+# guesses left to ban, so this is not a meaningful defence on its own. It is
+# kept to cut log noise and throttle scanners hammering the handshake.
+- name: Configure fail2ban for sshd
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.local
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      [sshd]
+      enabled  = true
+      port     = {{ ssh_port }}
+      backend  = systemd
+      maxretry = 3
+      findtime = 10m
+      bantime  = 1h
+  notify: Restart fail2ban
+
+- name: Enable and start fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# 4. SSH lockdown - last, and only after the gate above passed
+# ---------------------------------------------------------------------------
+- name: Harden sshd configuration
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible. Recovery path is the provider KVM console.
+      Port {{ ssh_port }}
+      PermitRootLogin {{ ssh_permit_root_login }}
+      PasswordAuthentication {{ ssh_password_authentication }}
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PubkeyAuthentication yes
+      PermitEmptyPasswords no
+      AllowUsers {{ ssh_allow_users }}
+      X11Forwarding no
+      AllowAgentForwarding no
+      AllowTcpForwarding yes
+      MaxAuthTries 3
+      MaxSessions 10
+      LoginGraceTime 30
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+      # Modern algorithms only
+      KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+      Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+      MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: Reload sshd
+
+# Ubuntu 24.04 ships socket activation; the drop-in Port must match it.
+- name: Flush handlers so sshd reloads before the post-check
+  ansible.builtin.meta: flush_handlers
+
+- name: Confirm SSH is still reachable with the hardened config
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -o
+      - BatchMode=yes
+      - -o
+      - ConnectTimeout=10
+      - -p
+      - "{{ ssh_port }}"
+      - "{{ admin_user }}@{{ hostvars[inventory_hostname].ansible_host }}"
+      - "echo POST_HARDENING_OK"
+  delegate_to: localhost
+  become: false
+  register: post_check
+  check_mode: false
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: "'POST_HARDENING_OK' in (post_check.stdout | default(''))"
+  failed_when: "'POST_HARDENING_OK' not in (post_check.stdout | default(''))"
+
+# ---------------------------------------------------------------------------
+# 5. Hand the rest of the play over to the hardened credentials.
+#
+# In bootstrap mode this play connected as root with a password. Root login
+# and password auth have just been disabled, so the current credentials are
+# now invalid - subsequent roles must reconnect as the admin user. Without
+# this the run only survives as long as the SSH control socket happens to
+# live, which is a race, not a design.
+# ---------------------------------------------------------------------------
+- name: Switch the running play to the hardened credentials
+  ansible.builtin.set_fact:
+    ansible_user: "{{ admin_user }}"
+    ansible_password: null
+    ansible_become: true
+    bootstrap_mode: false
+
+- name: Drop the old SSH connection so it reconnects as the admin user
+  ansible.builtin.meta: reset_connection
