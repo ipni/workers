@@ -1,7 +1,7 @@
 ---
 # Each host has two ~894 GiB NVMe drives. One holds the OS; the second is
-# blank. Device naming is NOT consistent across hosts (chicago has the OS on
-# nvme1n1, singapore and lithuania on nvme0n1), so the target is identified by
+# blank. Device naming is NOT consistent across hosts (chic-1 has the OS on
+# nvme1n1, sing-1 and lith-1 on nvme0n1), so the target is identified by
 # shape, never by name.
 #
 # Every check below reads LIVE state (blkid/lsblk/findmnt) rather than

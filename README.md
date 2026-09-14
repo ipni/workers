@@ -7,11 +7,16 @@ cluster" node serving website content and documentation).
 This repository currently covers **base preparation only**. Service workloads
 are deployed in a later pass.
 
-| Site      | IP              | Role                              |
-|-----------|-----------------|-----------------------------------|
-| singapore | 5.199.165.77    | standalone k3s cluster            |
-| lithuania | 46.166.169.131  | standalone k3s cluster            |
-| chicago   | 84.32.48.211    | standalone k3s cluster            |
+| Box    | Site      | IP              | Role                   |
+|--------|-----------|-----------------|------------------------|
+| sing-1 | singapore | 5.199.165.77    | standalone k3s cluster |
+| lith-1 | lithuania | 46.166.169.131  | standalone k3s cluster |
+| chic-1 | chicago   | 84.32.48.211    | standalone k3s cluster |
+
+The **box** name is the inventory name, hostname, k3s node name and kubeconfig
+context. The **site** is the location, carried as the `site` variable and the
+`site=` node label, so a second box in the same place (e.g. `chic-2`) shares a
+site without sharing an identity.
 
 Each host: Ubuntu 24.04 LTS, 32 cores, 123 GiB RAM, 2 × 894 GiB NVMe.
 
@@ -28,7 +33,7 @@ Kubernetes (DNS/anycast), not inside it.
 
 ```bash
 ansible-playbook site.yml                  # all three hosts
-ansible-playbook site.yml -l chicago       # one host
+ansible-playbook site.yml -l chic-1        # one host
 ansible-playbook site.yml --tags hardening # one concern
 ansible-playbook site.yml --check --diff   # dry run
 ```
@@ -41,12 +46,12 @@ The k3s API server is **not exposed to the internet** — ufw denies 6443. Acces
 goes over an SSH tunnel:
 
 ```bash
-./scripts/kubectl-tunnel.sh chicago
-export KUBECONFIG=$(pwd)/kubeconfigs/.chicago-tunnel.yaml
+./scripts/kubectl-tunnel.sh chic-1
+export KUBECONFIG=$(pwd)/kubeconfigs/.chic-1-tunnel.yaml
 kubectl get nodes
 ```
 
-Each site's kubeconfig names its cluster, user and context after the site, so
+Each box's kubeconfig names its cluster, user and context after the box, so
 all three can be merged into a single `KUBECONFIG` without colliding.
 
 ## What the playbook does
@@ -65,7 +70,7 @@ listening on `0.0.0.0:25`, which is an unnecessary abuse target on a fresh host.
 points k3s's local-path provisioner there so IPFS blockstores never compete
 with the OS disk.
 
-> The two NVMe devices are **not** named consistently across hosts — chicago
+> The two NVMe devices are **not** named consistently across hosts — chic-1
 > has its OS on `nvme1n1` while the others use `nvme0n1`. The role therefore
 > identifies the target by shape (a whole NVMe with no partition table, no
 > filesystem signature, and no mount) and **refuses to run** unless exactly one
@@ -101,16 +106,18 @@ default-deny firewall before allowing SSH would lock everyone out.
 
 **`k3s`** — installs a pinned k3s version as a standalone single-node cluster,
 disables traefik (ingress is chosen deliberately when services land), waits for
-the node to become Ready, and fetches a per-site kubeconfig.
+the node to become Ready, and fetches a per-box kubeconfig. If the node name
+changes (as when the boxes were renamed), stale `NotReady` node objects are
+removed; a live node is never deleted.
 
 ## Secrets
 
 Credentials live in per-host `ansible-vault` files under
-`host_vars/<site>/vault.yml`, encrypted with `.vault_pass`. They were generated
+`host_vars/<box>/vault.yml`, encrypted with `.vault_pass`. They were generated
 from a plaintext `servers.txt` by `scripts/bootstrap-vault.sh`; that file was
 gitignored, never committed, and has since been deleted, so **the vault files
 are now the only copy**. Edit them in place with
-`ansible-vault edit host_vars/<site>/vault.yml`.
+`ansible-vault edit host_vars/<box>/vault.yml`.
 
 The password fact is set with `no_log: true`, so the root password does not
 appear in output even at `-vvv`.
@@ -140,9 +147,9 @@ the vault. SSH has no password fallback by design.
 ansible.cfg               inventory, vault and SSH defaults
 inventory/hosts.yml       the three hosts
 group_vars/ipfs_nodes/    tunables (admin user, firewall, k3s, sysctl)
-host_vars/<site>/vault.yml  encrypted per-host credentials
+host_vars/<box>/vault.yml   encrypted per-box credentials
 roles/{common,storage,hardening,k3s}/
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
-scripts/kubectl-tunnel.sh   SSH tunnel to a site's API server
+scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 site.yml                  the playbook
 ```

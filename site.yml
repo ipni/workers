@@ -2,7 +2,7 @@
 # Base preparation for the three IPFS/IPNI hosts.
 #
 #   ansible-playbook site.yml                 # all three
-#   ansible-playbook site.yml -l chicago      # one host
+#   ansible-playbook site.yml -l chic-1       # one host
 #   ansible-playbook site.yml --check --diff  # dry run
 #
 # Safe to re-run: it detects whether hardening has already happened and picks
@@ -94,8 +94,9 @@
     - name: Summarise the finished host
       ansible.builtin.debug:
         msg:
-          - "site:       {{ site }} ({{ hostvars[inventory_hostname].ansible_host }})"
+          - "box:        {{ inventory_hostname }} ({{ hostvars[inventory_hostname].ansible_host }})"
+          - "site:       {{ site }}"
           - "os:         {{ ansible_distribution }} {{ ansible_distribution_version }}"
           - "data disk:  {{ live_data_mount.stdout | trim | default('NOT MOUNTED', true) }}"
           - "ssh:        key-only as {{ admin_user }}, root login disabled"
-          - "kubeconfig: kubeconfigs/{{ site }}.yaml (via SSH tunnel)"
+          - "kubeconfig: kubeconfigs/{{ inventory_hostname }}.yaml (via SSH tunnel)"

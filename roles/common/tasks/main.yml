@@ -1,13 +1,15 @@
 ---
-- name: Set hostname to the site name
+# The hostname is the box name (e.g. chic-1), not the location: a second box in
+# the same site must not collide.
+- name: Set hostname to the box name
   ansible.builtin.hostname:
-    name: "{{ site }}"
+    name: "{{ inventory_hostname }}"
 
 - name: Ensure hostname resolves locally
   ansible.builtin.lineinfile:
     path: /etc/hosts
     regexp: '^127\.0\.1\.1\s'
-    line: "127.0.1.1 {{ site }}"
+    line: "127.0.1.1 {{ inventory_hostname }}"
     state: present
 
 - name: Read current timezone

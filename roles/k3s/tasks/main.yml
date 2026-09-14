@@ -18,7 +18,7 @@
     group: root
     content: |
       # Managed by Ansible.
-      node-name: "{{ site }}"
+      node-name: "{{ inventory_hostname }}"
       # Single-node cluster: sqlite backend, no etcd, no cross-site quorum.
       disable:
       {% for component in k3s_disable_components %}
@@ -27,7 +27,7 @@
       # PVCs land on the dedicated NVMe rather than the OS disk.
       default-local-storage-path: "{{ data_mount }}/local-path-provisioner"
       node-label:
-        - "site={{ site }}"
+        - "site={{ site }}"   # location, for scheduling/selection
       # The API server is not exposed publicly; ufw denies 6443 inbound and
       # remote kubectl reaches it over an SSH tunnel.
       write-kubeconfig-mode: "0600"
@@ -70,6 +70,9 @@
     enabled: true
     state: started
 
+# `kubectl wait` fails immediately with "not found" if the node object has not
+# registered yet - which is exactly the state just after a fresh install or a
+# node rename - so retry around it rather than relying on its own timeout.
 - name: Wait for the node to report Ready
   ansible.builtin.command:
     argv:
@@ -77,10 +80,50 @@
       - kubectl
       - wait
       - --for=condition=Ready
-      - "node/{{ site }}"
-      - --timeout=300s
+      - "node/{{ inventory_hostname }}"
+      - --timeout=60s
   register: node_ready
   changed_when: false
+  retries: 10
+  delay: 10
+  until: node_ready.rc == 0
+
+# Each cluster is single-node by design, so any other node object is a
+# leftover - in practice the old object after a node-name change (the boxes
+# were renamed from their location names).
+#
+# A node is removed when EITHER:
+#   - it has this box's own InternalIP: it is this same machine under its old
+#     name, so it is certainly stale. This must not wait for NotReady - right
+#     after a rename the old object still reports Ready until its lease
+#     expires, which is why a NotReady-only rule silently skipped it; or
+#   - it is not Ready and has some other IP, i.e. genuinely dead.
+# A Ready node on a different IP is never touched.
+- name: List node objects with their IP and readiness
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - get
+      - nodes
+      - -o
+      - jsonpath={range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}
+  register: node_list
+  changed_when: false
+  check_mode: false
+
+- name: Delete stale node objects
+  ansible.builtin.command:
+    argv: [k3s, kubectl, delete, node, "{{ item.split()[0] }}"]
+  loop: >-
+    {{
+      node_list.stdout_lines
+      | reject('match', '^' ~ (inventory_hostname | regex_escape) ~ ' ')
+      | select('match', '^\S+ (' ~ (hostvars[inventory_hostname].ansible_host | regex_escape)
+                        ~ ' \S*|\S* (?!True$)\S*)$')
+      | list
+    }}
+  changed_when: true
 
 - name: Wait for core system pods to settle
   ansible.builtin.command:
@@ -105,8 +148,9 @@
 
 # The server URL is rewritten to localhost because access is via SSH tunnel:
 #   ssh -L 6443:127.0.0.1:6443 {{ admin_user }}@{{ ansible_host }}
-# k3s names its cluster, user and context all "default". Rename them per site
-# so the three kubeconfigs can be merged into one KUBECONFIG without colliding.
+# k3s names its cluster, user and context all "default". Rename them after the
+# box (each box is its own cluster) so the kubeconfigs can be merged into one
+# KUBECONFIG without colliding.
 #
 # This is done as a YAML round-trip rather than a text substitution: the
 # cluster/user/context names must stay internally consistent (a context refers
@@ -114,24 +158,25 @@
 # silently produces a kubeconfig that prompts for a username instead of
 # authenticating. A blanket string replace would also risk corrupting the
 # embedded base64 certificate blobs.
-- name: Write a per-site kubeconfig locally
+- name: Write a per-box kubeconfig locally
   vars:
     kc: "{{ kubeconfig_raw.content | b64decode | from_yaml }}"
   ansible.builtin.copy:
     content: >-
       {{
         kc | combine({
-          'clusters': [ kc.clusters[0] | combine({'name': site}) ],
-          'users':    [ kc.users[0]    | combine({'name': site}) ],
+          'clusters': [ kc.clusters[0] | combine({'name': inventory_hostname}) ],
+          'users':    [ kc.users[0]    | combine({'name': inventory_hostname}) ],
           'contexts': [ kc.contexts[0] | combine({
-                          'name': site,
+                          'name': inventory_hostname,
                           'context': kc.contexts[0].context
-                                     | combine({'cluster': site, 'user': site})
+                                     | combine({'cluster': inventory_hostname,
+                                                'user': inventory_hostname})
                         }) ],
-          'current-context': site
+          'current-context': inventory_hostname
         }) | to_nice_yaml(indent=2)
       }}
-    dest: "{{ playbook_dir }}/kubeconfigs/{{ site }}.yaml"
+    dest: "{{ playbook_dir }}/kubeconfigs/{{ inventory_hostname }}.yaml"
     mode: "0600"
   delegate_to: localhost
   become: false
