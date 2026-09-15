@@ -1,0 +1,191 @@
+---
+# Ship k8s/<kustomize_app> to the node, apply it with k3s's kubectl, and wait
+# for the rollout. Under --check it performs a real dry run instead.
+#
+# Results for the including role:
+#   kustomize_output             stdout_lines of the apply (or dry run)
+#   kustomize_deployment_rolled  true if this run created the deployment or
+#                                changed it (a changed pod template rolls the pod)
+
+- name: "Create the manifest directory for {{ kustomize_app }}"
+  ansible.builtin.file:
+    path: "{{ kustomize_dest }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "Ship the {{ kustomize_app }} kustomization"
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/k8s/{{ kustomize_app }}/"
+    dest: "{{ kustomize_dest }}/"
+    owner: root
+    group: root
+    mode: "0600"
+
+# copy never deletes, so a file removed from k8s/<app>/ would linger on the
+# node indefinitely. kustomize only reads listed resources, so a stray file is
+# harmless to the build, but the node copy should mirror the repo.
+- name: "List the files currently shipped for {{ kustomize_app }}"
+  ansible.builtin.find:
+    paths: "{{ kustomize_dest }}"
+    file_type: file
+  register: kustomize_shipped
+
+- name: "Remove files no longer in k8s/{{ kustomize_app }}"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ kustomize_shipped.files | map(attribute='path')
+       | reject('in', lookup('ansible.builtin.fileglob',
+                             playbook_dir ~ '/k8s/' ~ kustomize_app ~ '/*', wantlist=True)
+                      | map('basename') | map('regex_replace', '^', kustomize_dest ~ '/')
+                      | list)
+       | list }}
+
+# In check mode the copy above does not run, so the node still holds the OLD
+# manifests (or none, on a first deploy). Validating those would prove
+# nothing. Instead, stage the repo's manifests in a throwaway temp directory
+# and dry-run against that; the real manifest directory is left untouched.
+- name: "Check whether the {{ kustomize_namespace }} namespace exists yet"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, namespace, "{{ kustomize_namespace }}", --ignore-not-found, -o, name]
+  register: kustomize_ns
+  changed_when: false
+  check_mode: false
+
+- name: "Dry run {{ kustomize_app }} (check mode only)"
+  when: ansible_check_mode
+  block:
+    - name: Stage the manifests in a temp directory for the dry run
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: "{{ kustomize_app }}-dryrun-"
+      register: kustomize_staged
+      check_mode: false
+      changed_when: false   # throwaway scaffolding, not a change to the host
+
+    - name: Copy the manifests into the dry-run staging directory
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/k8s/{{ kustomize_app }}/"
+        dest: "{{ kustomize_staged.path }}/"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+
+    # A server-side dry run sends every object through the API server's
+    # validation and admission without persisting anything. It cannot handle a
+    # first deploy, though: the namespace is only "created" in the dry run, so
+    # every object inside it fails with "namespace not found". In that case,
+    # fall back to a client-side dry run, which still catches malformed YAML
+    # and kustomize errors.
+    - name: "Dry run the {{ kustomize_app }} manifests"
+      ansible.builtin.command:
+        argv:
+          - k3s
+          - kubectl
+          - apply
+          - -k
+          - "{{ kustomize_staged.path }}"
+          - "--dry-run={{ 'server' if kustomize_ns.stdout else 'client' }}"
+      # Registered separately from the real apply below: a SKIPPED task still
+      # overwrites its registered variable, so sharing one name would erase
+      # this output in check mode.
+      register: kustomize_dryrun
+      check_mode: false
+      changed_when: kustomize_dryrun.stdout is search('\\b(created|configured)\\b')
+
+  always:
+    - name: Remove the dry-run staging directory
+      ansible.builtin.file:
+        path: "{{ kustomize_staged.path }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+      when: kustomize_staged.path is defined
+
+- name: "Apply the {{ kustomize_app }} manifests"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, apply, -k, "{{ kustomize_dest }}"]
+  register: kustomize_apply
+  changed_when: kustomize_apply.stdout is search('\\b(created|configured)\\b')
+  when: not ansible_check_mode
+
+- name: Record what the apply did
+  ansible.builtin.set_fact:
+    kustomize_output: "{{ (kustomize_dryrun if ansible_check_mode else kustomize_apply).stdout_lines }}"
+    # "configured" means the Deployment object changed. In these manifests the
+    # only things that change it are the pod template (image digest, or a
+    # generated ConfigMap's hash suffix), and a changed template rolls the pod.
+    kustomize_deployment_rolled: >-
+      {{ (not ansible_check_mode)
+         and (kustomize_apply.stdout is search('deployment[.]apps/' ~ kustomize_deployment ~ ' (created|configured)')) }}
+
+- name: "Show what the {{ kustomize_app }} apply did"
+  ansible.builtin.debug:
+    var: kustomize_output
+
+- name: "Wait for the {{ kustomize_deployment }} rollout to complete"
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - "--namespace={{ kustomize_namespace }}"
+      - rollout
+      - status
+      - "deployment/{{ kustomize_deployment }}"
+      - "--timeout={{ kustomize_rollout_timeout }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+# ---------------------------------------------------------------------------
+# Prune superseded generated ConfigMaps. configMapGenerator gives each content
+# version a new hash-suffixed name, and `kubectl apply` never deletes the old
+# ones, so they pile up with every config edit. Runs only after a successful
+# rollout, and only touches ConfigMaps that carry BOTH this app's labels and
+# are not referenced by the live Deployment (kube-root-ca.crt has no labels).
+# ---------------------------------------------------------------------------
+- name: "Read the ConfigMaps the live {{ kustomize_deployment }} Deployment references"
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - "--namespace={{ kustomize_namespace }}"
+      - get
+      - "deployment/{{ kustomize_deployment }}"
+      - -o
+      - >-
+        jsonpath={.spec.template.spec.volumes[*].configMap.name}
+        {.spec.template.spec.containers[*].envFrom[*].configMapRef.name}
+  register: kustomize_cm_used
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: "List {{ kustomize_app }} ConfigMaps"
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - "--namespace={{ kustomize_namespace }}"
+      - get
+      - configmaps
+      - "--selector=app.kubernetes.io/part-of=ipfs-workers,app.kubernetes.io/name={{ kustomize_app }}"
+      - -o
+      - jsonpath={.items[*].metadata.name}
+  register: kustomize_cm_all
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: "Delete superseded {{ kustomize_app }} ConfigMaps"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ kustomize_namespace }}", delete, configmap, "{{ item }}"]
+  # default(''): a loop is templated before `when`, and under --check the two
+  # reads above are skipped and have no stdout.
+  loop: "{{ (kustomize_cm_all.stdout | default('')).split() | difference((kustomize_cm_used.stdout | default('')).split()) }}"
+  changed_when: true
+  # Refuse to prune if the Deployment references nothing: that would mean the
+  # read failed or the manifests changed shape, not that every ConfigMap is stale.
+  when:
+    - not ansible_check_mode
+    - (kustomize_cm_used.stdout | default('')).split() | length > 0

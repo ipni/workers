@@ -1,0 +1,3 @@
+---
+# First start pulls the image; later rollouts wait for the old pod to stop.
+someguy_rollout_timeout: 600s

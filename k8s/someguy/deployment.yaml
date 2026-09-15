@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: someguy
+spec:
+  replicas: 1
+  # hostNetwork binds ports 8190 and 4004 on the node itself, so a second pod
+  # cannot start while the old one holds them. A rolling update would deadlock;
+  # Recreate stops the old pod first.
+  #
+  # So every rollout, OOM kill or reboot is a short outage for THIS box.
+  # Cloudflare does not cover it: responses are not cached (cf-cache-status:
+  # DYNAMIC), so someguy's stale-if-error header has no effect. Redundancy
+  # comes from the Cloudflare router these boxes sit behind, which health-checks
+  # them and routes around a box that is down.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: someguy
+  template:
+    metadata:
+      labels:
+        app: someguy
+    spec:
+      # libp2p has no announce-address option and advertises the addresses it
+      # sees on its interfaces. On the pod network those would be unreachable
+      # 10.42.x addresses; on the host network they include the public IP.
+      hostNetwork: true
+      # The host's resolvers, deliberately not cluster DNS. someguy only needs
+      # public names (autoconf, cid.contact, /dnsaddr). With hostNetwork,
+      # ClusterFirst would also fall back to the host resolvers; Default states
+      # that intent explicitly (ClusterFirstWithHostNet would opt in to
+      # cluster DNS).
+      dnsPolicy: Default
+
+      # someguy shuts its HTTP server down within 5s of SIGTERM, then closes the
+      # DHT. 15s covers both.
+      terminationGracePeriodSeconds: 15
+
+      securityContext:
+        runAsNonRoot: true
+        # A uid with no account on the host. The image's own `ipfs` user is uid
+        # 1000, which on these hosts is the provider's `ubuntu` login account
+        # (in sudo and adm): with hostNetwork and no user namespace, an escape
+        # would have landed as that user. Verified the image runs as 10001: its
+        # binaries are world-executable and it only writes to the emptyDir
+        # below, which fsGroup makes writable.
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: someguy
+          image: someguy
+          envFrom:
+            - configMapRef:
+                name: someguy-env-vars
+          ports:
+            - name: http
+              containerPort: 8190
+              protocol: TCP
+            # 4004 is someguy's built-in libp2p default; roles/someguy opens the
+            # same port in ufw. Change both together.
+            - name: libp2p-tcp
+              containerPort: 4004
+              protocol: TCP
+            - name: libp2p-udp
+              containerPort: 4004
+              protocol: UDP
+
+          # ~70% of a 32-core / 123 GiB box. The rest is held for the
+          # bootstrapper, the content cluster node and the OS.
+          #
+          # These are a starting point, not measured need: a short local run
+          # peaked near 1 core and 0.5 GiB during the DHT crawl, with no query
+          # traffic. Tune against /debug/metrics/prometheus under real load.
+          #
+          # No CPU limit on purpose: CFS throttling adds latency on a
+          # latency-sensitive routing API, and the CPU request already
+          # guarantees this pod its share.
+          resources:
+            requests:
+              cpu: "20"
+              memory: 80Gi
+            limits:
+              memory: 86Gi
+
+          # someguy has no health endpoint. /version answers as soon as the
+          # HTTP server is up, and the server keeps answering while the
+          # accelerated DHT crawls (lookups fall back to the standard client).
+          # host: 127.0.0.1 - the API only listens on loopback, and with
+          # hostNetwork the kubelet's loopback is the same one.
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /version
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /version
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          # No preStop pause. Nothing stops sending traffic during one - there
+          # is no Service, and Envoy keeps using loopback - so it would only
+          # lengthen every rollout without cutting errors.
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: data
+              mountPath: /data/someguy
+
+      volumes:
+        # Only the autoconf cache is written. Nothing needs to survive a
+        # restart: someguy keeps its identity and caches in memory.
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi

@@ -1,0 +1,212 @@
+# Envoy as the Cloudflare origin for route-<box>.ipni.io.
+#
+# Cloudflare (Full strict) -> :443 TLS here -> 127.0.0.1:8190 (someguy).
+# Both Envoy and someguy use hostNetwork, so the upstream is plain loopback.
+
+admin:
+  # Host loopback only (hostNetwork). ufw would block it anyway; this keeps the
+  # admin API off every external interface regardless of firewall state.
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+# Cap concurrent downstream connections so a surge cannot grow Envoy's memory
+# without bound (it warns at startup when no cap is set). Only Cloudflare can
+# connect, and it pools connections to an origin, so real use should be far
+# below this.
+overload_manager:
+  resource_monitors:
+    - name: envoy.resource_monitors.global_downstream_max_connections
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+        max_active_downstream_connections: 20000
+
+static_resources:
+  listeners:
+    - name: https
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 443 }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                alpn_protocols: ["h2", "http/1.1"]
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                tls_certificates:
+                  # Cloudflare Origin CA certificate + locally generated key,
+                  # mounted from the route-origin-tls secret. Read at startup;
+                  # the Ansible role restarts Envoy when the secret changes.
+                  - certificate_chain: { filename: /etc/envoy/tls/tls.crt }
+                    private_key: { filename: /etc/envoy/tls/tls.key }
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: route_origin
+                codec_type: AUTO
+                # Edge proxy: the peer is a Cloudflare edge, so X-Forwarded-For
+                # is set from it rather than trusted. The real client address
+                # arrives in CF-Connecting-IP and is logged below.
+                use_remote_address: true
+                # Canonicalize the path BEFORE route matching. Without this the
+                # "/routing/v1/" prefix also matched /routing/v1/../debug/... and
+                # forwarded it unchanged; /debug stayed hidden only because
+                # someguy's router happens to redirect unclean paths. The
+                # allowlist must not depend on an upstream implementation detail.
+                normalize_path: true
+                merge_slashes: true
+                path_with_escaped_slashes_action: REJECT_REQUEST
+                request_headers_timeout: 10s
+                # someguy keeps a response open for up to 25s
+                # (SOMEGUY_ROUTING_TIMEOUT) while lookups run, and NDJSON
+                # streams can be silent between records for most of that.
+                stream_idle_timeout: 60s
+                common_http_protocol_options:
+                  idle_timeout: 300s
+                  headers_with_underscores_action: REJECT_REQUEST
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          time: "%START_TIME%"
+                          client: "%REQ(CF-CONNECTING-IP)%"
+                          cf_ray: "%REQ(CF-RAY)%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                          status: "%RESPONSE_CODE%"
+                          flags: "%RESPONSE_FLAGS%"
+                          bytes: "%BYTES_SENT%"
+                          duration_ms: "%DURATION%"
+                          upstream_ms: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+                http_filters:
+                  # Per-box backstop behind Cloudflare's own rate limiting rule.
+                  # No bucket is configured here: it only acts on routes that
+                  # carry a typed_per_filter_config below. Rejected requests get
+                  # 429 and an x-local-rate-limit header.
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: route_origin_ratelimit
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: route
+                  virtual_hosts:
+                    - name: route
+                      # Only our own hostnames. Reaching :443 from a Cloudflare
+                      # IP proves nothing about which zone the request came
+                      # through: ANY Cloudflare account can proxy its own
+                      # hostname to these IPs (with SSL "Full", which skips cert
+                      # validation). Anything else falls through to the 421
+                      # virtual host below. This stops casual misuse only; a
+                      # zone that rewrites Host can still get past it, which is
+                      # what Authenticated Origin Pulls addresses.
+                      #
+                      # Add the live Cloudflare router's hostname here if it
+                      # forwards a different Host.
+                      domains:
+                        - route-sing-1.ipni.io
+                        - route-lith-1.ipni.io
+                        - route-chic-1.ipni.io
+                      # ALLOWLIST, not a blocklist. someguy serves Prometheus
+                      # metrics on the same port as the API (/debug/...);
+                      # anything not listed here - including endpoints a future
+                      # someguy release adds - is never exposed publicly.
+                      routes:
+                        # IPNS publishing is deliberately open, matching the
+                        # production delegated-ipfs.dev: records are
+                        # self-certifying, but each PUT fans out to the DHT, so
+                        # it gets a much smaller bucket than lookups.
+                        - match:
+                            prefix: "/routing/v1/ipns/"
+                            headers:
+                              - name: ":method"
+                                string_match: { exact: "PUT" }
+                          route:
+                            cluster: someguy
+                            timeout: 60s
+                          typed_per_filter_config:
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: ipns_put
+                              token_bucket: { max_tokens: 50, tokens_per_fill: 20, fill_interval: 1s }
+                              filter_enabled:
+                                runtime_key: ipns_put_ratelimit_enabled
+                                default_value: { numerator: 100, denominator: HUNDRED }
+                              filter_enforced:
+                                runtime_key: ipns_put_ratelimit_enforced
+                                default_value: { numerator: 100, denominator: HUNDRED }
+                              response_headers_to_add:
+                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                  header: { key: x-local-rate-limit, value: "ipns-put" }
+                        # Lookups. A miss can hold a request for up to 25s while
+                        # someguy queries the DHT and cid.contact. The bucket is a
+                        # per-box ceiling, not a per-client limit (that is
+                        # Cloudflare's job). STARTING VALUE, not measured
+                        # capacity: tune against the route_origin_ratelimit and
+                        # someguy metrics before real traffic arrives.
+                        - match: { prefix: "/routing/v1/" }
+                          route:
+                            cluster: someguy
+                            # Above the 25s routing timeout, below Cloudflare's
+                            # 100s proxy read timeout.
+                            timeout: 60s
+                          typed_per_filter_config:
+                            envoy.filters.http.local_ratelimit:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                              stat_prefix: lookups
+                              token_bucket: { max_tokens: 2000, tokens_per_fill: 1000, fill_interval: 1s }
+                              filter_enabled:
+                                runtime_key: lookups_ratelimit_enabled
+                                default_value: { numerator: 100, denominator: HUNDRED }
+                              filter_enforced:
+                                runtime_key: lookups_ratelimit_enforced
+                                default_value: { numerator: 100, denominator: HUNDRED }
+                              response_headers_to_add:
+                                - append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                  header: { key: x-local-rate-limit, value: "lookups" }
+                        - match: { path: "/version" }
+                          route:
+                            cluster: someguy
+                            timeout: 5s
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 404
+                            body: { inline_string: "not found\n" }
+
+                    # Every other Host. 421 Misdirected Request tells a
+                    # misconfigured caller exactly what is wrong.
+                    - name: misdirected
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 421
+                            body: { inline_string: "misdirected request\n" }
+
+  clusters:
+    - name: someguy
+      type: STATIC
+      connect_timeout: 2s
+      # Envoy's default of 1024 concurrent requests is too low when each lookup
+      # can hold a request for 25s. 20000 matches the downstream connection cap
+      # above, and stays well under the ~64k source ports a single loopback
+      # upstream can use (the previous 100000 could never have been reached).
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 20000
+            max_pending_requests: 20000
+            max_requests: 20000
+      load_assignment:
+        cluster_name: someguy
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 8190 }

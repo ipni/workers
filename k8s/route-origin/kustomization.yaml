@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: route-origin
+
+resources:
+  - namespace.yaml
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: route-origin
+      app.kubernetes.io/part-of: ipfs-workers
+
+# envoyproxy/envoy distroless-v1.39.1 (2026-08-27), pinned by index digest.
+images:
+  - name: envoy
+    newName: envoyproxy/envoy
+    digest: sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
+
+# The hash suffix kustomize adds to the ConfigMap name makes any config edit
+# roll the pod, so Envoy never runs with stale config.
+configMapGenerator:
+  - name: envoy-config
+    behavior: create
+    files:
+      - envoy.yaml
+
+# The TLS secret (route-origin-tls) is deliberately NOT here: it holds the
+# private key and is created by roles/route_origin from ansible-vault.

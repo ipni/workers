@@ -1,0 +1,114 @@
+---
+# Request-level checks against Envoy on this box. Included from main.yml after
+# every deploy; kept separate so they can be run on their own.
+
+# Runs curl on the box for each case. curl, not the uri module: it must send
+# the real SNI (--resolve), send paths byte-for-byte (--path-as-is, otherwise
+# the client would clean up the traversal cases itself), and set any Host.
+# -k because the Origin CA certificate is trusted only by Cloudflare; its
+# identity was checked above by fingerprint.
+#
+# When route_origin_aop_enforced is true, requests must present the origin-pull
+# client certificate. Its key goes from the vault into an in-memory file
+# (memfd) that only curl reads: it is never written to disk and never appears
+# in a command line. no_log hides this task's output; the assert below reports
+# failures.
+#
+# Every negative case is a regression test: if any returns something else
+# (a redirect from someguy, a 200), the deploy fails.
+- name: Run the origin request checks
+  vars:
+    origin_checks:
+      # Allowlisted paths reach someguy.
+      - { path: /version, status: 200 }
+      # Proves the Envoy -> someguy wiring for lookups. It does NOT prove the
+      # DHT works: someguy answers 200 for unknown peers too.
+      - { path: /routing/v1/peers/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN, status: 200 }
+      # IPNS publishing is deliberately open: a malformed record must reach
+      # someguy and be rejected BY SOMEGUY (400), not by Envoy.
+      - { path: /routing/v1/ipns/k2k4r8jl0yz8qjgqbmc2cdu5hkqek5rj6flgnlkyywynci20j0iuyfuj, method: PUT, status: 400 }
+      # Everything else is hidden.
+      - { path: /debug/metrics/prometheus, status: 404 }
+      - { path: /, status: 404 }
+      # Path traversal is canonicalized by Envoy BEFORE matching, so no
+      # forwarded path can leave /routing/v1/. These two normalize to
+      # /routing/debug/... and hit Envoy's own 404.
+      - { path: /routing/v1/../debug/metrics/prometheus, status: 404 }
+      - { path: /routing/v1/%2e%2e/debug/metrics/prometheus, status: 404 }
+      # Here ".." only removes the EMPTY segment from the double slash (RFC
+      # 3986), giving /routing/v1/debug/metrics/prometheus: still inside the
+      # allowlisted prefix, so Envoy forwards it and someguy answers 404. Not an
+      # escape - it can never become /debug/metrics/prometheus.
+      - { path: //routing/v1//..//debug/metrics/prometheus, status: 404 }
+      # Escaped slashes are rejected by Envoy outright.
+      - { path: /routing/v1/..%2fdebug/metrics/prometheus, status: 400 }
+      # Any other Host is misdirected.
+      - { path: /version, host: evil.example.com, status: 421 }
+    # AOP only: without the origin-pull client certificate the TLS handshake
+    # is refused, so no HTTP status at all (curl reports 000).
+    origin_aop_checks:
+      - { path: /version, client_cert: false, status: "000" }
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json, os, subprocess
+        aop = os.environ["AOP_ENFORCED"] == "true"
+        cert = os.environ["CLIENT_CERT"].encode()
+        key = os.environ["CLIENT_KEY"].encode()
+        host = os.environ["ROUTE_HOSTNAME"]
+
+        def memfd(name, data):
+            fd = os.memfd_create(name)
+            os.write(fd, data)
+            return fd
+
+        cert_fd, key_fd = memfd("cert", cert), memfd("key", key)
+        results = []
+        for c in json.loads(os.environ["CHECKS"]):
+            method = c.get("method", "GET")
+            argv = ["curl", "-sk", "--path-as-is", "--max-time", "30",
+                    "--resolve", host + ":443:127.0.0.1",
+                    "-o", "/dev/null", "-w", "%{http_code}",
+                    "-X", method, "-H", "Host: " + c.get("host", host)]
+            if aop and c.get("client_cert", True):
+                argv += ["--cert", "/dev/fd/%d" % cert_fd, "--key", "/dev/fd/%d" % key_fd]
+            if method == "PUT":
+                argv += ["-H", "Content-Type: application/vnd.ipfs.ipns-record",
+                         "--data-binary", "not-a-valid-record"]
+            argv.append("https://" + host + c["path"])
+            got = subprocess.run(argv, capture_output=True, text=True,
+                                 pass_fds=(cert_fd, key_fd)).stdout.strip()
+            label = "%s %s%s%s" % (method, c.get("host", ""), c["path"],
+                                   "" if c.get("client_cert", True) else " (no client cert)")
+            results.append({"case": label, "want": str(c["status"]), "got": got})
+        print(json.dumps(results))
+  environment:
+    AOP_ENFORCED: "{{ route_origin_aop_enforced | bool | lower }}"
+    CLIENT_CERT: "{{ lookup('file', route_origin_pull_client_cert_file) if route_origin_aop_enforced | bool else '' }}"
+    CLIENT_KEY: "{{ vault_origin_pull_client_key if route_origin_aop_enforced | bool else '' }}"
+    ROUTE_HOSTNAME: "{{ route_hostname }}"
+    CHECKS: "{{ (origin_checks + (origin_aop_checks if route_origin_aop_enforced | bool else [])) | to_json }}"
+  register: origin_checks_run
+  changed_when: false
+  no_log: true
+
+
+- name: Report the origin request checks
+  vars:
+    origin_check_results: "{{ origin_checks_run.stdout | from_json }}"
+    origin_check_failures: >-
+      {%- set failed = [] -%}
+      {%- for r in origin_check_results if r.got != r.want -%}
+        {%- set _ = failed.append(r.case ~ ': want ' ~ r.want ~ ', got ' ~ (r.got or 'nothing')) -%}
+      {%- endfor -%}
+      {{ failed }}
+  ansible.builtin.assert:
+    that: origin_check_failures | length == 0
+    fail_msg: "Origin checks failed: {{ origin_check_failures }}"
+    success_msg: >-
+      {{ origin_check_results | length }} origin checks passed:
+      {{ origin_check_results | map(attribute='case') | zip(origin_check_results | map(attribute='got'))
+         | map('join', ' -> ') | list }}
+

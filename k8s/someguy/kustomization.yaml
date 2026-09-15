@@ -1,0 +1,55 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: someguy
+
+resources:
+  - namespace.yaml
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: someguy
+      app.kubernetes.io/part-of: ipfs-workers
+
+# Pinned by digest so every box runs byte-identical images and a re-pushed tag
+# cannot change what is deployed. This digest is v0.16.0 (2026-07-29), a
+# multi-arch index covering amd64.
+images:
+  - name: someguy
+    newName: ghcr.io/ipfs/someguy
+    digest: sha256:efb3817e099fe4983ec35ee1ea51e8441474b95cf0af8df4943b8468e87b921e
+
+configMapGenerator:
+  - name: someguy-env-vars
+    behavior: create
+    literals:
+      # Loopback only. Under hostNetwork this is the HOST's loopback, which is
+      # exactly where its one client lives: the route-origin Envoy proxy (also
+      # hostNetwork). The API is therefore unreachable from any interface even
+      # if ufw were disabled or misconfigured - it does not rely on the
+      # firewall. The public path is Cloudflare -> Envoy :443 -> here.
+      - SOMEGUY_LISTEN_ADDRESS=127.0.0.1:8190
+
+      # Accelerated DHT plus the autoconf `auto` endpoints (cid.contact for
+      # providers). These boxes must never become an upstream of cid.contact,
+      # or provider lookups would loop.
+      - SOMEGUY_DHT=accelerated
+      - SOMEGUY_PROVIDER_ENDPOINTS=auto
+      - SOMEGUY_PEER_ENDPOINTS=auto
+      - SOMEGUY_IPNS_ENDPOINTS=auto
+
+      # Only the autoconf cache lives here; there is no identity or datastore.
+      - SOMEGUY_DATADIR=/data/someguy
+
+      # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
+      # cgroup limit, which would let it plan past the pod's 86Gi and get
+      # OOM-killed. 64 GiB, in bytes.
+      - SOMEGUY_LIBP2P_MAX_MEMORY=68719476736
+
+      # Soft Go heap target below the 86Gi container limit, so the GC works
+      # harder before the kernel OOM-kills the pod.
+      - GOMEMLIMIT=80GiB
+
+      - GOLOG_LOG_LEVEL=error,someguy=info
+      - GOLOG_LOG_FMT=json

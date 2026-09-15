@@ -52,6 +52,22 @@
     name: "{{ admin_user }}"
     password: '!'
 
+# The provider image ships a `ubuntu` login account (uid 1000, in sudo and
+# adm). Nothing uses it: its password is locked, it has no SSH keys, and SSH
+# only admits the admin user. Console recovery uses root. It is removed so uid
+# 1000 is not a real, privileged login - several images default to uid 1000
+# (someguy's, and k3s's own metrics-server, which still runs as 1000), and a
+# container escape as that uid would otherwise land in this account.
+#
+# Removal is safe while containers run as uid 1000: userdel only refuses for
+# host processes (it skips processes whose root differs from its own, i.e.
+# containers), and a running container only ever sees the numeric uid.
+- name: Remove the unused provider `ubuntu` account
+  ansible.builtin.user:
+    name: ubuntu
+    state: absent
+    remove: true
+
 # ---------------------------------------------------------------------------
 # 2. HARD GATE - prove the new access path before removing the old one
 # ---------------------------------------------------------------------------

@@ -1,0 +1,305 @@
+---
+# route-origin: Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io,
+# proxying an allowlist of paths to someguy on loopback.
+#
+#   Cloudflare edge --(Full strict, Origin CA cert)--> :443 Envoy --> 127.0.0.1:8190
+#
+# Only Cloudflare's ranges may reach :443 (ufw). That rule is only effective
+# because Envoy runs with hostNetwork - see k8s/route-origin/deployment.yaml.
+
+# ---------------------------------------------------------------------------
+# Preflight, on the controller, before anything on the box changes. A cert
+# that does not match the key, misses a hostname, or is about to expire would
+# put Envoy into a crash loop or make Cloudflare return 526s.
+# ---------------------------------------------------------------------------
+- name: Check the origin certificate is present
+  ansible.builtin.stat:
+    path: "{{ route_origin_cert_file }}"
+  delegate_to: localhost
+  become: false
+  register: origin_cert_stat
+
+- name: Stop if the origin certificate has not been issued yet
+  ansible.builtin.fail:
+    msg: >-
+      No origin certificate at {{ route_origin_cert_file }}. Create it in
+      Cloudflare (SSL/TLS > Origin Server > Create Certificate > "Use my
+      private key and CSR") from certs/route-origin.csr, then save the PEM
+      certificate to that path.
+  when: not origin_cert_stat.stat.exists
+
+- name: Read the certificate's public key
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ route_origin_cert_file }}", -noout, -pubkey]
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: origin_cert_pubkey
+
+# no_log: the private key is passed on stdin.
+- name: Derive the public key from the vaulted private key
+  ansible.builtin.command:
+    argv: [openssl, pkey, -pubout]
+    stdin: "{{ vault_route_origin_tls_key }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  no_log: true
+  register: origin_key_pubkey
+
+- name: Fail if the certificate was not issued for the vaulted key
+  ansible.builtin.assert:
+    that: origin_cert_pubkey.stdout | trim == origin_key_pubkey.stdout | trim
+    fail_msg: >-
+      {{ route_origin_cert_file }} does not belong to vault_route_origin_tls_key.
+      Was the certificate generated from certs/route-origin.csr?
+    quiet: true
+  run_once: true
+
+- name: Check the certificate is not close to expiry
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ route_origin_cert_file }}"
+      - -noout
+      - -checkend
+      - "{{ (route_origin_cert_min_days | int) * 86400 }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: origin_cert_expiry
+  failed_when: origin_cert_expiry.rc != 0
+
+- name: Read the certificate's hostnames
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ route_origin_cert_file }}", -noout, -ext, subjectAltName]
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: origin_cert_sans
+
+# Accepts an exact name or a wildcard. A wildcard covers exactly one label, so
+# *.ipni.io matches route-chic-1.ipni.io but not a.route-chic-1.ipni.io.
+# (Cloudflare issues for the hostnames entered in its dashboard, not the CSR's
+# SANs: the current certificate is *.ipni.io.)
+- name: Fail if the certificate does not cover this box's hostname
+  vars:
+    origin_cert_names: "{{ origin_cert_sans.stdout | regex_findall('DNS:([^,\\s]+)') }}"
+  ansible.builtin.assert:
+    that: >-
+      route_hostname in origin_cert_names
+      or ('*.' ~ (route_hostname.split('.', 1) | last)) in origin_cert_names
+    fail_msg: "Origin certificate does not cover {{ route_hostname }}; it lists {{ origin_cert_names }}"
+    quiet: true
+
+- name: Fail if the origin-pull client certificate is not signed by our CA
+  ansible.builtin.command:
+    argv: [openssl, verify, -CAfile, "{{ route_origin_pull_ca_file }}", "{{ route_origin_pull_client_cert_file }}"]
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  when: route_origin_aop_enforced | bool
+
+- name: Fail if the origin-pull client certificate is close to expiry
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ route_origin_pull_client_cert_file }}"
+      - -noout
+      - -checkend
+      - "{{ (route_origin_cert_min_days | int) * 86400 }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  when: route_origin_aop_enforced | bool
+
+- name: Record the expected certificate fingerprint
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ route_origin_cert_file }}", -noout, -fingerprint, -sha256]
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+  register: origin_cert_fingerprint
+
+# ---------------------------------------------------------------------------
+# Host prerequisites
+# ---------------------------------------------------------------------------
+# Envoy runs as a non-root user and must bind :443. Kubernetes does not give
+# added capabilities to non-root processes, so instead lower the host's
+# privileged-port floor to 443. Envoy shares the host network namespace, so
+# the host value is what applies. Nothing on these boxes uses 443-1023, and
+# ufw still decides what is reachable.
+- name: Allow unprivileged processes to bind port 443 and above
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_unprivileged_port_start
+    value: "443"
+    sysctl_file: /etc/sysctl.d/99-route-origin.conf
+    state: present
+    reload: true
+
+- name: Allow HTTPS to the origin from Cloudflare's edge only
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "443"
+    from_ip: "{{ item }}"
+    comment: cloudflare origin
+  loop: "{{ route_origin_cloudflare_ranges }}"
+
+# Keep ufw in step with the pinned list in BOTH directions: a range dropped
+# from route_origin_cloudflare_ranges must lose its rule too, or 443 would stay
+# open to addresses Cloudflare no longer uses. Only rules this role created
+# (comment "cloudflare origin") are considered.
+# To check the pinned list against Cloudflare: scripts/check-cloudflare-ranges.sh
+- name: Read the Cloudflare rules currently in ufw
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      ufw status | grep '# cloudflare origin' |
+      awk '{for (i = 1; i <= NF; i++) if ($i == "ALLOW") print $(i + 1)}'
+    executable: /bin/bash
+  register: origin_ufw_sources
+  changed_when: false
+  check_mode: false
+
+- name: Remove ufw rules for ranges no longer on the pinned list
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    port: "443"
+    from_ip: "{{ item }}"
+    delete: true
+  loop: "{{ origin_ufw_sources.stdout_lines | difference(route_origin_cloudflare_ranges) }}"
+
+# ---------------------------------------------------------------------------
+# TLS secret. Created here rather than in kustomize so the private key never
+# lands in a manifest or on disk in plaintext: it goes from the vault straight
+# to the API server.
+# ---------------------------------------------------------------------------
+- name: Check whether the route-origin namespace exists yet
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, namespace, route-origin, --ignore-not-found, -o, name]
+  register: origin_ns
+  changed_when: false
+  check_mode: false
+
+- name: Ensure the route-origin namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: Namespace
+    name: route-origin
+    state: present
+
+# On a first deploy under --check the namespace above is only simulated, and a
+# dry-run create of the secret fails with "namespace not found". Skip it then;
+# the preflight checks have already validated the certificate and key.
+- name: Note that the secret dry run is skipped on a first deploy
+  ansible.builtin.debug:
+    msg: "route-origin namespace does not exist yet; skipping the TLS secret dry run."
+  when:
+    - ansible_check_mode
+    - not origin_ns.stdout
+
+- name: Install the origin certificate and key as a TLS secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/tls
+      metadata:
+        name: route-origin-tls
+        namespace: route-origin
+      # ca.crt (the public CA client certificates must chain to) is added only
+      # when AOP is enforced, so the secret is unchanged while it is deferred.
+      data: >-
+        {{ {'tls.crt': lookup('file', route_origin_cert_file) | b64encode,
+            'tls.key': vault_route_origin_tls_key | b64encode}
+           | combine({'ca.crt': lookup('file', route_origin_pull_ca_file) | b64encode}
+                     if route_origin_aop_enforced | bool else {}) }}
+  no_log: true
+  register: origin_tls_secret
+  when: not ansible_check_mode or origin_ns.stdout
+
+- name: Deploy the route-origin manifests
+  ansible.builtin.include_role:
+    name: kustomize_apply
+  vars:
+    kustomize_app: route-origin
+    kustomize_namespace: route-origin
+    kustomize_deployment: route-origin
+
+# Envoy reads the certificate files once at startup, so a changed secret needs
+# a new pod. Skip the restart when the apply above already rolled the pod (new
+# deployment, or a changed config hash): the new pod mounted the updated secret,
+# and a second restart would just be a second blip. If that assumption were ever
+# wrong, the served-fingerprint check below fails the deploy.
+- name: Restart Envoy to load a changed certificate
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=route-origin, rollout, restart, deployment/route-origin]
+  when:
+    - not ansible_check_mode
+    - origin_tls_secret is changed
+    - not kustomize_deployment_rolled
+  register: origin_restart
+  changed_when: true
+
+- name: Wait for the Envoy restart to complete
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=route-origin, rollout, status, deployment/route-origin, --timeout=300s]
+  when: origin_restart is changed
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Verification, on the box: the right certificate is served, allowlisted
+# paths reach someguy, and everything else (notably /debug/) does not.
+# ---------------------------------------------------------------------------
+- name: Read the certificate Envoy is actually serving
+  ansible.builtin.shell:
+    # No pipefail on purpose: with AOP enforced this client presents no
+    # certificate, so s_client exits non-zero once Envoy aborts the handshake.
+    # The server certificate has already been sent by then, and x509 exits 0
+    # only if it actually parsed one.
+    cmd: >-
+      openssl s_client -connect 127.0.0.1:443 -servername {{ route_hostname }} </dev/null 2>/dev/null
+      | openssl x509 -noout -fingerprint -sha256
+    executable: /bin/bash
+  register: origin_served_fingerprint
+  changed_when: false
+  retries: 6
+  delay: 5
+  until: origin_served_fingerprint.rc == 0
+  when: not ansible_check_mode
+
+- name: Fail if Envoy is serving a different certificate
+  ansible.builtin.assert:
+    that: origin_served_fingerprint.stdout | trim == origin_cert_fingerprint.stdout | trim
+    fail_msg: >-
+      Envoy serves {{ origin_served_fingerprint.stdout | trim }} but the expected
+      certificate is {{ origin_cert_fingerprint.stdout | trim }}.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Run the origin request checks
+  ansible.builtin.include_tasks: verify.yml
+  when: not ansible_check_mode

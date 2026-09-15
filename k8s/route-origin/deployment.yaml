@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: route-origin
+spec:
+  replicas: 1
+  # hostNetwork binds :443 on the node, so a replacement pod cannot start while
+  # the old one holds it. Recreate avoids a rolling-update deadlock.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: route-origin
+  template:
+    metadata:
+      labels:
+        app: route-origin
+    spec:
+      # Why hostNetwork: ufw restricts :443 to Cloudflare's IP ranges, and ufw
+      # only sees traffic addressed to the host. A LoadBalancer or hostPort
+      # would DNAT the traffic into FORWARD, where kube-proxy's rules accept it
+      # before ufw's and the allowlist would silently not apply.
+      #
+      # It also makes the upstream plain loopback: someguy is hostNetwork too.
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 45
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532     # the distroless image's nonroot user
+        runAsGroup: 65532
+        fsGroup: 65532       # lets Envoy read the mounted TLS secret
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: envoy
+          image: envoy
+          args:
+            - -c
+            - /etc/envoy/config/envoy.yaml
+            # Envoy defaults to one worker per core (32 here). A small pool is
+            # ample for proxying to loopback and leaves CPU for someguy.
+            - --concurrency
+            - "4"
+            # Hot restart uses shared memory under /dev/shm and is not needed:
+            # Kubernetes restarts the pod instead.
+            - --disable-hot-restart
+          ports:
+            - name: https
+              containerPort: 443
+              protocol: TCP
+
+          # Binding :443 as a non-root user relies on the host's
+          # net.ipv4.ip_unprivileged_port_start being <= 443, which
+          # roles/route_origin sets. Kubernetes does not grant added
+          # capabilities to non-root processes, so NET_BIND_SERVICE alone
+          # would not work.
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+
+          # The admin listener is bound to 127.0.0.1; with hostNetwork that is
+          # the host's loopback, which is where the kubelet runs the probe.
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /ready
+              port: 9901
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /ready
+              port: 9901
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          # Give in-flight lookups (up to 25s) time to finish before SIGTERM.
+          # Uses the kubelet's built-in sleep action: the distroless image has
+          # no shell or sleep binary, and Envoy's admin API rejects state
+          # changes over GET, so neither an exec nor an httpGet hook would work.
+          # Cloudflare keeps sending new requests to this single origin during
+          # the pause, so a restart is still a brief blip, not a drain.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 20
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Separate, non-nested paths: mounting the secret INSIDE the
+            # read-only ConfigMap volume would require creating a directory in
+            # a read-only filesystem at container start.
+            - name: config
+              mountPath: /etc/envoy/config
+              readOnly: true
+            - name: tls
+              mountPath: /etc/envoy/tls
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: envoy-config
+        - name: tls
+          secret:
+            secretName: route-origin-tls
+            defaultMode: 0440

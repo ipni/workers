@@ -1,0 +1,63 @@
+---
+# someguy: Delegated Routing V1 HTTP server, the primary workload on each box.
+# Manifests live in k8s/someguy (kustomize). This role owns someguy's firewall
+# ports; shipping, applying and waiting are shared via roles/kustomize_apply.
+
+# ---------------------------------------------------------------------------
+# Firewall. Only libp2p is opened; the HTTP API listens on loopback only.
+#
+# 4004 is hardcoded on purpose: it is someguy's built-in libp2p default, and
+# the containerPorts in k8s/someguy/deployment.yaml use it too. A variable here
+# would only move the firewall hole, not the port someguy listens on.
+# ---------------------------------------------------------------------------
+- name: Allow someguy libp2p traffic (TCP)
+  community.general.ufw:
+    rule: allow
+    port: "4004"
+    proto: tcp
+    comment: someguy libp2p
+
+- name: Allow someguy libp2p traffic (UDP - QUIC, WebTransport, WebRTC)
+  community.general.ufw:
+    rule: allow
+    port: "4004"
+    proto: udp
+    comment: someguy libp2p
+
+# someguy used to have a ClusterIP Service. It was removed when the API moved
+# to loopback-only: its endpoint (node IP :8190) no longer answers. Removing a
+# file from a kustomization does not delete the live object - `kubectl apply`
+# does not prune - so delete it explicitly. Safe to keep: absent is a no-op.
+- name: Remove the obsolete someguy Service
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: Service
+    name: someguy
+    namespace: someguy
+    state: absent
+
+- name: Deploy the someguy manifests
+  ansible.builtin.include_role:
+    name: kustomize_apply
+  vars:
+    kustomize_app: someguy
+    kustomize_namespace: someguy
+    kustomize_deployment: someguy
+    kustomize_rollout_timeout: "{{ someguy_rollout_timeout }}"
+
+# Proves the API answers on the node, not just that the pod is Ready.
+- name: Confirm the someguy API answers locally
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8190/version
+    return_content: true
+  register: someguy_version
+  retries: 6
+  delay: 5
+  until: someguy_version.status == 200
+  when: not ansible_check_mode
+
+- name: Report the running version
+  ansible.builtin.debug:
+    msg: "someguy on {{ inventory_hostname }}: {{ someguy_version.content | trim }}"
+  when: not ansible_check_mode

@@ -63,6 +63,16 @@ sysctl_tuning:
   net.core.somaxconn: 4096
   net.ipv4.tcp_max_syn_backlog: 8192
   net.ipv4.ip_local_port_range: "1024 65535"
+  # Host-network listeners that sit INSIDE the ephemeral range above. Without
+  # this, any outbound socket (someguy's DHT crawl alone opens ~800) can be
+  # handed one of these numbers as its source port; a pod restarting under
+  # `Recreate` then fails to re-bind with "address already in use".
+  # Reserving only stops the kernel choosing them for outbound connections;
+  # explicit binds still work. Update when a host-network port is added:
+  #   443 Envoy (outside the range today, kept for safety)  4004 someguy libp2p
+  #   6443-6444 k3s API  8190 someguy API  8472/udp flannel VXLAN
+  #   9901 Envoy admin  10010 containerd  10248-10259 kubelet/kube-proxy/k3s
+  net.ipv4.ip_local_reserved_ports: "443,4004,6443-6444,8190,8472,9901,10010,10248-10259"
   net.ipv4.tcp_fin_timeout: 15
   # Must equal what k3s's kube-proxy sets on every start: max(32768 * CPUs,
   # 131072), i.e. 1048576 on these 32-core boxes. A fixed lower value both

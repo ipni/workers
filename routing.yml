@@ -1,0 +1,23 @@
+---
+# Deploy the routing service to the prepared boxes:
+#   someguy        Delegated Routing V1 server (hostNetwork, libp2p on 4004)
+#   route_origin   Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io
+#
+#   ansible-playbook routing.yml                     # all three boxes
+#   ansible-playbook routing.yml -l chic-1           # one box
+#   ansible-playbook routing.yml --tags origin       # only the origin
+#   ansible-playbook routing.yml --check --diff      # dry run
+#
+# Requires site.yml to have run first: this connects as the hardened admin
+# user and expects k3s to be up.
+
+- name: Deploy the routing service
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: someguy
+      tags: [someguy]
+    - role: route_origin
+      tags: [origin]

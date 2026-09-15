@@ -1,0 +1,62 @@
+---
+# Public hostname Cloudflare proxies to this box, e.g. route-chic-1.ipni.io.
+# Deliberately not named after someguy: the implementation may change.
+route_hostname: "route-{{ inventory_hostname }}.ipni.io"
+
+# Cloudflare Origin CA certificate covering every route_hostname. Public, so it
+# is committed. Its private key is vault_route_origin_tls_key
+# (group_vars/ipfs_nodes/vault.yml), generated locally with certs/route-origin.csr.
+route_origin_cert_file: "{{ playbook_dir }}/certs/route-origin.crt"
+
+# Fail the deploy if the certificate expires within this many days.
+route_origin_cert_min_days: 30
+
+# Authenticated Origin Pulls - DEFERRED (false). Leave false until the client
+# certificate is uploaded to every Cloudflare zone that sends traffic here
+# (ipni.io, and the live router's zone once the boxes join it). Enabling it
+# means BOTH setting this to true AND adding the require_client_certificate /
+# validation_context block to k8s/route-origin/envoy.yaml - see the README.
+route_origin_aop_enforced: false
+
+# Authenticated Origin Pulls. When enforced, Envoy requires every TLS client to present a
+# certificate signed by this private CA. The client certificate is uploaded to
+# Cloudflare as the ipni.io zone-level AOP certificate; its key is
+# vault_origin_pull_client_key, the CA key vault_origin_pull_ca_key.
+# If the client certificate expires, Cloudflare presents an expired cert and
+# Envoy rejects ALL traffic, so it gets the same expiry preflight as above.
+route_origin_pull_ca_file: "{{ playbook_dir }}/certs/origin-pull-ca.crt"
+route_origin_pull_client_cert_file: "{{ playbook_dir }}/certs/origin-pull-client.crt"
+
+# Cloudflare's published edge ranges: the only sources allowed to reach :443.
+#
+# Pinned rather than fetched at deploy time, so a deploy never depends on
+# cloudflare.com and the allowlist only changes through a reviewed commit.
+# Source: https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6
+# (cross-checked with https://api.cloudflare.com/client/v4/ips), fetched
+# 2026-09-14. Cloudflare changes these rarely; re-check periodically.
+#
+# Removing a range here does NOT delete its existing ufw rule; delete stale
+# rules by hand (ufw status numbered / ufw delete N).
+route_origin_cloudflare_ranges:
+  - 173.245.48.0/20
+  - 103.21.244.0/22
+  - 103.22.200.0/22
+  - 103.31.4.0/22
+  - 141.101.64.0/18
+  - 108.162.192.0/18
+  - 190.93.240.0/20
+  - 188.114.96.0/20
+  - 197.234.240.0/22
+  - 198.41.128.0/17
+  - 162.158.0.0/15
+  - 104.16.0.0/13
+  - 104.24.0.0/14
+  - 172.64.0.0/13
+  - 131.0.72.0/22
+  - 2400:cb00::/32
+  - 2606:4700::/32
+  - 2803:f800::/32
+  - 2405:b500::/32
+  - 2405:8100::/32
+  - 2a06:98c0::/29
+  - 2c0f:f248::/32
