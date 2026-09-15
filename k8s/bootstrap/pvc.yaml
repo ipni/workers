@@ -1,0 +1,15 @@
+# kubo's repo: the config written at first start, plus the leveldb datastore
+# holding DHT provider/IPNS records peers send to this server and the
+# peerstore. No blocks are stored (Bitswap is off). Losing it is survivable -
+# the identity is re-created from the vault - but it keeps records and peer
+# knowledge across restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kubo-repo
+spec:
+  storageClassName: local-path
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi

@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bootstrap
+
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: bootstrap
+      app.kubernetes.io/part-of: ipfs-workers
+
+# ipfs/kubo v0.43.1 (published 2026-09-15 00:52 UTC), multi-arch index, pinned by digest.
+# Shipyard stops maintaining kubo on 2026-09-30: upgrades are deliberate, and
+# go-libp2p / kubo security advisories need watching.
+images:
+  - name: kubo
+    newName: ipfs/kubo
+    digest: sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
+
+# The kubo config Secret (kubo-config) is deliberately NOT here: it holds the
+# node's private key and is created by roles/bootstrap from ansible-vault.

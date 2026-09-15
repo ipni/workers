@@ -1,0 +1,63 @@
+---
+# Deploy the IPFS/libp2p bootstrap nodes (kubo, DHT server) to the prepared boxes.
+#
+#   ansible-playbook bootstrap.yml                  # all three boxes
+#   ansible-playbook bootstrap.yml -l chic-1        # one box
+#   ansible-playbook bootstrap.yml --check --diff   # dry run
+#
+# Requires site.yml to have run first (admin user, k3s, reserved ports).
+
+- name: Deploy the bootstrapper
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: bootstrap
+      tags: [bootstrap]
+
+# Peering is only meaningful once every box runs, so it is checked last, across
+# the whole group: each bootstrapper must be connected to the other two. With
+# -l (a partial run) the check still reports, but does not fail.
+- name: Verify the bootstrappers are peered with each other
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  tags: [bootstrap]
+  vars:
+    other_peer_ids: >-
+      {{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname)
+         | map('extract', hostvars, 'bootstrap_peer_id') | list }}
+    full_run: "{{ ansible_play_hosts_all | length == groups['ipfs_nodes'] | length }}"
+  tasks:
+    - name: Wait for connections to the other bootstrappers
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=bootstrap, exec, deploy/bootstrap, -c, kubo, --,
+               sh, -c, 'exec ipfs --api=/ip4/127.0.0.1/tcp/5011 --api-auth="$KUBO_API_AUTH" swarm peers']
+      register: bootstrap_peers
+      changed_when: false
+      # Peering dials in the background; allow up to two minutes.
+      retries: 12
+      delay: 10
+      until: >-
+        bootstrap_peers.rc == 0
+        and other_peer_ids | reject('in', bootstrap_peers.stdout) | list | length == 0
+      failed_when: false   # reported, and asserted below
+      # On a partial run (-l) the other bootstrappers may not exist yet, so
+      # waiting for them would only burn two minutes.
+      when:
+        - not ansible_check_mode
+        - full_run | bool
+
+    - name: Report peering
+      vars:
+        missing_peer_ids: "{{ other_peer_ids | reject('in', bootstrap_peers.stdout | default('')) | list }}"
+      ansible.builtin.assert:
+        that: missing_peer_ids | length == 0 or not full_run
+        fail_msg: "{{ inventory_hostname }} is not connected to bootstrappers {{ missing_peer_ids }}"
+        success_msg: >-
+          {{ inventory_hostname }}:
+          {{ ('peering not checked (partial run)') if not full_run | bool else
+             (bootstrap_peers.stdout_lines | length | string) ~ ' peers; connected to all other bootstrappers' }}
+      when: not ansible_check_mode

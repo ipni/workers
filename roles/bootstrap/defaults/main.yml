@@ -1,0 +1,24 @@
+---
+# libp2p swarm port (TCP, and UDP for QUIC / WebTransport / WebRTC-direct).
+# Must match k8s/bootstrap/deployment.yaml and roles/bootstrap/files/kubo-config.json.
+bootstrap_swarm_port: 4001
+
+# Loopback-only RPC API (probes, metrics, `ipfs` CLI via kubectl exec).
+bootstrap_api: /ip4/127.0.0.1/tcp/5011
+
+# Public bootstrap peers this node dials to join the network: kubo v0.43.1's
+# default list (from its built-in autoconf fallback), pinned here because the
+# kubo config disables autoconf - it is fetched from a Shipyard-operated URL
+# that may stop after 2026-09-30. The other boxes' bootstrappers are appended
+# per host by the role. These operators are also winding down; review the list.
+bootstrap_public_peers:
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt
+  - /dnsaddr/va1.bootstrap.libp2p.io/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8
+  - /ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
+  - /ip4/104.131.131.82/udp/4001/quic-v1/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
+
+# Public DNS name the bootstrap addresses are published under (/dnsaddr).
+bootstrap_dns_name: bootstrap.ipni.io

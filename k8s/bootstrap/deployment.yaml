@@ -1,0 +1,216 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bootstrap
+spec:
+  replicas: 1
+  # hostNetwork binds 4001 and 5011 on the node, so a second pod cannot start
+  # while the old one holds them; Recreate stops the old pod first. A restart is
+  # a short outage for this bootstrapper. Clients using the shared
+  # /dnsaddr/bootstrap.ipni.io name try the other nodes; peers holding only
+  # this box's address (e.g. the other bootstrappers' Peering) reconnect once
+  # it is back.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bootstrap
+  template:
+    metadata:
+      labels:
+        app: bootstrap
+    spec:
+      # libp2p advertises the addresses it sees on its interfaces. On the host
+      # network that includes the public IP; the server profile's NoAnnounce and
+      # AddrFilters drop the k3s 10.42/10.43 and other non-public addresses.
+      hostNetwork: true
+      # Public DNS only (resolving /dnsaddr bootstrap entries); no cluster DNS.
+      dnsPolicy: Default
+
+      # Internal.ShutdownTimeout is 30s in the kubo config; allow a margin.
+      terminationGracePeriodSeconds: 45
+
+      securityContext:
+        # A uid with no host account. The image defaults to root, and its
+        # `ipfs` user is uid 1000, which several images share on these hosts.
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        fsGroup: 10002
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # Loads the managed config on EVERY start, then refuses to continue if
+        # the repo's identity is not the expected PeerID - a wrong identity
+        # silently breaks every published bootstrap address.
+        #
+        #   first start:  `ipfs init config.json` - the only way to set the
+        #                 private key (kubo rejects it through `ipfs config`).
+        #   later starts: `ipfs repo migrate`, then `ipfs config replace
+        #                 config-nokey.json` - applies setting changes but keeps
+        #                 the repo's identity; kubo refuses a replacement that
+        #                 contains a private key.
+        #
+        # The migrate step must come first: after a kubo upgrade that changes
+        # the repo version, EVERY command that opens the repo (config replace
+        # included) exits with "ipfs repo needs migration", so the init
+        # container would crash-loop before the daemon's --migrate=true could
+        # run. On a current repo it is a no-op. Verified with a repo created by
+        # kubo v0.36.0 (repo 16): migrates 16 -> 18 with embedded migrations.
+        #
+        # The image's own entrypoint is not used: on first init it binds the
+        # admin API and gateway to 0.0.0.0, which under hostNetwork would make
+        # the unauthenticated RPC API public.
+        #
+        # Configs are passed on STDIN, not as a path. Secret volumes mount
+        # each key as a symlink (config.json -> ..data/config.json), and kubo
+        # does not follow symlinks for file arguments: it reads the link target
+        # text "..data/config.json" as the config and fails with
+        # "invalid character '.' looking for beginning of value".
+        - name: kubo-config
+          image: kubo
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              expected="$(cat /config/peer-id)"
+              if [ ! -f "$IPFS_PATH/config" ]; then
+                echo "fresh repo: initialising with the managed identity"
+                ipfs init - < /config/config.json >/dev/null
+              else
+                echo "existing repo: migrating if needed, then applying the managed config"
+                ipfs repo migrate
+                ipfs config replace - < /config/config-nokey.json
+              fi
+              actual="$(ipfs config Identity.PeerID)"
+              if [ "$actual" != "$expected" ]; then
+                echo "IDENTITY MISMATCH: repo has $actual, expected $expected - refusing to start" >&2
+                exit 1
+              fi
+              echo "identity OK: $actual"
+          env:
+            - name: IPFS_PATH
+              value: /data/ipfs
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: repo
+              mountPath: /data/ipfs
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      containers:
+        - name: kubo
+          image: kubo
+          # tini + ipfs directly, bypassing the image entrypoint (see above).
+          command: ["/sbin/tini", "--", "ipfs"]
+          args: ["daemon", "--migrate=true"]
+          env:
+            - name: IPFS_PATH
+              value: /data/ipfs
+            - name: HOME
+              value: /tmp
+            # kubo raises its own fd soft limit only to 8192 unless told.
+            - name: IPFS_FD_MAX
+              value: "65536"
+            # Soft heap target below the 16Gi limit; the libp2p resource
+            # manager is capped separately at 8GiB in the kubo config.
+            - name: GOMEMLIMIT
+              value: 12GiB
+            - name: IPFS_TELEMETRY
+              value: "off"
+            # RPC bearer token for probes and CLI calls (kubo's --api-auth takes
+            # no env var or config fallback). Expanded inside `sh -c` below, so
+            # it only appears in argv of processes in THIS container's PID
+            # namespace - not visible to someguy's or Envoy's containers.
+            - name: KUBO_API_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: kubo-config
+                  key: api-auth
+          ports:
+            # 4001 carries TCP and, on UDP, QUIC, WebTransport and
+            # WebRTC-direct. roles/bootstrap opens the same port in ufw.
+            - name: libp2p-tcp
+              containerPort: 4001
+              protocol: TCP
+            - name: libp2p-udp
+              containerPort: 4001
+              protocol: UDP
+
+          # Shares the ~30% of each box not reserved for someguy with the
+          # future content cluster node. A CPU limit is set here (unlike
+          # someguy): Go sizes GOMAXPROCS from it, and a bootstrapper is not
+          # latency-critical.
+          #
+          # Requests follow observed use (about 20 minutes after deploy: 15-43m
+          # CPU, 153-262Mi, 900-1800 peers), with headroom, so the reservation
+          # is not taken from the content node. Limits keep room for growth.
+          # Tune from libp2p_rcmgr_* metrics.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+
+          # The RPC API is POST-only and token-protected, so httpGet probes
+          # cannot be used. Startup and readiness exec `ipfs diag healthy`.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", 'exec ipfs --api=/ip4/127.0.0.1/tcp/5011 --api-auth="$KUBO_API_AUTH" diag healthy']
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # Repo migrations run in the init container, before this probe
+            # starts; this only covers daemon startup (datastore open, listeners).
+            failureThreshold: 30
+          # Liveness is a plain TCP check: an exec of the full ipfs CLI counts
+          # against this container's CPU limit, so a busy node could throttle
+          # its own probe into a restart. Readiness still runs diag healthy.
+          livenessProbe:
+            tcpSocket:
+              host: 127.0.0.1
+              port: 5011
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", 'exec ipfs --api=/ip4/127.0.0.1/tcp/5011 --api-auth="$KUBO_API_AUTH" diag healthy']
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: repo
+              mountPath: /data/ipfs
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: repo
+          persistentVolumeClaim:
+            claimName: kubo-repo
+        - name: config
+          secret:
+            secretName: kubo-config
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

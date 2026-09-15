@@ -1,0 +1,5 @@
+---
+# Permanent libp2p identity of this box's bootstrapper. Public: it appears in
+# every /dnsaddr record and client bootstrap list, so it must never change.
+# The private key is vault_bootstrap_privkey in vault.yml next to this file.
+bootstrap_peer_id: 12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f

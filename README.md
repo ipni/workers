@@ -4,9 +4,10 @@ Ansible base preparation for three geographically distributed hosts that will
 run IPFS-related services (someguy, a bootstrapper node, and the "content
 cluster" node serving website content and documentation).
 
-`site.yml` prepares the boxes; `routing.yml` deploys the routing service (someguy, the primary
-workload, behind an Envoy origin for Cloudflare). The bootstrapper and content
-cluster node come later.
+`site.yml` prepares the boxes; `bootstrap.yml` deploys the public bootstrap
+nodes; `routing.yml` deploys the routing service (someguy, the primary
+workload, behind an Envoy origin for Cloudflare). The content cluster node
+comes later.
 
 | Box    | Site      | IP              | Role                   |
 |--------|-----------|-----------------|------------------------|
@@ -344,6 +345,180 @@ To enable, **in this order**:
 **If the client certificate expires, Envoy rejects all traffic.** The
 preflight fails deploys 30 days before that.
 
+## Bootstrap nodes: bootstrap.ipni.io
+
+Each box runs a public IPFS/libp2p **bootstrap peer**: a kubo node that new
+peers dial to join the network. It is a DHT server with no content exchange.
+
+```bash
+ansible-playbook bootstrap.yml                 # all three boxes (also checks peering)
+ansible-playbook bootstrap.yml -l chic-1       # one box
+ansible-playbook bootstrap.yml --check --diff  # dry run
+```
+
+| Box    | PeerID                                                 | Name                        |
+|--------|--------------------------------------------------------|-----------------------------|
+| sing-1 | `12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f` | sing-1.bootstrap.ipni.io |
+| lith-1 | `12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u` | lith-1.bootstrap.ipni.io |
+| chic-1 | `12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt` | chic-1.bootstrap.ipni.io |
+
+Clients use `/dnsaddr/bootstrap.ipni.io/p2p/<PeerID>`, one entry per box.
+
+**Why kubo, pinned.** Four of the official `bootstrap.libp2p.io` nodes run
+kubo, verified by identify: `kubo/0.43.0/.../bootstrap.libp2p.io`. It is the
+only option with TCP, QUIC, WebTransport and WebRTC-direct *and* real
+connection/resource limits, which matters on a box it shares. **Shipyard ends
+its IPFS work on 2026-09-30**
+([announcement](https://ipshipyard.com/blog/2026-the-end-of-ipfs-at-shipyard/)):
+kubo loses its maintainers, and the official bootstrap nodes and
+`delegated-ipfs.dev` lose their operator. So the image is pinned by digest
+(v0.43.1), upgrades are deliberate, and nothing depends on Shipyard-run services
+(autoconf is off, AutoTLS is off).
+
+**The identity is permanent.** A PeerID is published in DNS and hardcoded by
+clients; if it changed, every bootstrap address would break.
+
+- **Key:** stored only as `vault_bootstrap_privkey` in `host_vars/<box>/vault.yml`.
+  For a new box, `scripts/new-bootstrap-identity.sh <box>` generates it and
+  writes both files, and it refuses to replace an existing identity.
+- **PeerID:** public, in `host_vars/<box>/bootstrap.yml`.
+- **Preflight:** before touching a box, the role derives the PeerID from the
+  vaulted key (`scripts/libp2p_identity.py`, no kubo needed) and fails on a
+  mismatch. A typo is caught before DNS or a node ever uses it.
+- **Config:** Ansible builds each box's full kubo config from
+  `roles/bootstrap/files/kubo-config.json` (committed, no secrets), plus the
+  box's identity, the bootstrap list and peering. The result is a Secret.
+- **Init container, on every start:** `ipfs init` on the first start (the only
+  way kubo accepts a private key). Afterwards, `ipfs repo migrate` then
+  `ipfs config replace` with a key-less copy (kubo refuses a replace that
+  contains a key). **It then refuses to start if the repo's PeerID is not the
+  expected one.**
+- **Configs are fed on stdin.** Secret files are symlinks, and kubo reads a
+  symlinked file argument as the link target text
+  (`invalid character '.' looking for beginning of value`).
+- **The image entrypoint is bypassed.** On first init it binds the
+  unauthenticated RPC API to `0.0.0.0`, which with `hostNetwork` would be public.
+
+**Configuration** (`server` and `autoconf-off` profiles, plus):
+
+- `Routing.Type=dhtserver`;
+- Bitswap off and providing off, so no content is stored;
+- AutoNAT service off and relay service on, matching the official nodes;
+- AutoTLS off;
+- listens on 4001 (TCP, QUIC, WebTransport, WebRTC-direct);
+- API on `127.0.0.1:5011` only, no gateway, and **token-protected**
+  (`API.Authorizations`, per-box `vault_bootstrap_api_token`). With
+  `hostNetwork`, loopback is shared with every host process and the other
+  host-network pods, so loopback alone did not protect the admin RPC. Verified:
+  without the token, `/api/v0` returns 403, including from inside someguy's
+  container. kubo does not guard `/debug/metrics` and `/debug/pprof` with it;
+- connection manager 4000/8000 (a bootstrapper's job is to accept peers),
+  resource manager 8 GiB;
+- agent suffix `bootstrap.ipni.io`.
+
+The server profile keeps k3s `10.42/10.43` and other non-public addresses out of
+what the node announces. Each bootstrapper permanently peers with the other two
+and also dials kubo's default public bootstrap list (pinned in
+`roles/bootstrap/defaults/main.yml`; review it after 2026-09-30).
+
+**Runtime.**
+
+- `hostNetwork`, `Recreate`, runs as uid 10002 (no host account), read-only root
+  filesystem.
+- Repo on a 20 GiB local-path volume (DHT records, peerstore; no blocks).
+- 500m CPU / 2 GiB requested, 4 CPU / 16 GiB limit. Requests follow observed use
+  (15–43m CPU, 150–260 MiB, 900–1,800 peers soon after deploy), so the
+  reservation is not taken from the content node.
+- Startup and readiness exec `ipfs diag healthy` with the API token. Liveness is
+  a plain TCP check on 5011, so a busy node cannot throttle its own probe into a
+  restart.
+- Ports 4001 tcp+udp are open in ufw. 4001 and 5011 are reserved from the
+  ephemeral range.
+
+**Upgrading kubo.** Change the digest in `k8s/bootstrap/kustomization.yaml`. The
+init container runs `ipfs repo migrate` before anything opens the repo, so a
+version bump migrates instead of crash-looping. This was verified by upgrading a
+repo created by kubo v0.36.0 (repo 16 → 18). Before upgrading:
+
+- **Confirm the migration is built into the new binary.** The log says
+  "Running embedded migration". Other migrations are downloaded from
+  `dist.ipfs.tech`, which Shipyard operates.
+- **Rolling back needs the new binary.** Run
+  `ipfs repo migrate --to=<old repo version> --allow-downgrade` with the NEW
+  image *before* switching back; an old kubo refuses a newer repo.
+
+**Verification** after every deploy:
+
+- the running node has the expected PeerID;
+- its agent is `.../bootstrap.ipni.io`;
+- (before deploy) the vaulted key derives the published PeerID;
+- it speaks Kademlia but not Bitswap;
+- it advertises its public IP and no k3s addresses;
+- once all boxes run, each is connected to the other two.
+
+### DNS records (`ipni.io` zone, all **DNS only / grey cloud**)
+
+**`dns.txt` is the source of truth.** It is a Cloudflare-importable BIND file,
+generated from the inventory and `host_vars/<box>/bootstrap.yml`:
+
+```bash
+./scripts/bootstrap-dns.py > dns.txt   # then DNS > Records > Import (proxying unchecked)
+```
+
+Do not edit it by hand. The records are live: they match `dns.txt` exactly, and
+a fresh kubo client bootstraps to all three nodes from the name alone. A client
+that has never seen these nodes must *resolve* them, so the A records must stay
+unproxied: Cloudflare cannot proxy raw libp2p TCP/UDP.
+
+The layout mirrors `bootstrap.libp2p.io`:
+
+- **A shared name** listing each node.
+- **Per-box names** holding its addresses, so one box can be drained by editing
+  only its records.
+- **`/dns4` instead of literal IPs,** which keeps each record set small.
+- **No WebTransport/WebRTC certhash addresses in DNS.** The certhashes rotate.
+
+**Who can bootstrap from this name: TCP and QUIC clients only** (kubo, go-libp2p,
+rust-libp2p, Node.js). A browser cannot. The name resolves to `/tcp` and
+`/quic-v1` addresses, which browsers cannot dial, and a browser only learns the
+WebTransport/WebRTC-direct certhash addresses by identify *after* connecting.
+Browser bootstrapping needs either WSS (deferred, below) or a delegated routing
+lookup first: `GET https://route-<box>.ipni.io/routing/v1/peers/<PeerID>`
+returns the certhash addresses. That path is not yet tested with a real browser
+client (Helia).
+
+### Deferred: secure WebSockets (WSS)
+
+**Skipped for now, deliberately.** That means **browsers cannot bootstrap from
+`bootstrap.ipni.io`** (see "Who can bootstrap from this name" above). If browser
+clients come into scope, WSS is the straightforward fix. Options:
+
+- **Own certificate, port 4443 (preferred):** Let's Encrypt certificates for the
+  `*.bootstrap.ipni.io` names, renewed via a Cloudflare API token scoped to DNS
+  edits. Terminated in front of kubo's WebSocket listener; publish
+  `/dns4/<box>.bootstrap.ipni.io/tcp/4443/wss` in each box's `_dnsaddr` records.
+  Kubo's server profile filters loopback, so `127.0.0.0/8` must be removed from
+  `Swarm.AddrFilters` (not `NoAnnounce`), or kubo resets connections from the
+  local proxy. Port 443 is taken by the routing origin.
+- **kubo AutoTLS:** built in, but it gets certificates from Shipyard's
+  `libp2p.direct` service, which may not survive 2026-09-30.
+
+### Keys at rest
+
+- **k3s Secret encryption is not enabled.** The `kubo-config` Secret (each
+  box's permanent key and API token) and the Envoy TLS secret sit unencrypted in
+  k3s's datastore on the OS disk. It cannot safely be switched on for these
+  clusters yet: enabling it on an *existing* cluster requires k3s
+  v1.33.10+k3s1 / v1.34.6+k3s1 / v1.35.3+k3s1 or newer
+  ([k3s docs](https://docs.k3s.io/cli/secrets-encrypt)), and these run
+  **v1.31.5, which is past upstream Kubernetes support**. Upgrade k3s, then
+  enable encryption and rewrite the Secrets. This does not help against root
+  on the box, which has the keys regardless.
+- **Repo directory permissions.** local-path creates volume directories as
+  `2777`, but its parent `/data/local-path-provisioner` is `0700 root`, so no
+  other local user can reach them. Verified as `nobody`: listing, creating and
+  deleting are all denied. Keep that parent `0700` (the storage role sets it).
+
 ## Secrets
 
 Credentials live in per-host `ansible-vault` files under
@@ -374,6 +549,14 @@ the vault. SSH has no password fallback by design.
       boxes: `/version` 200, streaming provider lookups, `/debug/` 404, and each
       request's `cf-ray` appears in the correct box's Envoy access log.
 - [ ] Run `scripts/check-cloudflare-ranges.sh` periodically (cron or CI).
+- [x] ~~Create the `bootstrap.ipni.io` DNS records~~ — live and verified; `dns.txt` is the source.
+- [ ] **Upgrade k3s** off v1.31 (past upstream support), one minor version at a
+      time, then enable Secret encryption (see "Keys at rest").
+- [ ] If browser clients matter: WSS for the bootstrappers, or a tested
+      delegated-routing path (see "Who can bootstrap from this name").
+- [ ] Watch kubo / go-libp2p security advisories; kubo is unmaintained after
+      2026-09-30. Review `bootstrap_public_peers` once the official nodes' future is known.
+- [ ] WSS for the bootstrappers is deferred (see "Deferred: secure WebSockets").
 - [ ] **Before putting these boxes behind the live Cloudflare router:**
   - find out which Host it sends and which zone it lives in;
   - add that Host to `domains` in `k8s/route-origin/envoy.yaml` (otherwise 421);
@@ -384,7 +567,9 @@ the vault. SSH has no password fallback by design.
 - [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
 - [ ] Deploy the bootstrapper and the content cluster node. Service ports are
       opened by each service's own role, as someguy's are.
-- [ ] Set up monitoring/alerting, and scrape `/debug/metrics/prometheus`.
+- [ ] Set up monitoring/alerting, and scrape `/debug/metrics/prometheus`. Include
+      `/data` usage: the bootstrappers' DHT record store grows with traffic, and
+      local-path does not enforce the 20 GiB claim.
 - [ ] Optional: every box's host `resolv.conf` lists its two provider
       nameservers twice, so kubelet warns and keeps only three entries. DNS
       works; de-duplicating would silence the warning.
@@ -403,11 +588,20 @@ roles/route_origin/       Envoy origin: cert preflight, Cloudflare allowlist, TL
 roles/kustomize_apply/    shared: ship, dry-run/apply, wait, prune stale ConfigMaps
 k8s/someguy/              someguy kustomize manifests
 k8s/route-origin/         Envoy kustomize manifests and envoy.yaml
+k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
+roles/bootstrap/          kubo config from base + vaulted identity, Secret, deploy, checks
+  files/kubo-config.json  base kubo config (no identity)
+host_vars/<box>/bootstrap.yml  the box's permanent bootstrapper PeerID
 certs/                    origin CSR + certificate, origin-pull CA + client certificate (public)
 group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and client keys (AOP, deferred)
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
 scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 scripts/check-cloudflare-ranges.sh  pinned Cloudflare ranges vs Cloudflare's API
+scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
+scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used by the preflight)
+scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
+dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 site.yml                  base preparation playbook
 routing.yml               routing service playbook (someguy + origin)
+bootstrap.yml             bootstrap node playbook
 ```

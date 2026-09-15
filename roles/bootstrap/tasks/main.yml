@@ -1,0 +1,206 @@
+---
+# bootstrap: a kubo node per box acting as a public IPFS/libp2p bootstrap peer
+# (DHT server, no content exchange). Its PeerID is permanent: it is published
+# under /dnsaddr/bootstrap.ipni.io and hardcoded by clients.
+
+# ---------------------------------------------------------------------------
+# Identity preflight, on the controller, before anything on the box changes.
+# A vaulted key that does not derive the published PeerID would otherwise only
+# be caught after the pod started - and if DNS were already published, client
+# configs would already point at an identity no node holds.
+# New identities: scripts/new-bootstrap-identity.sh <box>
+# ---------------------------------------------------------------------------
+- name: Fail if this box has no bootstrap identity
+  ansible.builtin.assert:
+    that:
+      - bootstrap_peer_id is defined
+      - vault_bootstrap_privkey is defined
+      - vault_bootstrap_api_token is defined
+    fail_msg: >-
+      {{ inventory_hostname }} has no bootstrap identity. Create one with
+      scripts/new-bootstrap-identity.sh {{ inventory_hostname }}
+    quiet: true
+
+# no_log: the private key is passed on stdin. The script prints only the
+# derived PeerID or the reason for failure, which the assert below reports.
+- name: Derive the PeerID from the vaulted private key
+  ansible.builtin.command:
+    argv: [python3, "{{ playbook_dir }}/scripts/libp2p_identity.py", check, "{{ bootstrap_peer_id }}"]
+    stdin: "{{ vault_bootstrap_privkey }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  register: bootstrap_identity_check
+
+- name: Fail unless the vaulted key belongs to the published PeerID
+  ansible.builtin.assert:
+    that: bootstrap_identity_check.rc == 0
+    fail_msg: "{{ inventory_hostname }}: {{ bootstrap_identity_check.stdout }}"
+    success_msg: "{{ inventory_hostname }}: vaulted key derives {{ bootstrap_peer_id }}"
+    quiet: false
+
+- name: Allow bootstrapper libp2p traffic (TCP)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bootstrap_swarm_port }}"
+    proto: tcp
+    comment: bootstrap libp2p
+
+- name: Allow bootstrapper libp2p traffic (UDP - QUIC, WebTransport, WebRTC-direct)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bootstrap_swarm_port }}"
+    proto: udp
+    comment: bootstrap libp2p
+
+# ---------------------------------------------------------------------------
+# kubo config. Base settings are committed in files/kubo-config.json (no
+# secrets); each box adds its identity from the vault, the bootstrap list, and
+# permanent peering with the other two bootstrappers.
+# ---------------------------------------------------------------------------
+- name: Build this box's kubo config
+  vars:
+    base: "{{ lookup('ansible.builtin.file', role_path ~ '/files/kubo-config.json') | from_json }}"
+    # reject, not difference: difference goes through a Python set, whose order
+    # changes between Ansible runs (string hashing is randomized per process).
+    # That reordered Bootstrap/Peering, changed the Secret, and restarted every
+    # bootstrapper on every run. Inventory order is stable.
+    other_boxes: "{{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname) | list }}"
+    peering: >-
+      {%- set peers = [] -%}
+      {%- for h in other_boxes -%}
+        {%- set ip = hostvars[h].ansible_host -%}
+        {%- set _ = peers.append({'ID': hostvars[h].bootstrap_peer_id,
+                                  'Addrs': ['/ip4/' ~ ip ~ '/udp/' ~ bootstrap_swarm_port ~ '/quic-v1',
+                                            '/ip4/' ~ ip ~ '/tcp/' ~ bootstrap_swarm_port]}) -%}
+      {%- endfor -%}
+      {{ peers }}
+    # The public list, then each other bootstrapper's QUIC address + PeerID.
+    bootstrap_list: >-
+      {%- set entries = bootstrap_public_peers | list -%}
+      {%- for p in peering -%}
+        {%- set _ = entries.append(p.Addrs[0] ~ '/p2p/' ~ p.ID) -%}
+      {%- endfor -%}
+      {{ entries }}
+  ansible.builtin.set_fact:
+    # API.Authorizations: with hostNetwork, 127.0.0.1 is shared with every host
+    # process and the other hostNetwork pods (someguy, Envoy), so loopback alone
+    # does not protect the admin RPC. Every /api/v0 call now needs the token.
+    # (kubo does not guard /debug/metrics or /debug/pprof with it.)
+    bootstrap_kubo_config: >-
+      {{ base | combine({
+           'Identity': {'PeerID': bootstrap_peer_id, 'PrivKey': vault_bootstrap_privkey},
+           'API': base.API | combine({'Authorizations': {'deploy': {
+               'AuthSecret': 'bearer:' ~ vault_bootstrap_api_token,
+               'AllowedPaths': ['/api/v0']}}}),
+           'Bootstrap': bootstrap_list,
+           'Peering': {'Peers': peering}
+         }) }}
+  no_log: true
+
+- name: Check whether the bootstrap namespace exists yet
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, namespace, bootstrap, --ignore-not-found, -o, name]
+  register: bootstrap_ns
+  changed_when: false
+  check_mode: false
+
+- name: Ensure the bootstrap namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: Namespace
+    name: bootstrap
+    state: present
+
+# config.json (with the private key) is used only for the first `ipfs init`;
+# config-nokey.json for every later start, because `ipfs config replace`
+# refuses a config that contains a private key. See k8s/bootstrap/deployment.yaml.
+- name: Install the kubo config as a Secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: kubo-config
+        namespace: bootstrap
+      data:
+        config.json: "{{ bootstrap_kubo_config | to_nice_json | b64encode }}"
+        config-nokey.json: >-
+          {{ bootstrap_kubo_config | combine({'Identity': {'PeerID': bootstrap_peer_id}})
+             | to_nice_json | b64encode }}
+        peer-id: "{{ bootstrap_peer_id | b64encode }}"
+        # For probes and CLI calls (kubo's --api-auth). Exposed to the kubo
+        # container as $KUBO_API_AUTH.
+        api-auth: "{{ ('bearer:' ~ vault_bootstrap_api_token) | b64encode }}"
+  no_log: true
+  register: bootstrap_secret
+  # On a first --check the namespace is only simulated and a dry-run secret
+  # create would fail with "namespace not found".
+  when: not ansible_check_mode or bootstrap_ns.stdout
+
+- name: Deploy the bootstrap manifests
+  ansible.builtin.include_role:
+    name: kustomize_apply
+  vars:
+    kustomize_app: bootstrap
+    kustomize_namespace: bootstrap
+    kustomize_deployment: bootstrap
+
+# The init container reads the Secret only at pod start. Restart for a changed
+# config unless the apply above already rolled the pod.
+- name: Restart the bootstrapper to load a changed config
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=bootstrap, rollout, restart, deployment/bootstrap]
+  when:
+    - not ansible_check_mode
+    - bootstrap_secret is changed
+    - not kustomize_deployment_rolled
+  register: bootstrap_restart
+  changed_when: true
+
+- name: Wait for the bootstrapper restart to complete
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=bootstrap, rollout, status, deployment/bootstrap, --timeout=600s]
+  when: bootstrap_restart is changed
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Verification inside the running pod.
+# ---------------------------------------------------------------------------
+- name: Read the running node's identity
+  # The token is expanded inside the container from $KUBO_API_AUTH, so it never
+  # appears in this command line on the host.
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=bootstrap, exec, deploy/bootstrap, -c, kubo, --,
+           sh, -c, 'exec ipfs --api={{ bootstrap_api }} --api-auth="$KUBO_API_AUTH" id']
+  register: bootstrap_id
+  changed_when: false
+  retries: 10
+  delay: 6
+  until: bootstrap_id.rc == 0
+  when: not ansible_check_mode
+
+- name: Fail unless the node is the expected, correctly configured bootstrapper
+  vars:
+    node: "{{ bootstrap_id.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - node.ID == bootstrap_peer_id
+      - node.AgentVersion is search('/' ~ (bootstrap_dns_name | regex_escape) ~ '$')
+      - "'/ipfs/kad/1.0.0' in node.Protocols"
+      - node.Protocols | select('search', '^/ipfs/bitswap') | list | length == 0
+      # Advertises its public address, and nothing from the k3s networks.
+      - node.Addresses | select('search', '^/ip4/' ~ (ansible_host | regex_escape) ~ '/') | list | length > 0
+      - node.Addresses | select('search', '^/ip4/10[.]4[23][.]') | list | length == 0
+    fail_msg: >-
+      Bootstrapper check failed. ID={{ node.ID }} agent={{ node.AgentVersion }}
+      protocols={{ node.Protocols }} addresses={{ node.Addresses }}
+    success_msg: "{{ node.ID }} ({{ node.AgentVersion }}) advertising {{ node.Addresses | length }} addresses"
+  when: not ansible_check_mode
