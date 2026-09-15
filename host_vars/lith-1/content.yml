@@ -1,0 +1,7 @@
+---
+# Permanent identities of this box's content cluster node. Public. The other
+# boxes name them (cluster trusted peers, kubo peering), so they must not
+# change. Private keys: vault_content_cluster_privkey and
+# vault_content_kubo_privkey in vault.yml next to this file.
+content_cluster_peer_id: 12D3KooWQSgVevfuy33SToBfYoCexqvvhgqYp8oGZ8r3CAesguRo
+content_kubo_peer_id: 12D3KooWRcTH1HzbFt7UCSVaYScStt5wPr4bJo3aXHuvqPk6Gmgr
