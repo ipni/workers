@@ -1,0 +1,304 @@
+---
+# content: a kubo node plus ipfs-cluster peer per box, hosting the IPFS
+# Project website content. The three cluster peers form one CRDT cluster that
+# keeps the same pinset on every box. Manifests live in k8s/content; shipping,
+# applying and waiting are shared via roles/kustomize_apply.
+
+# ---------------------------------------------------------------------------
+# Preflight, on the controller, before anything on the box changes. Every
+# cluster peer trusts all three cluster PeerIDs and every kubo peers with the
+# other two kubo PeerIDs, so a key that does not derive its published PeerID
+# would break that box for the others.
+# New identities: scripts/new-content-cluster-identity.sh <box>
+# ---------------------------------------------------------------------------
+- name: Fail if a box has no content cluster identities
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].content_cluster_peer_id is defined
+      - hostvars[item].content_kubo_peer_id is defined
+      - hostvars[item].vault_content_cluster_privkey is defined
+      - hostvars[item].vault_content_kubo_privkey is defined
+      - vault_content_cluster_secret is defined
+    fail_msg: >-
+      {{ item }} is missing a content cluster identity, or vault_content_cluster_secret
+      is missing. Create them with scripts/new-content-cluster-identity.sh {{ item }}
+    quiet: true
+  # Every box, not just this play's: the trusted-peer list names all three.
+  loop: "{{ groups['ipfs_nodes'] }}"
+
+# no_log: the private keys are passed on stdin. The script prints only the
+# derived PeerID or the reason for failure, which the assert below reports.
+- name: Derive the PeerIDs from the vaulted private keys
+  ansible.builtin.command:
+    argv: [python3, "{{ playbook_dir }}/scripts/libp2p_identity.py", check, "{{ item.peer_id }}"]
+    stdin: "{{ item.key }}"
+  loop:
+    - { name: ipfs-cluster, peer_id: "{{ content_cluster_peer_id }}", key: "{{ vault_content_cluster_privkey }}" }
+    - { name: kubo, peer_id: "{{ content_kubo_peer_id }}", key: "{{ vault_content_kubo_privkey }}" }
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  register: content_identity_check
+
+- name: Fail unless the vaulted keys belong to the published PeerIDs
+  ansible.builtin.assert:
+    that: content_identity_check.results | map(attribute='rc') | select('ne', 0) | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: ipfs-cluster {{ content_identity_check.results[0].stdout }};
+      kubo {{ content_identity_check.results[1].stdout }}
+    success_msg: >-
+      {{ inventory_hostname }}: vaulted keys derive ipfs-cluster {{ content_cluster_peer_id }}
+      and kubo {{ content_kubo_peer_id }}
+    quiet: false
+
+# ---------------------------------------------------------------------------
+# Firewall. kubo's libp2p is public. The cluster swarm only needs the other
+# two boxes, so it is opened to exactly their addresses; it is also closed to
+# anyone without the cluster secret. APIs (5021, 9094, 9095) stay on loopback.
+# ---------------------------------------------------------------------------
+- name: Allow content kubo libp2p traffic (TCP)
+  community.general.ufw:
+    rule: allow
+    port: "{{ content_kubo_swarm_port }}"
+    proto: tcp
+    comment: content kubo libp2p
+
+- name: Allow content kubo libp2p traffic (UDP - QUIC, WebTransport, WebRTC-direct)
+  community.general.ufw:
+    rule: allow
+    port: "{{ content_kubo_swarm_port }}"
+    proto: udp
+    comment: content kubo libp2p
+
+- name: Allow ipfs-cluster swarm traffic from the other content peers
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ hostvars[item].ansible_host }}"
+    port: "{{ content_cluster_swarm_port }}"
+    proto: tcp
+    comment: "content ipfs-cluster from {{ item }}"
+  # reject, not difference: difference's order is not stable between runs.
+  loop: "{{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname) | list }}"
+
+# ---------------------------------------------------------------------------
+# Per-box settings, as two Secrets:
+#   kubo-config      the full kubo config: files/kubo-config.json (committed,
+#                    no secrets) plus identity, bootstrap list and peering
+#   content-cluster  the cluster identity, swarm secret and peer lists
+# ---------------------------------------------------------------------------
+# Choices in files/kubo-config.json (JSON cannot carry comments):
+#   Provide.Strategy "roots" - announce only each pin's root CID. someguy runs
+#     ~416 DHT lookups/sec on these boxes, and reproviding every block of the
+#     website content would compete with it for the host's CPU and sockets.
+#     Clients find a root's providers and fetch the rest over Bitswap. (kubo 0.43
+#     renamed Reprovider.Strategy; it refuses to start with the old key.)
+#   Bitswap on, Routing.Type "auto" - this node serves content (unlike the
+#     bootstrapper).
+#   AutoConf and AutoTLS off, no delegated routers/publishers, relay service
+#     off - no dependency on Shipyard-operated services.
+#   Addresses.Gateway null - no HTTP gateway. API on 127.0.0.1:5021, swarm 4101.
+#   Datastore.StorageMax 90GB - only the GC threshold (GC is not enabled).
+- name: Build this box's kubo config
+  vars:
+    base: "{{ lookup('ansible.builtin.file', role_path ~ '/files/kubo-config.json') | from_json }}"
+    # reject, not difference: difference's order is not stable between runs,
+    # which would change the Secret and restart the node every run.
+    other_boxes: "{{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname) | list }}"
+    # Permanent peering with the other two content kubos: kubo keeps these
+    # connections up and exempts them from connection trimming, so blocks
+    # already fetched by one box reach the others directly.
+    peering: >-
+      {%- set peers = [] -%}
+      {%- for h in other_boxes -%}
+        {%- set ip = hostvars[h].ansible_host -%}
+        {%- set _ = peers.append({'ID': hostvars[h].content_kubo_peer_id,
+                                  'Addrs': ['/ip4/' ~ ip ~ '/udp/' ~ content_kubo_swarm_port ~ '/quic-v1',
+                                            '/ip4/' ~ ip ~ '/tcp/' ~ content_kubo_swarm_port]}) -%}
+      {%- endfor -%}
+      {{ peers }}
+    # This project's bootstrappers first, then the public list.
+    bootstrap_list: >-
+      {{ groups['ipfs_nodes'] | map('extract', hostvars, 'bootstrap_peer_id') | select('defined')
+         | map('regex_replace', '^', '/dnsaddr/bootstrap.ipni.io/p2p/') | list
+         + content_public_bootstrap_peers }}
+  ansible.builtin.set_fact:
+    content_kubo_config: >-
+      {{ base | combine({
+           'Identity': {'PeerID': content_kubo_peer_id, 'PrivKey': vault_content_kubo_privkey},
+           'Bootstrap': bootstrap_list,
+           'Peering': {'Peers': peering}
+         }) }}
+  no_log: true
+
+- name: Check whether the content namespace exists yet
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, namespace, content, --ignore-not-found, -o, name]
+  register: content_ns
+  changed_when: false
+  check_mode: false
+
+- name: Ensure the content namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: Namespace
+    name: content
+    state: present
+
+# config.json (with the private key) is used only for the first `ipfs init`;
+# config-nokey.json for every later start, because `ipfs config replace`
+# refuses a config that contains a private key. See k8s/content/deployment.yaml.
+- name: Install the kubo config as a Secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: kubo-config
+        namespace: content
+      data:
+        config.json: "{{ content_kubo_config | to_nice_json | b64encode }}"
+        config-nokey.json: >-
+          {{ content_kubo_config | combine({'Identity': {'PeerID': content_kubo_peer_id}})
+             | to_nice_json | b64encode }}
+        peer-id: "{{ content_kubo_peer_id | b64encode }}"
+  no_log: true
+  register: content_kubo_secret
+  # On a first --check the namespace is only simulated and a dry-run secret
+  # create would fail with "namespace not found".
+  when: not ansible_check_mode or content_ns.stdout
+
+- name: Install the content cluster Secret
+  vars:
+    other_boxes: "{{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname) | list }}"
+    peer_addresses: >-
+      {{ other_boxes | map('extract', hostvars) | map(attribute='ansible_host')
+         | map('regex_replace', '^', '/ip4/') | map('regex_replace', '$', '/tcp/' ~ content_cluster_swarm_port)
+         | zip(other_boxes | map('extract', hostvars, 'content_cluster_peer_id'))
+         | map('join', '/p2p/') | list }}
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: content-cluster
+        namespace: content
+      data:
+        secret: "{{ vault_content_cluster_secret | b64encode }}"
+        peer-id: "{{ content_cluster_peer_id | b64encode }}"
+        private-key: "{{ vault_content_cluster_privkey | b64encode }}"
+        peer-name: "{{ inventory_hostname | b64encode }}"
+        trusted-peers: "{{ groups['ipfs_nodes'] | map('extract', hostvars, 'content_cluster_peer_id') | join(',') | b64encode }}"
+        peer-addresses: "{{ peer_addresses | join(',') | b64encode }}"
+  no_log: true
+  register: content_secret
+  when: not ansible_check_mode or content_ns.stdout
+
+- name: Deploy the content manifests
+  ansible.builtin.include_role:
+    name: kustomize_apply
+  vars:
+    kustomize_app: content
+    kustomize_namespace: content
+    kustomize_deployment: content
+
+# Both containers read their Secret only at start. Restart for a changed Secret
+# unless the apply above already rolled the pod.
+- name: Restart the content node to load a changed Secret
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=content, rollout, restart, deployment/content]
+  when:
+    - not ansible_check_mode
+    - content_secret is changed or content_kubo_secret is changed
+    - not kustomize_deployment_rolled
+  register: content_restart
+  changed_when: true
+
+- name: Wait for the content node restart to complete
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=content, rollout, status, deployment/content, --timeout=600s]
+  when: content_restart is changed
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Prove both APIs answer on the node, not just that the pod is Ready.
+# ---------------------------------------------------------------------------
+- name: Confirm the kubo RPC API answers locally
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ content_kubo_api_port }}/api/v0/version"
+    method: POST   # the RPC API rejects GET
+    return_content: true
+  register: content_kubo_version
+  retries: 6
+  delay: 5
+  until: content_kubo_version.status == 200
+  when: not ansible_check_mode
+
+- name: Confirm the ipfs-cluster REST API answers locally
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ content_cluster_api_port }}/id"
+    return_content: true
+  register: content_cluster_id
+  retries: 6
+  delay: 5
+  until: content_cluster_id.status == 200
+  when: not ansible_check_mode
+
+# The init container replaces the whole config on every start; prove the
+# running repo holds exactly the managed config. kubo writes some empty values
+# as null and omits others, so null and absent compare equal.
+- name: Read the running kubo config
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --, ipfs, config, show]
+  register: content_kubo_live_config
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Compare the running kubo config with the managed config
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json, sys
+        def norm(v):
+            if isinstance(v, dict):
+                return {k: norm(x) for k, x in v.items() if x is not None}
+            return [norm(x) for x in v] if isinstance(v, list) else v
+        d = json.load(sys.stdin)
+        live, want = norm(d["live"]), norm(d["want"])
+        live.pop("Identity", None); want.pop("Identity", None)
+        diff = sorted(k for k in set(live) | set(want) if live.get(k) != want.get(k))
+        print("differs in: " + ", ".join(diff) if diff else "identical")
+        sys.exit(1 if diff else 0)
+    stdin: "{{ {'live': content_kubo_live_config.stdout | from_json, 'want': content_kubo_config | combine({'Identity': {}})} | to_json }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  register: content_kubo_config_diff
+  failed_when: content_kubo_config_diff.rc != 0
+  when: not ansible_check_mode
+
+- name: Fail unless the cluster peer runs the vaulted identity and sees kubo
+  vars:
+    peer: "{{ content_cluster_id.json }}"
+  ansible.builtin.assert:
+    that:
+      - peer.id == content_cluster_peer_id
+      - peer.peername == inventory_hostname
+      - peer.ipfs.id | default('') == content_kubo_peer_id
+      - peer.error | default('') | length == 0
+    fail_msg: "ipfs-cluster check failed on {{ inventory_hostname }}: {{ peer }}"
+    success_msg: >-
+      {{ inventory_hostname }}: kubo {{ content_kubo_version.json.Version }},
+      ipfs-cluster {{ peer.version }} as {{ peer.id }}, kubo peer {{ peer.ipfs.id }}
+  when: not ansible_check_mode

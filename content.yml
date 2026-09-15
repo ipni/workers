@@ -1,0 +1,93 @@
+---
+# Deploy the content cluster node (kubo + ipfs-cluster peer) to the prepared
+# boxes. It hosts the IPFS Project website content; this playbook provisions
+# an empty cluster, and pins are added through ipfs-cluster.
+#
+#   ansible-playbook content.yml                  # all three boxes (also checks peering)
+#   ansible-playbook content.yml -l chic-1        # one box
+#   ansible-playbook content.yml --check --diff   # dry run
+#
+# Requires site.yml to have run first (admin user, k3s, reserved ports), and
+# each box's cluster identity: scripts/new-content-cluster-identity.sh <box>.
+
+- name: Deploy the content cluster node
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: content
+      tags: [content]
+
+# The cluster is only complete once every box runs, so peering is checked last,
+# across the whole group: each cluster peer must list all three peers, and each
+# kubo must be connected to the other two. With -l (a partial run) the check
+# still reports, but does not fail.
+- name: Verify the content cluster peers see each other
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  tags: [content]
+  vars:
+    all_peer_ids: "{{ groups['ipfs_nodes'] | map('extract', hostvars, 'content_cluster_peer_id') | list }}"
+    other_kubo_ids: >-
+      {{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname)
+         | map('extract', hostvars, 'content_kubo_peer_id') | list }}
+    full_run: "{{ ansible_play_hosts_all | length == groups['ipfs_nodes'] | length }}"
+  tasks:
+    # `peers ls` prints one line per peer it knows, itself included:
+    #   <PeerID> | <name> | Sees <n> other peers
+    - name: Wait for every cluster peer to be listed
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, cluster, --,
+               ipfs-cluster-ctl, --host, /ip4/127.0.0.1/tcp/9094, peers, ls]
+      register: content_peers
+      changed_when: false
+      # Peers dial each other at start and exchange state over pubsub; allow
+      # up to two minutes.
+      retries: 12
+      delay: 10
+      until: >-
+        content_peers.rc == 0
+        and all_peer_ids | reject('in', content_peers.stdout) | list | length == 0
+      failed_when: false   # reported, and asserted below
+      # On a partial run (-l) the other peers may not exist yet, so waiting
+      # for them would only burn two minutes.
+      when:
+        - not ansible_check_mode
+        - full_run | bool
+
+    # Peering (kubo config) dials the other content kubos and keeps them
+    # connected; swarm peers shows the live connections.
+    - name: Wait for kubo to be connected to the other content kubos
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
+               ipfs, --api=/ip4/127.0.0.1/tcp/5021, swarm, peers]
+      register: content_kubo_peers
+      changed_when: false
+      retries: 12
+      delay: 10
+      until: >-
+        content_kubo_peers.rc == 0
+        and other_kubo_ids | reject('in', content_kubo_peers.stdout) | list | length == 0
+      failed_when: false   # reported, and asserted below
+      when:
+        - not ansible_check_mode
+        - full_run | bool
+
+    - name: Report peering
+      vars:
+        missing_peer_ids: "{{ all_peer_ids | reject('in', content_peers.stdout | default('')) | list }}"
+        missing_kubo_ids: "{{ other_kubo_ids | reject('in', content_kubo_peers.stdout | default('')) | list }}"
+      ansible.builtin.assert:
+        that: (missing_peer_ids + missing_kubo_ids) | length == 0 or not full_run
+        fail_msg: >-
+          {{ inventory_hostname }}: cluster peer does not list {{ missing_peer_ids }};
+          kubo is not connected to {{ missing_kubo_ids }}
+        success_msg: >-
+          {{ inventory_hostname }}:
+          {{ ('peering not checked (partial run)') if not full_run | bool else
+             'cluster lists all ' ~ all_peer_ids | length ~ ' peers; kubo connected to the other '
+             ~ other_kubo_ids | length ~ ' content kubos' }}
+      when: not ansible_check_mode

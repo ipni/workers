@@ -1,0 +1,20 @@
+---
+# Ports of the content cluster node. Must match k8s/content/deployment.yaml and
+# net.ipv4.ip_local_reserved_ports in group_vars/ipfs_nodes/main.yml.
+content_kubo_swarm_port: 4101     # public, TCP + UDP
+content_kubo_api_port: 5021       # loopback
+content_cluster_api_port: 9094    # loopback (REST API)
+content_cluster_swarm_port: 9096  # TCP, the other boxes only
+
+# Public bootstrap peers the content kubo dials, after this project's own
+# bootstrappers (/dnsaddr/bootstrap.ipni.io, one entry per box, added by the
+# role). The same public list the bootstrappers use
+# (roles/bootstrap/defaults/main.yml); keep the two in step.
+content_public_bootstrap_peers:
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb
+  - /dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt
+  - /dnsaddr/va1.bootstrap.libp2p.io/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8
+  - /ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
+  - /ip4/104.131.131.82/udp/4001/quic-v1/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ

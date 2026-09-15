@@ -1,0 +1,322 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: content
+spec:
+  replicas: 1
+  # hostNetwork binds 4101/5021/9094-9096 on the node, so a second pod cannot
+  # start while the old one holds them; Recreate stops the old pod first.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: content
+  template:
+    metadata:
+      labels:
+        app: content
+    spec:
+      # Content cluster node: kubo holds and serves the website content over
+      # Bitswap, ipfs-cluster keeps the pinset identical on all three boxes.
+      #
+      # hostNetwork: kubo advertises the addresses it sees on its interfaces,
+      # which on the host network includes the public IP; NoAnnounce drops the
+      # k3s and other non-public ones. ipfs-cluster peers dial each other's
+      # public IP on 9096, which ufw only opens to the other boxes.
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 45
+
+      securityContext:
+        # A uid with no host account, distinct from someguy (10001) and the
+        # bootstrapper (10002), so the repos on the shared data volume cannot
+        # be read or written across workloads.
+        runAsNonRoot: true
+        runAsUser: 10003
+        runAsGroup: 10003
+        fsGroup: 10003
+        seccompProfile:
+          type: RuntimeDefault
+
+      initContainers:
+        # Loads the managed kubo config on EVERY start, then refuses to
+        # continue if the repo's identity is not the expected PeerID (the other
+        # boxes peer with exactly that ID). The config is built by
+        # roles/content from roles/content/files/kubo-config.json, so the whole
+        # config - not just a list of keys - is what the repo holds after each
+        # start; kubo defaults cannot drift in across upgrades.
+        #
+        #   first start:  `ipfs init config.json` - the only way to set the
+        #                 private key (kubo rejects it through `ipfs config`).
+        #   later starts: `ipfs repo migrate`, then `ipfs config replace
+        #                 config-nokey.json` - applies the config but keeps the
+        #                 repo's identity; kubo refuses a replacement that
+        #                 contains a private key.
+        #
+        # The migrate step must come first: after a kubo upgrade every command
+        # that opens the repo exits with "ipfs repo needs migration".
+        #
+        # Configs are passed on STDIN: Secret files are symlinks, and kubo reads
+        # a symlinked file argument as the link target text.
+        #
+        # The image entrypoint is bypassed: on first init it binds the
+        # unauthenticated RPC API to 0.0.0.0, which with hostNetwork would be
+        # public.
+        - name: kubo-config
+          image: kubo
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              expected="$(cat /config/peer-id)"
+              # kubo refuses to init a path that does not exist yet.
+              mkdir -p "$IPFS_PATH"
+              if [ ! -f "$IPFS_PATH/config" ]; then
+                echo "fresh repo: initialising with the managed identity"
+                ipfs init --empty-repo - < /config/config.json >/dev/null
+              else
+                echo "existing repo: migrating if needed, then applying the managed config"
+                ipfs repo migrate
+                ipfs config replace - < /config/config-nokey.json
+              fi
+              actual="$(ipfs config Identity.PeerID)"
+              if [ "$actual" != "$expected" ]; then
+                echo "IDENTITY MISMATCH: repo has $actual, expected $expected - refusing to start" >&2
+                exit 1
+              fi
+              echo "identity OK: $actual; Provide.Strategy=$(ipfs config Provide.Strategy)"
+          env:
+            - name: IPFS_PATH
+              value: /repo/ipfs
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+            - name: kubo-config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      containers:
+        - name: kubo
+          image: kubo
+          # tini + ipfs directly, bypassing the image entrypoint (see above).
+          command: ["/sbin/tini", "--", "ipfs"]
+          args: ["daemon", "--migrate=true"]
+          env:
+            - name: IPFS_PATH
+              value: /repo/ipfs
+            - name: HOME
+              value: /tmp
+            - name: IPFS_FD_MAX
+              value: "65536"
+            # Soft heap target below the 8Gi limit.
+            - name: GOMEMLIMIT
+              value: 6GiB
+            - name: IPFS_TELEMETRY
+              value: "off"
+          ports:
+            # roles/content opens 4101 tcp+udp in ufw.
+            - name: libp2p-tcp
+              containerPort: 4101
+              protocol: TCP
+            - name: libp2p-udp
+              containerPort: 4101
+              protocol: UDP
+
+          # From the ~30% of each box not reserved for someguy, shared with the
+          # bootstrapper (requests 500m/2Gi). Initial guesses, to be tuned from
+          # observed use once content is pinned (libp2p_rcmgr_* and Bitswap
+          # metrics), as the bootstrapper's were.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+
+          startupProbe:
+            exec:
+              command: ["ipfs", "--api=/ip4/127.0.0.1/tcp/5021", "diag", "healthy"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          # Liveness is a plain TCP check: an exec of the full ipfs CLI counts
+          # against this container's CPU limit, so a busy node could throttle
+          # its own probe into a restart. Readiness still runs diag healthy.
+          livenessProbe:
+            tcpSocket:
+              host: 127.0.0.1
+              port: 5021
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["ipfs", "--api=/ip4/127.0.0.1/tcp/5021", "diag", "healthy"]
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+            - name: tmp
+              mountPath: /tmp
+
+        - name: cluster
+          image: ipfs-cluster
+          # The image entrypoint only adds a root->ipfs user switch, which a
+          # non-root pod skips. `init` runs once, on an empty state directory;
+          # the environment below overrides service.json and identity.json on
+          # every start, so this file stays the source of truth.
+          command: ["/sbin/tini", "--", "/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p "$IPFS_CLUSTER_PATH"
+              # /tmp is an emptyDir, which survives container restarts. After
+              # an unclean exit (OOM kill, SIGKILL) the pinning-service socket
+              # would still exist and the daemon would fail to bind it,
+              # crash-looping until the pod was deleted. Only this container
+              # uses the path.
+              rm -f /tmp/pinsvcapi.sock
+              if [ ! -f "$IPFS_CLUSTER_PATH/service.json" ]; then
+                ipfs-cluster-service init --consensus crdt
+              fi
+              exec ipfs-cluster-service daemon
+          env:
+            - name: IPFS_CLUSTER_PATH
+              value: /repo/ipfs-cluster
+            - name: HOME
+              value: /tmp
+            - name: GOMEMLIMIT
+              value: 3GiB
+            # Identity and swarm secret, from ansible-vault (roles/content).
+            - name: CLUSTER_ID
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: peer-id }
+            - name: CLUSTER_PRIVATEKEY
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: private-key }
+            - name: CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: secret }
+            - name: CLUSTER_PEERNAME
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: peer-name }
+            # The three peers: all trusted to modify the pinset, and the other
+            # two dialled directly at start (no DHT or mDNS discovery needed).
+            - name: CLUSTER_CRDT_TRUSTEDPEERS
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: trusted-peers }
+            - name: CLUSTER_PEERADDRESSES
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: peer-addresses }
+            # -1/-1: pin everywhere. Every peer that is up pins every CID, and a
+            # peer that was down catches up from the shared pinset when it
+            # returns. A fixed 3/3 with exactly three peers would refuse every
+            # new pin ("not enough peers to allocate CID") whenever one box is
+            # restarting or down.
+            - name: CLUSTER_REPLICATIONFACTORMIN
+              value: "-1"
+            - name: CLUSTER_REPLICATIONFACTORMAX
+              value: "-1"
+            # Swarm on 9096/tcp only (the default also listens on udp/9096).
+            - name: CLUSTER_LISTENMULTIADDRESS
+              value: /ip4/0.0.0.0/tcp/9096
+            # No mDNS on a host network, and no relaying for strangers.
+            - name: CLUSTER_MDNSINTERVAL
+              value: 0s
+            - name: CLUSTER_ENABLERELAYHOP
+              value: "false"
+            # Loopback only, without auth: loopback is shared only with this
+            # project's own host-network workloads (see README, Content cluster).
+            - name: CLUSTER_IPFSHTTP_NODEMULTIADDRESS
+              value: /ip4/127.0.0.1/tcp/5021
+            - name: CLUSTER_RESTAPI_HTTPLISTENMULTIADDRESS
+              value: /ip4/127.0.0.1/tcp/9094
+            - name: CLUSTER_IPFSPROXY_LISTENMULTIADDRESS
+              value: /ip4/127.0.0.1/tcp/9095
+            - name: CLUSTER_IPFSPROXY_NODEMULTIADDRESS
+              value: /ip4/127.0.0.1/tcp/5021
+            # The pinning-service API is not used. It cannot be switched off
+            # from the environment, so it listens on a socket inside this
+            # container instead of taking another host TCP port.
+            - name: CLUSTER_PINSVCAPI_HTTPLISTENMULTIADDRESS
+              value: /unix/tmp/pinsvcapi.sock
+          ports:
+            # roles/content opens 9096/tcp in ufw, to the other boxes only.
+            - name: cluster-swarm
+              containerPort: 9096
+              protocol: TCP
+
+          # Initial guesses, to be tuned from observed use once content is
+          # pinned (see the kubo container).
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+
+          readinessProbe:
+            exec:
+              command: ["ipfs-cluster-ctl", "--host", "/ip4/127.0.0.1/tcp/9094", "id"]
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              host: 127.0.0.1
+              port: 9094
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: kubo-config
+          secret:
+            secretName: kubo-config
+            defaultMode: 0440
+        # Mounted at /repo, NOT /data: the kubo and ipfs-cluster images declare
+        # VOLUME /data/ipfs and /data/ipfs-cluster, and containerd mounts its
+        # own anonymous volume (on the OS disk, owned by the images' uid 1000)
+        # over those paths unless a pod volume is mounted exactly there. The
+        # repos would silently land off the data disk, and unwritable for 10003.
+        - name: repo
+          persistentVolumeClaim:
+            claimName: content-repo
+        # Per pod, shared by both containers (the pinning-service socket lives
+        # here).
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

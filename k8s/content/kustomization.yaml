@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: content
+
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: content
+      app.kubernetes.io/part-of: ipfs-workers
+
+images:
+  # ipfs/kubo v0.43.1 (published 2026-09-15 00:52 UTC, the current v0.43.x;
+  # checked 2026-09-15), multi-arch index, pinned by digest. Same image as
+  # k8s/bootstrap.
+  - name: kubo
+    newName: ipfs/kubo
+    digest: sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
+  # ipfs/ipfs-cluster v1.1.6 (published 2026-05-11, the latest release;
+  # checked 2026-09-15), multi-arch index, pinned by digest. The project
+  # publishes to Docker Hub as ipfs/ipfs-cluster.
+  - name: ipfs-cluster
+    newName: ipfs/ipfs-cluster
+    digest: sha256:a83266c524f1c0bc81d14fe3c8b46c5b83a7b2d8432fb8a50300f27d3c863dcd
+
+# The content-cluster Secret (cluster secret, peer identity, peer lists) is
+# deliberately NOT here: it is created by roles/content from ansible-vault.
