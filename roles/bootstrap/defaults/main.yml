@@ -22,3 +22,45 @@ bootstrap_public_peers:
 
 # Public DNS name the bootstrap addresses are published under (/dnsaddr).
 bootstrap_dns_name: bootstrap.ipni.io
+
+# ---------------------------------------------------------------------------
+# Browser clients: libp2p over secure WebSockets (WSS)
+# ---------------------------------------------------------------------------
+# Browsers cannot use raw TCP or QUIC, and may only open WebSockets with a
+# certificate they trust. Kubo cannot serve its own certificate on /ws, so
+# Envoy (k8s/bootstrap-wss) terminates TLS on the public port and forwards
+# plain /ws to kubo on loopback. Published as
+#   /dns4/<box>.bootstrap.ipni.io/tcp/4443/wss/p2p/<PeerID>
+# Must match k8s/bootstrap-wss/envoy.yaml.
+bootstrap_wss_port: 4443
+bootstrap_ws_loopback_port: 4002
+bootstrap_wss_hostname: "{{ inventory_hostname }}.{{ bootstrap_dns_name }}"
+bootstrap_ws_listen: "/ip4/127.0.0.1/tcp/{{ bootstrap_ws_loopback_port }}/ws"
+bootstrap_wss_announce: "/dns4/{{ bootstrap_wss_hostname }}/tcp/{{ bootstrap_wss_port }}/wss"
+
+# Let's Encrypt issuer for the WSS certificate: letsencrypt-prod or
+# letsencrypt-staging. Staging certificates are not trusted by browsers, so the
+# WSS address is only announced with prod. Use staging to debug issuance
+# without spending production rate limits (5 certificates per name per week).
+bootstrap_wss_issuer: letsencrypt-prod
+
+# Optional contact for the Let's Encrypt account (empty: none).
+bootstrap_acme_email: ""
+
+# Most concurrent WSS connections accepted from one IPv4 address. Kubo sees
+# every WSS client as 127.0.0.1 and exempts loopback from its own per-IP
+# limits, so this firewall rule is the only per-client cap. Leaves room for
+# many browsers behind one NAT address.
+bootstrap_wss_max_conns_per_ip: 64
+
+# Relay reservations kubo allows per IP. All WSS clients share 127.0.0.1, so
+# kubo's default of 8 would be a limit for every browser combined; this equals
+# the total (Swarm.RelayService.MaxReservations, default 128).
+bootstrap_relay_max_reservations_per_ip: 128
+
+# The wss address is announced (and checked) only with a browser-trusted certificate.
+bootstrap_wss_announced: "{{ bootstrap_wss_issuer == 'letsencrypt-prod' }}"
+
+# kubo's uid, for the firewall rule that keeps it from dialing loopback.
+# Must match runAsUser in k8s/bootstrap/deployment.yaml.
+bootstrap_kubo_uid: 10002

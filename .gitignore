@@ -21,3 +21,4 @@ facts_cache/
 # every role's roles/<role>/tasks/ directory.
 /reviews/
 /tasks/
+/scripts/wss-check/node_modules/

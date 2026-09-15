@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Lives in the bootstrap namespace (created by k8s/bootstrap), next to the
+# Certificate whose Secret it mounts. A separate Deployment from kubo, so
+# proxy changes do not restart the bootstrapper.
+namespace: bootstrap
+
+resources:
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: bootstrap-wss
+      app.kubernetes.io/part-of: ipfs-workers
+
+# Same Envoy as k8s/route-origin: envoyproxy/envoy distroless-v1.39.1
+# (2026-08-27), pinned by index digest.
+images:
+  - name: envoy
+    newName: envoyproxy/envoy
+    digest: sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
+
+configMapGenerator:
+  - name: envoy-config
+    behavior: create
+    files:
+      - envoy.yaml
+      - sds.yaml
+
+# The certificate Secret (bootstrap-wss-tls) is NOT here: cert-manager writes
+# it from the Certificate that roles/bootstrap creates per box.

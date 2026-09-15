@@ -1,0 +1,41 @@
+---
+# cert-manager, from the pinned release manifest in k8s/cert-manager.
+
+- name: Deploy cert-manager
+  ansible.builtin.include_role:
+    name: kustomize_apply
+  vars:
+    kustomize_app: cert-manager
+    kustomize_namespace: cert-manager
+    kustomize_deployment: cert-manager-webhook
+    # kubectl reports these configured on every apply, though the object is
+    # untouched (same resourceVersion): the patch it sends is a no-op once the
+    # cainjector has added the CA bundle.
+    kustomize_always_configured: '^(mutating|validating)webhookconfiguration[.]'
+
+# kustomize_apply waits for one deployment; the other two must be up too
+# before Issuers and Certificates are created.
+- name: Wait for the cert-manager controller and cainjector
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=cert-manager, rollout, status, "deployment/{{ item }}", --timeout=300s]
+  loop: [cert-manager, cert-manager-cainjector]
+  changed_when: false
+  when: not ansible_check_mode
+
+# The webhook deployment turns Available before the cainjector has put its CA
+# into the webhook configurations; until then every cert-manager object is
+# rejected. A server-side dry run of an Issuer goes through the webhook.
+- name: Wait for the cert-manager webhook to admit requests
+  ansible.builtin.command:
+    argv: [k3s, kubectl, apply, --dry-run=server, -f, -]
+    stdin: |
+      apiVersion: cert-manager.io/v1
+      kind: Issuer
+      metadata: { name: webhook-probe, namespace: cert-manager }
+      spec: { selfSigned: {} }
+  register: cert_manager_webhook_probe
+  changed_when: false
+  retries: 30
+  delay: 5
+  until: cert_manager_webhook_probe.rc == 0
+  when: not ansible_check_mode

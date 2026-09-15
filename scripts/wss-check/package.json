@@ -1,0 +1,23 @@
+{
+  "name": "wss-check",
+  "private": true,
+  "description": "Dial the bootstrappers over libp2p WSS the way a browser does",
+  "type": "module",
+  "scripts": {
+    "node": "node node.mjs",
+    "browser": "node browser.mjs"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "17.0.0",
+    "@chainsafe/libp2p-yamux": "8.0.1",
+    "@libp2p/identify": "4.1.14",
+    "@libp2p/utils": "7.4.1",
+    "@libp2p/websockets": "10.1.21",
+    "@multiformats/dns": "1.0.15",
+    "@multiformats/multiaddr": "13.0.3",
+    "@multiformats/multiaddr-matcher": "3.0.2",
+    "esbuild": "0.28.2",
+    "libp2p": "3.3.11",
+    "puppeteer-core": "25.11.0"
+  }
+}

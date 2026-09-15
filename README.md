@@ -117,12 +117,29 @@ If step 2 fails, the play stops while password auth is still enabled, so the
 host stays reachable. Step 3's ordering matters just as much: enabling a
 default-deny firewall before allowing SSH would lock everyone out.
 
-**`k3s`** — installs a pinned k3s version as a standalone single-node cluster,
-disables traefik (ingress is chosen deliberately when services land), waits for
-the node to become Ready, and fetches a per-box kubeconfig. If the node name
+**`k3s`** — installs **k3s v1.36.4+k3s1** (the stable channel, checked
+2026-09-15) as a standalone single-node cluster, disables traefik (ingress is
+chosen deliberately when services land), enables **Secret encryption at rest**,
+waits for the node to become Ready, and fetches a per-box kubeconfig. It
+installs but never upgrades: if a box runs a different version than
+`k3s_version`, the role fails and points to `k3s-upgrade.yml`. If the node name
 changes (as when the boxes were renamed), leftover node objects are removed:
 those with this box's own IP (the same machine under its old name) and any
 that are not Ready. A Ready node on another IP is never deleted.
+
+**Upgrading k3s.** Add the latest patch of each minor version you need, up to
+the stable channel, to `k3s_upgrade_path` in `k3s-upgrade.yml`. Run it, then
+set `k3s_version` to the last entry. Look versions up at
+`https://update.k3s.io/v1-release/channels`, never from memory.
+
+- Kubernetes does not support skipping minor versions, so the playbook refuses
+  to.
+- Every step backs up `/var/lib/rancher/k3s/server` (datastore, token, CAs,
+  encryption keys) to `/var/lib/rancher/k3s-backups`.
+- The installer runs with `INSTALL_K3S_SKIP_START`. When the installer starts
+  k3s itself, it first flushes every `KUBE-*`/flannel iptables rule.
+- Each step waits for the node version, Ready, and every deployment.
+- Rolling back to an older minor needs the backup taken on that minor.
 
 ## someguy
 
@@ -405,7 +422,8 @@ clients; if it changed, every bootstrap address would break.
 - Bitswap off and providing off, so no content is stored;
 - AutoNAT service off and relay service on, matching the official nodes;
 - AutoTLS off;
-- listens on 4001 (TCP, QUIC, WebTransport, WebRTC-direct);
+- listens on 4001 (TCP, QUIC, WebTransport, WebRTC-direct), and on loopback
+  4002 for WSS (see "Browser clients (WSS)");
 - API on `127.0.0.1:5011` only, no gateway, and **token-protected**
   (`API.Authorizations`, per-box `vault_bootstrap_api_token`). With
   `hostNetwork`, loopback is shared with every host process and the other
@@ -432,8 +450,8 @@ and also dials kubo's default public bootstrap list (pinned in
 - Startup and readiness exec `ipfs diag healthy` with the API token. Liveness is
   a plain TCP check on 5011, so a busy node cannot throttle its own probe into a
   restart.
-- Ports 4001 tcp+udp are open in ufw. 4001 and 5011 are reserved from the
-  ephemeral range.
+- Ports 4001 tcp+udp and 4443/tcp are open in ufw. 4001, 4002, 4443, 5011
+  and 9902 (the WSS Envoy's admin) are reserved from the ephemeral range.
 
 **Upgrading kubo.** Change the digest in `k8s/bootstrap/kustomization.yaml`. The
 init container runs `ipfs repo migrate` before anything opens the repo, so a
@@ -453,7 +471,9 @@ repo created by kubo v0.36.0 (repo 16 → 18). Before upgrading:
 - its agent is `.../bootstrap.ipni.io`;
 - (before deploy) the vaulted key derives the published PeerID;
 - it speaks Kademlia but not Bitswap;
-- it advertises its public IP and no k3s addresses;
+- it advertises its public IP and no k3s or loopback addresses;
+- it announces the wss address, and 4443 presents a certificate that verifies
+  for `<box>.bootstrap.ipni.io` (checked from the controller);
 - once all boxes run, each is connected to the other two.
 
 ### DNS records (`ipni.io` zone, all **DNS only / grey cloud**)
@@ -478,42 +498,113 @@ The layout mirrors `bootstrap.libp2p.io`:
 - **`/dns4` instead of literal IPs,** which keeps each record set small.
 - **No WebTransport/WebRTC certhash addresses in DNS.** The certhashes rotate.
 
-**Who can bootstrap from this name: TCP and QUIC clients only** (kubo, go-libp2p,
-rust-libp2p, Node.js). A browser cannot. The name resolves to `/tcp` and
-`/quic-v1` addresses, which browsers cannot dial, and a browser only learns the
-WebTransport/WebRTC-direct certhash addresses by identify *after* connecting.
-Browser bootstrapping needs either WSS (deferred, below) or a delegated routing
-lookup first: `GET https://route-<box>.ipni.io/routing/v1/peers/<PeerID>`
-returns the certhash addresses. That path is not yet tested with a real browser
-client (Helia).
+**Who can bootstrap from this name.** TCP and QUIC clients (kubo, go-libp2p,
+rust-libp2p, Node.js) use the `/tcp` and `/quic-v1` addresses. Browsers use the
+`/tcp/4443/wss` address (see "Browser clients (WSS)"). WebTransport and
+WebRTC-direct certhash addresses are not in DNS: browsers learn them through
+identify after connecting.
 
-### Deferred: secure WebSockets (WSS)
+### Browser clients (WSS)
 
-**Skipped for now, deliberately.** That means **browsers cannot bootstrap from
-`bootstrap.ipni.io`** (see "Who can bootstrap from this name" above). If browser
-clients come into scope, WSS is the straightforward fix. Options:
+Browsers cannot dial raw TCP or QUIC, and may only open WebSockets to a
+certificate they trust. Each bootstrapper therefore also listens on
+**`/dns4/<box>.bootstrap.ipni.io/tcp/4443/wss`**, published in the box's
+`_dnsaddr` records, so `/dnsaddr/bootstrap.ipni.io/p2p/<PeerID>` works in
+js-libp2p and Helia too.
 
-- **Own certificate, port 4443 (preferred):** Let's Encrypt certificates for the
-  `*.bootstrap.ipni.io` names, renewed via a Cloudflare API token scoped to DNS
-  edits. Terminated in front of kubo's WebSocket listener; publish
-  `/dns4/<box>.bootstrap.ipni.io/tcp/4443/wss` in each box's `_dnsaddr` records.
-  Kubo's server profile filters loopback, so `127.0.0.0/8` must be removed from
-  `Swarm.AddrFilters` (not `NoAnnounce`), or kubo resets connections from the
-  local proxy. Port 443 is taken by the routing origin.
-- **kubo AutoTLS:** built in, but it gets certificates from Shipyard's
-  `libp2p.direct` service, which may not survive 2026-09-30.
+```
+browser --wss--> :4443 Envoy (TLS, Let's Encrypt) --ws--> 127.0.0.1:4002 kubo
+```
+
+- **Why a proxy.** Kubo cannot serve its own certificate on a `/ws` listener;
+  its only TLS WebSocket option is AutoTLS, which uses Shipyard's
+  `libp2p.direct` service. Envoy (`k8s/bootstrap-wss`, a separate Deployment,
+  so proxy changes do not restart kubo) terminates TLS and passes the bytes
+  through as plain TCP. Kubo ignores HTTP headers, so an HTTP-aware proxy would
+  only add timeouts that cut long-lived connections.
+- **Why 4443, not 443.** 443 is the routing origin, open to Cloudflare only.
+  4443 is not on the browsers' blocked-port list.
+- **Certificates.** cert-manager (`k8s/cert-manager`, the pinned v1.21.2
+  release manifest) gets a Let's Encrypt certificate per box through a
+  **DNS-01** challenge, using a Cloudflare API token (`vault_cloudflare_dns_token`,
+  Zone:DNS:Edit + Zone:Zone:Read on `ipni.io`). HTTP-01 is not possible: 80 is
+  closed and 443 is Cloudflare-only. Renewal is automatic at two-thirds of the
+  lifetime. Envoy loads the certificate through file-based SDS and picks up a
+  renewed Secret without a restart (never mount it with `subPath`).
+- **Staging.** `-e bootstrap_wss_issuer=letsencrypt-staging` issues from Let's
+  Encrypt staging to debug issuance without spending production limits
+  (5 certificates per name per week). Staging certificates are not trusted by
+  browsers, so the wss address is then **not announced**. Do not delete and
+  recreate the Certificate or its Secret repeatedly.
+- **Rollout order.** The role waits until the certificate is issued by the
+  selected issuer before deploying Envoy: an Envoy started without the Secret
+  resets every handshake until the next renewal.
+
+**Kubo changes** (on top of the server profile):
+
+- a `/ip4/127.0.0.1/tcp/4002/ws` listener, and the public wss address in
+  `Addresses.AppendAnnounce`;
+- `/ip4/127.0.0.0/ipcidr/8` **removed from `Swarm.AddrFilters`** (the proxy
+  connects from 127.0.0.1, and the filter would reject it) but **kept in
+  `Addresses.NoAnnounce`**, so no loopback address is published. Do not
+  re-apply the `server` profile; it adds the filter back;
+- `Swarm.RelayService.MaxReservationsPerIP` raised from 8 to 128: every WSS
+  client is 127.0.0.1 to kubo, so the default would be a limit for all browsers
+  combined.
+
+**Firewall** (`/etc/ufw/before.rules`, managed block):
+
+- 4443/tcp is open; 4002 is loopback only.
+- **At most 64 concurrent WSS connections per client IP.** Kubo exempts
+  loopback from its per-IP connection limits, so behind the proxy this is the
+  only per-client cap. Client addresses are in Envoy's access log.
+- **Kubo (uid 10002) may not open new loopback connections** except to its RPC
+  API. Removing the loopback filter also let kubo *dial* loopback, and a WSS
+  client (a loopback peer to kubo) could hand it 127.0.0.1 addresses to probe
+  the k3s API, kubelet, someguy and Envoy admin ports. Replies to the proxy's
+  connections are unaffected.
+
+**Testing like a browser.** `scripts/wss-check` dials with js-libp2p, WebSockets
+only, and prints what identify returns:
+
+```bash
+cd scripts/wss-check && npm ci
+node node.mjs    /dnsaddr/bootstrap.ipni.io/p2p/<PeerID>   # Node, browser connection gater
+node browser.mjs /dnsaddr/bootstrap.ipni.io/p2p/<PeerID>   # headless Chrome ($CHROME)
+```
 
 ### Keys at rest
 
-- **k3s Secret encryption is not enabled.** The `kubo-config` Secret (each
-  box's permanent key and API token) and the Envoy TLS secret sit unencrypted in
-  k3s's datastore on the OS disk. It cannot safely be switched on for these
-  clusters yet: enabling it on an *existing* cluster requires k3s
-  v1.33.10+k3s1 / v1.34.6+k3s1 / v1.35.3+k3s1 or newer
-  ([k3s docs](https://docs.k3s.io/cli/secrets-encrypt)), and these run
-  **v1.31.5, which is past upstream Kubernetes support**. Upgrade k3s, then
-  enable encryption and rewrite the Secrets. This does not help against root
-  on the box, which has the keys regardless.
+- **k3s Secret encryption is enabled** (AES-CBC, k3s's documented provider for
+  this procedure). It covers the `kubo-config` Secret (each box's permanent key
+  and API token), the Envoy TLS secrets and the Cloudflare DNS token. The key lives in
+  `/var/lib/rancher/k3s/server/cred/encryption-config.json` on the same disk, so
+  this protects datastore copies and backups, not a compromised root.
+- **Existing clusters follow k3s's documented order** (`roles/k3s`). An
+  interrupted run resumes instead of repeating a step:
+  1. `secrets-encrypt enable`;
+  2. add `secrets-encryption: true` and restart;
+  3. confirm stage `start`;
+  4. `rotate-keys`, then restart.
+
+  The reverse order (flag first) is a known way to break it
+  ([k3s#14596](https://github.com/k3s-io/k3s/issues/14596)).
+- **Verified in the datastore itself, not just the status line.** The role reads
+  kine's SQLite table and requires every Secret's current row to be ciphertext
+  in **both** `value` and `old_value`. kine copies the previous value into
+  `old_value` on every write, so right after rotate-keys each row still carried
+  its plaintext there. Re-applying unchanged Secrets does not fix that (the API
+  server skips identical writes), so the role annotates every Secret to force a
+  real write.
+- **Older revisions** still held plaintext right after enabling (8–11 per box).
+  kine compacts revisions older than its newest 1,000, and k3s VACUUMs the file
+  at startup, so they go after compaction plus a restart. Done on all three
+  boxes (2026-09-15): 0 plaintext revisions, and no private-key or token text
+  anywhere in `state.db` or its WAL. The same search finds them in a
+  pre-encryption backup. The role reports the remaining count.
+- **Backups taken before encryption** (`/var/lib/rancher/k3s-backups/*`, root
+  only) contain the Secrets in plaintext. They are the rollback points for the
+  k3s upgrade. Delete them once rollback is no longer needed.
 - **Repo directory permissions.** local-path creates volume directories as
   `2777`, but its parent `/data/local-path-provisioner` is `0700 root`, so no
   other local user can reach them. Verified as `nobody`: listing, creating and
@@ -550,13 +641,15 @@ the vault. SSH has no password fallback by design.
       request's `cf-ray` appears in the correct box's Envoy access log.
 - [ ] Run `scripts/check-cloudflare-ranges.sh` periodically (cron or CI).
 - [x] ~~Create the `bootstrap.ipni.io` DNS records~~ — live and verified; `dns.txt` is the source.
-- [ ] **Upgrade k3s** off v1.31 (past upstream support), one minor version at a
-      time, then enable Secret encryption (see "Keys at rest").
-- [ ] If browser clients matter: WSS for the bootstrappers, or a tested
-      delegated-routing path (see "Who can bootstrap from this name").
+- [x] ~~Upgrade k3s off v1.31 and enable Secret encryption~~. All boxes are on
+      v1.36.4+k3s1 via `k3s-upgrade.yml`, with encryption verified in the datastore.
+- [ ] Delete the pre-encryption backups in `/var/lib/rancher/k3s-backups` once
+      the upgrade no longer needs a rollback path; they contain plaintext Secrets.
 - [ ] Watch kubo / go-libp2p security advisories; kubo is unmaintained after
       2026-09-30. Review `bootstrap_public_peers` once the official nodes' future is known.
-- [ ] WSS for the bootstrappers is deferred (see "Deferred: secure WebSockets").
+- [ ] **WSS for the bootstrappers:** add `vault_cloudflare_dns_token` to
+      `group_vars/ipfs_nodes/vault.yml`, run `bootstrap.yml`, then import the
+      `tcp/4443/wss` records from `dns.txt`.
 - [ ] **Before putting these boxes behind the live Cloudflare router:**
   - find out which Host it sends and which zone it lives in;
   - add that Host to `domains` in `k8s/route-origin/envoy.yaml` (otherwise 421);
@@ -589,19 +682,25 @@ roles/kustomize_apply/    shared: ship, dry-run/apply, wait, prune stale ConfigM
 k8s/someguy/              someguy kustomize manifests
 k8s/route-origin/         Envoy kustomize manifests and envoy.yaml
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
+k8s/bootstrap-wss/        Envoy TLS proxy for the bootstrappers' WSS listener
+k8s/cert-manager/         pinned cert-manager release manifest (WSS certificates)
+roles/cert_manager/       cert-manager deploy and webhook readiness
 roles/bootstrap/          kubo config from base + vaulted identity, Secret, deploy, checks
   files/kubo-config.json  base kubo config (no identity)
 host_vars/<box>/bootstrap.yml  the box's permanent bootstrapper PeerID
 certs/                    origin CSR + certificate, origin-pull CA + client certificate (public)
-group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and client keys (AOP, deferred)
+group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and client keys (AOP, deferred),
+                          Cloudflare DNS token (WSS certificates)
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
 scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 scripts/check-cloudflare-ranges.sh  pinned Cloudflare ranges vs Cloudflare's API
 scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
 scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used by the preflight)
 scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
+scripts/wss-check/                  dial the bootstrappers over WSS from Node or headless Chrome
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 site.yml                  base preparation playbook
+k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 routing.yml               routing service playbook (someguy + origin)
-bootstrap.yml             bootstrap node playbook
+bootstrap.yml             bootstrap node playbook (with cert-manager)
 ```

@@ -9,3 +9,8 @@ kustomize_dest: "/etc/ipfs-workers/k8s/{{ kustomize_app }}"
 
 # First start pulls the image; later rollouts also wait out preStop drains.
 kustomize_rollout_timeout: 600s
+
+# Regex for apply output lines that report "configured" on every run without
+# changing anything, so they do not mark the task changed. The default
+# matches only empty lines, i.e. nothing.
+kustomize_always_configured: '^$'

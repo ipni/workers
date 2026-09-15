@@ -1,0 +1,89 @@
+# Envoy terminating TLS for the bootstrapper's libp2p WebSocket transport, so
+# browsers can dial /dns4/<box>.bootstrap.ipni.io/tcp/4443/wss.
+#
+# client -> :4443 TLS (Let's Encrypt, cert-manager) -> 127.0.0.1:4002 plain /ws (kubo)
+#
+# Plain TCP proxying, no HTTP handling: kubo ignores request headers, so an
+# HTTP-aware proxy would add nothing but request and idle timeouts that cut
+# long-lived libp2p connections. Kubo sees every client as 127.0.0.1 (its
+# per-IP connection limits exempt loopback); per-IP limits are enforced by the
+# firewall instead (roles/bootstrap), and the client address is in the access log.
+
+admin:
+  # Host loopback only (hostNetwork). 9901 is the route-origin Envoy's.
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9902 }
+
+# SDS needs a node id and cluster, even for file-based sources.
+node: { id: bootstrap-wss, cluster: bootstrap-wss }
+
+overload_manager:
+  resource_monitors:
+    - name: envoy.resource_monitors.global_downstream_max_connections
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+        max_active_downstream_connections: 20000
+
+static_resources:
+  listeners:
+    - name: libp2p_wss
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 4443 }
+      filter_chains:
+        - transport_socket_connect_timeout: 10s
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                # kubo's /ws listener speaks HTTP/1.1 only.
+                alpn_protocols: ["http/1.1"]
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                # Delivered through file-based SDS (sds.yaml) rather than
+                # tls_certificates: only SDS certificates are reloaded, so
+                # cert-manager renewals take effect without a restart.
+                tls_certificate_sds_secret_configs:
+                  - name: libp2p_wss_cert
+                    sds_config:
+                      resource_api_version: V3
+                      path_config_source:
+                        path: /etc/envoy/config/sds.yaml
+                        watched_directory: { path: /etc/envoy/config }
+          filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: libp2p_wss
+                cluster: kubo_ws
+                # libp2p (yamux) sends keepalives every 30s, so only dead
+                # connections reach this.
+                idle_timeout: 3600s
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          time: "%START_TIME%"
+                          client: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+                          duration_ms: "%DURATION%"
+                          rx_bytes: "%BYTES_RECEIVED%"
+                          tx_bytes: "%BYTES_SENT%"
+                          flags: "%RESPONSE_FLAGS%"
+
+  clusters:
+    - name: kubo_ws
+      type: STATIC
+      connect_timeout: 2s
+      # The default of 1024 would cap concurrent browser connections.
+      circuit_breakers:
+        thresholds:
+          - max_connections: 20000
+      load_assignment:
+        cluster_name: kubo_ws
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 4002 }

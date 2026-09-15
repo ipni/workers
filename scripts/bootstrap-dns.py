@@ -16,6 +16,7 @@ import yaml
 ZONE = "ipni.io"
 NAME = f"bootstrap.{ZONE}"
 PORT = 4001
+WSS_PORT = 4443   # browsers: TLS via Envoy, see k8s/bootstrap-wss
 TTL = 1   # "Auto" in Cloudflare, as in its own exports
 
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -47,7 +48,7 @@ out = [
     *[f'_dnsaddr.{NAME}.\t{TTL}\tIN\tTXT\t"dnsaddr=/dnsaddr/{box}.{NAME}/p2p/{pid}" {tag}' for box, _, pid in boxes],
 ]
 for box, _, pid in boxes:
-    out += ["", f";; {box}: its addresses (TCP and QUIC)"]
-    for proto in (f"tcp/{PORT}", f"udp/{PORT}/quic-v1"):
+    out += ["", f";; {box}: its addresses (TCP, QUIC, and WSS for browsers)"]
+    for proto in (f"tcp/{PORT}", f"udp/{PORT}/quic-v1", f"tcp/{WSS_PORT}/wss"):
         out.append(f'_dnsaddr.{box}.{NAME}.\t{TTL}\tIN\tTXT\t"dnsaddr=/dns4/{box}.{NAME}/{proto}/p2p/{pid}" {tag}')
 print("\n".join(out))

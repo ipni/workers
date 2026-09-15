@@ -94,7 +94,10 @@
       # this output in check mode.
       register: kustomize_dryrun
       check_mode: false
-      changed_when: kustomize_dryrun.stdout is search('\\b(created|configured)\\b')
+      changed_when: >-
+        kustomize_dryrun.stdout_lines
+        | reject('search', kustomize_always_configured)
+        | select('search', '\\b(created|configured)\\b') | list | length > 0
 
   always:
     - name: Remove the dry-run staging directory
@@ -109,7 +112,10 @@
   ansible.builtin.command:
     argv: [k3s, kubectl, apply, -k, "{{ kustomize_dest }}"]
   register: kustomize_apply
-  changed_when: kustomize_apply.stdout is search('\\b(created|configured)\\b')
+  changed_when: >-
+    kustomize_apply.stdout_lines
+    | reject('search', kustomize_always_configured)
+    | select('search', '\\b(created|configured)\\b') | list | length > 0
   when: not ansible_check_mode
 
 - name: Record what the apply did

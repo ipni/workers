@@ -1,0 +1,115 @@
+---
+# One step of a k3s upgrade to `k3s_hop_version`. Included in order by
+# k3s-upgrade.yml. A box already at or past this version skips the step, so
+# re-running the playbook resumes where it stopped.
+
+- name: "Read the installed k3s version ({{ k3s_hop_version }} step)"
+  ansible.builtin.command:
+    argv: [k3s, --version]
+  register: k3s_installed
+  changed_when: false
+  check_mode: false
+
+- name: Compare installed and target versions
+  vars:
+    installed_tag: "{{ k3s_installed.stdout | regex_search('v[0-9]+[.][0-9]+[.][0-9]+[+]k3s[0-9]+') }}"
+  ansible.builtin.set_fact:
+    k3s_installed_tag: "{{ installed_tag }}"
+    # [major, minor, patch, k3s revision], compared as integer lists
+    k3s_installed_parts: "{{ installed_tag | regex_findall('[0-9]+') | map('int') | list }}"
+    k3s_hop_parts: "{{ k3s_hop_version | regex_findall('[0-9]+') | map('int') | list }}"
+
+# k3s (like Kubernetes) supports upgrading only one minor version at a time.
+- name: Refuse to skip a minor version
+  ansible.builtin.assert:
+    that: >-
+      k3s_installed_parts >= k3s_hop_parts
+      or k3s_hop_parts[1] <= k3s_installed_parts[1] + 1
+    fail_msg: >-
+      {{ inventory_hostname }} runs {{ k3s_installed_tag }}; going to
+      {{ k3s_hop_version }} would skip a minor version. Add the intermediate
+      versions to k3s_upgrade_path.
+    quiet: true
+
+- name: "Upgrade to {{ k3s_hop_version }}"
+  when: k3s_installed_parts < k3s_hop_parts
+  block:
+    # The whole server directory: SQLite datastore, token, cluster CAs and
+    # credentials - everything needed to restore this cluster as it was.
+    - name: Create the k3s backup directory
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s-backups
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # Stopping k3s first gives a consistent copy of the SQLite database.
+    # Running containers are not stopped by this (k3s uses KillMode=process).
+    - name: Stop k3s for a consistent datastore backup
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+
+    - name: "Back up the k3s server state before leaving {{ k3s_installed_tag }}"
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -czf
+          - "/var/lib/rancher/k3s-backups/server-{{ k3s_installed_tag | replace('+', '_') }}-{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}.tar.gz"
+          - -C
+          - /var/lib/rancher/k3s
+          - server
+      changed_when: true
+
+    - name: Download the k3s installer
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /root/k3s-install.sh
+        mode: "0700"
+        owner: root
+        group: root
+        force: true
+
+    # The installer replaces the binary and keeps /etc/rancher/k3s/config.yaml.
+    # INSTALL_K3S_SKIP_START: when it starts the service itself, the installer
+    # first strips every KUBE-* and flannel iptables rule, leaving pod traffic
+    # without network-policy rules until k3s re-programs them. Starting k3s
+    # ourselves skips that flush.
+    - name: "Install k3s {{ k3s_hop_version }}"
+      ansible.builtin.command:
+        argv: [/root/k3s-install.sh]
+      environment:
+        INSTALL_K3S_VERSION: "{{ k3s_hop_version }}"
+        INSTALL_K3S_EXEC: server
+        INSTALL_K3S_SKIP_START: "true"
+      changed_when: true
+
+    - name: Start k3s on the new version
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        daemon_reload: true
+
+    - name: Wait for the node to report the new kubelet version
+      ansible.builtin.command:
+        argv: [k3s, kubectl, get, node, "{{ inventory_hostname }}", -o, "jsonpath={.status.nodeInfo.kubeletVersion}"]
+      register: k3s_kubelet_version
+      changed_when: false
+      retries: 30
+      delay: 10
+      until: k3s_kubelet_version.rc == 0 and k3s_kubelet_version.stdout == k3s_hop_version
+
+    - name: Wait for the node to be Ready
+      ansible.builtin.command:
+        argv: [k3s, kubectl, wait, --for=condition=Ready, "node/{{ inventory_hostname }}", --timeout=300s]
+      changed_when: false
+
+    - name: Wait for every deployment to be available again
+      ansible.builtin.command:
+        argv: [k3s, kubectl, wait, --for=condition=Available, deployment, --all, --all-namespaces, --timeout=600s]
+      register: k3s_deployments
+      changed_when: false
+      retries: 3
+      delay: 20
+      until: k3s_deployments.rc == 0

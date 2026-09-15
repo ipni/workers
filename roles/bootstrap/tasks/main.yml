@@ -21,6 +21,15 @@
       scripts/new-bootstrap-identity.sh {{ inventory_hostname }}
     quiet: true
 
+- name: Fail if there is no Cloudflare token for the WSS certificate
+  ansible.builtin.assert:
+    that: vault_cloudflare_dns_token is defined and vault_cloudflare_dns_token | length > 0
+    fail_msg: >-
+      vault_cloudflare_dns_token is not set (group_vars/ipfs_nodes/vault.yml).
+      cert-manager needs it for the WSS certificate: a Cloudflare API token
+      with Zone:DNS:Edit and Zone:Zone:Read on ipni.io.
+    quiet: true
+
 # no_log: the private key is passed on stdin. The script prints only the
 # derived PeerID or the reason for failure, which the assert below reports.
 - name: Derive the PeerID from the vaulted private key
@@ -56,6 +65,48 @@
     proto: udp
     comment: bootstrap libp2p
 
+- name: Allow browser clients (libp2p WSS, via Envoy)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bootstrap_wss_port }}"
+    proto: tcp
+    comment: bootstrap libp2p wss
+
+# Raw iptables rules ufw has no syntax for. They go before ufw's own
+# "allow all on loopback" rules, which would otherwise accept the traffic the
+# second rule is meant to stop.
+#
+# 1. Per-IP cap on concurrent WSS connections. Behind the proxy every client
+#    is 127.0.0.1 to kubo, which exempts loopback from its per-IP limits.
+#
+# 2. Kubo may not open new loopback connections, except to its own RPC API
+#    (probes and `ipfs` CLI calls run as the same uid). The WSS proxy needs
+#    kubo to accept connections from 127.0.0.1, so the loopback entry is gone
+#    from Swarm.AddrFilters, which also stopped kubo DIALING loopback. A
+#    WSS client could otherwise hand kubo 127.0.0.1 addresses (identify accepts
+#    them from loopback peers) and make it probe the k3s API, kubelet, someguy
+#    and Envoy admin ports. Replies to accepted connections are not NEW, so
+#    serving the proxy is unaffected. IPv6 needs no rule: ::1 stays filtered.
+#    Kubo's DNS goes to the provider's resolvers, not loopback.
+- name: Add the WSS firewall rules to ufw
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/before.rules
+    marker: "# {mark} ANSIBLE MANAGED BLOCK bootstrap"
+    insertbefore: '^# allow all on loopback'
+    block: |
+      # Per-IP cap on concurrent libp2p WSS connections
+      -A ufw-before-input -p tcp --dport {{ bootstrap_wss_port }} --syn -m connlimit --connlimit-above {{ bootstrap_wss_max_conns_per_ip }} --connlimit-mask 32 -j REJECT --reject-with tcp-reset
+      # The bootstrapper (uid {{ bootstrap_kubo_uid }}) may not dial loopback, except its RPC API
+      -A ufw-before-output -o lo -p tcp -m owner --uid-owner {{ bootstrap_kubo_uid }} -m conntrack --ctstate NEW ! --dport {{ bootstrap_api | regex_search('[0-9]+$') }} -j REJECT --reject-with tcp-reset
+      -A ufw-before-output -o lo -p udp -m owner --uid-owner {{ bootstrap_kubo_uid }} -m conntrack --ctstate NEW -j REJECT
+  register: bootstrap_ufw_rules
+
+- name: Reload ufw to load the WSS firewall rules
+  ansible.builtin.command:
+    argv: [ufw, reload]
+  when: bootstrap_ufw_rules is changed
+  changed_when: true
+
 # ---------------------------------------------------------------------------
 # kubo config. Base settings are committed in files/kubo-config.json (no
 # secrets); each box adds its identity from the vault, the bootstrap list, and
@@ -90,6 +141,13 @@
     # process and the other hostNetwork pods (someguy, Envoy), so loopback alone
     # does not protect the admin RPC. Every /api/v0 call now needs the token.
     # (kubo does not guard /debug/metrics or /debug/pprof with it.)
+    #
+    # WSS: kubo serves plain /ws on loopback for the Envoy TLS proxy, and the
+    # loopback entry leaves Swarm.AddrFilters so kubo accepts the proxy's
+    # 127.0.0.1 connections (the firewall still stops kubo dialing loopback).
+    # NoAnnounce keeps it, so no 127.0.0.1 address is ever published. The public
+    # wss address is announced explicitly: kubo cannot infer it, and a DNS name
+    # lets browsers verify the certificate.
     bootstrap_kubo_config: >-
       {{ base | combine({
            'Identity': {'PeerID': bootstrap_peer_id, 'PrivKey': vault_bootstrap_privkey},
@@ -97,7 +155,14 @@
                'AuthSecret': 'bearer:' ~ vault_bootstrap_api_token,
                'AllowedPaths': ['/api/v0']}}}),
            'Bootstrap': bootstrap_list,
-           'Peering': {'Peers': peering}
+           'Peering': {'Peers': peering},
+           'Addresses': base.Addresses | combine({
+               'Swarm': base.Addresses.Swarm + [bootstrap_ws_listen],
+               'AppendAnnounce': [bootstrap_wss_announce] if bootstrap_wss_announced | bool else []}),
+           'Swarm': base.Swarm | combine({
+               'AddrFilters': base.Swarm.AddrFilters | reject('equalto', '/ip4/127.0.0.0/ipcidr/8') | list,
+               'RelayService': base.Swarm.RelayService | combine({
+                   'MaxReservationsPerIP': bootstrap_relay_max_reservations_per_ip})})
          }) }}
   no_log: true
 
@@ -115,6 +180,124 @@
     kind: Namespace
     name: bootstrap
     state: present
+
+# ---------------------------------------------------------------------------
+# WSS certificate and TLS proxy. The certificate must exist before Envoy
+# starts (see k8s/bootstrap-wss/deployment.yaml), and the address is announced
+# only once a trusted certificate is being served.
+# ---------------------------------------------------------------------------
+- name: Check whether cert-manager is installed yet
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, crd, certificates.cert-manager.io, --ignore-not-found, -o, name]
+  register: bootstrap_cm_crd
+  changed_when: false
+  check_mode: false
+
+# On a first --check neither the namespace nor cert-manager's CRDs exist, so
+# the objects below cannot even be dry-run.
+- name: Create the WSS certificate
+  when: not ansible_check_mode or (bootstrap_ns.stdout and bootstrap_cm_crd.stdout)
+  block:
+    - name: Install the Cloudflare API token for DNS-01 challenges
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: cloudflare-api-token
+            namespace: bootstrap
+          data:
+            api-token: "{{ vault_cloudflare_dns_token | b64encode }}"
+      no_log: true
+
+    # Both issuers always exist; bootstrap_wss_issuer picks one. DNS-01 because
+    # the only open port that could answer HTTP-01 (:443) is Cloudflare-only.
+    - name: Create the Let's Encrypt issuers
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: "{{ item.name }}"
+            namespace: bootstrap
+          spec:
+            acme: >-
+              {{ {'server': item.server,
+                  'privateKeySecretRef': {'name': item.name ~ '-account-key'},
+                  'solvers': [{'selector': {'dnsZones': [bootstrap_dns_name | regex_replace('^[^.]+[.]', '')]},
+                               'dns01': {'cloudflare': {'apiTokenSecretRef':
+                                   {'name': 'cloudflare-api-token', 'key': 'api-token'}}}}]}
+                 | combine({'email': bootstrap_acme_email} if bootstrap_acme_email else {}) }}
+      loop:
+        - { name: letsencrypt-prod, server: "https://acme-v02.api.letsencrypt.org/directory" }
+        - { name: letsencrypt-staging, server: "https://acme-staging-v02.api.letsencrypt.org/directory" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Request the WSS certificate
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: bootstrap-wss
+            namespace: bootstrap
+          spec:
+            secretName: bootstrap-wss-tls
+            dnsNames: ["{{ bootstrap_wss_hostname }}"]
+            privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+            issuerRef: { group: cert-manager.io, kind: Issuer, name: "{{ bootstrap_wss_issuer }}" }
+
+    # Ready alone is not enough right after an issuer switch: the old
+    # certificate stays Ready until cert-manager notices. Also require that
+    # the Secret was issued by the selected issuer.
+    - name: Wait for the WSS certificate to be issued
+      ansible.builtin.command:
+        argv:
+          - k3s
+          - kubectl
+          - --namespace=bootstrap
+          - get
+          - certificate/bootstrap-wss
+          - secret/bootstrap-wss-tls
+          - --ignore-not-found
+          - -o
+          - >-
+            jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{.metadata.annotations.cert-manager\.io/issuer-name}{" "}{end}
+      register: bootstrap_cert_state
+      changed_when: false
+      # DNS-01: record creation, propagation checks, validation. Usually 1-2 min.
+      retries: 60
+      delay: 10
+      until: bootstrap_cert_state.stdout.split() == ['True', bootstrap_wss_issuer]
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Show why the WSS certificate is not issued
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=bootstrap, describe, certificate/bootstrap-wss,
+               certificaterequests, orders.acme.cert-manager.io, challenges.acme.cert-manager.io]
+      register: bootstrap_cert_describe
+      changed_when: false
+      failed_when: true
+      when:
+        - not ansible_check_mode
+        - bootstrap_cert_state.stdout.split() != ['True', bootstrap_wss_issuer]
+
+    - name: Deploy the WSS proxy
+      ansible.builtin.include_role:
+        name: kustomize_apply
+      vars:
+        kustomize_app: bootstrap-wss
+        kustomize_namespace: bootstrap
+        kustomize_deployment: bootstrap-wss
 
 # config.json (with the private key) is used only for the first `ipfs init`;
 # config-nokey.json for every later start, because `ipfs config replace`
@@ -199,8 +382,29 @@
       # Advertises its public address, and nothing from the k3s networks.
       - node.Addresses | select('search', '^/ip4/' ~ (ansible_host | regex_escape) ~ '/') | list | length > 0
       - node.Addresses | select('search', '^/ip4/10[.]4[23][.]') | list | length == 0
+      - node.Addresses | select('search', '^/ip4/127[.]') | list | length == 0
+      - (bootstrap_wss_announce ~ '/p2p/' ~ bootstrap_peer_id in node.Addresses) == bootstrap_wss_announced | bool
     fail_msg: >-
       Bootstrapper check failed. ID={{ node.ID }} agent={{ node.AgentVersion }}
       protocols={{ node.Protocols }} addresses={{ node.Addresses }}
     success_msg: "{{ node.ID }} ({{ node.AgentVersion }}) advertising {{ node.Addresses | length }} addresses"
   when: not ansible_check_mode
+
+# From the controller, as a client would: the public WSS port must present a
+# certificate that verifies for the published name.
+- name: Check the WSS certificate as a client sees it
+  ansible.builtin.command:
+    argv: [openssl, s_client, -connect, "{{ ansible_host }}:{{ bootstrap_wss_port }}",
+           -servername, "{{ bootstrap_wss_hostname }}", -verify_hostname, "{{ bootstrap_wss_hostname }}",
+           -verify_return_error, -alpn, http/1.1]
+    stdin: ""
+  delegate_to: localhost
+  become: false
+  register: bootstrap_wss_tls
+  changed_when: false
+  failed_when: >-
+    bootstrap_wss_tls.rc != 0
+    or 'Verification: OK' not in bootstrap_wss_tls.stdout
+  when:
+    - not ansible_check_mode
+    - bootstrap_wss_announced | bool

@@ -2,6 +2,123 @@
 # A standalone single-node k3s cluster per host. These clusters know nothing
 # about each other by design - see inventory/hosts.yml for why.
 
+- name: Check whether k3s is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary
+
+# This role installs k3s but never upgrades it: an upgrade must go one minor
+# version at a time with a backup at each step, which is k3s-upgrade.yml's job.
+# Fail loudly on a mismatch rather than silently running against a different
+# version than the one pinned.
+- name: Read the installed k3s version
+  ansible.builtin.command:
+    argv: [k3s, --version]
+  register: k3s_installed_version
+  changed_when: false
+  check_mode: false
+  when: k3s_binary.stat.exists
+
+- name: Fail if the installed k3s differs from k3s_version
+  ansible.builtin.assert:
+    that: k3s_version in k3s_installed_version.stdout
+    fail_msg: >-
+      {{ inventory_hostname }} runs
+      {{ k3s_installed_version.stdout | regex_search('v[0-9.]+[+]k3s[0-9]+') }}
+      but k3s_version is {{ k3s_version }}. Upgrade with k3s-upgrade.yml (one
+      minor version at a time), then set k3s_version to match.
+    quiet: true
+  when: k3s_binary.stat.exists
+
+# ---------------------------------------------------------------------------
+# Secrets encryption at rest. Secrets hold the bootstrappers' permanent private
+# keys, their API tokens and the Envoy origin TLS key; without this they sit in
+# plaintext in k3s's SQLite datastore on the OS disk.
+#
+# A fresh install gets `secrets-encryption: true` in config.yaml from the start.
+# An EXISTING cluster must follow k3s's documented single-server procedure
+# exactly (https://docs.k3s.io/cli/secrets-encrypt, "Available as of
+# v1.33.10+k3s1"); getting it wrong "can leave your cluster permanently
+# corrupted":
+#   1. secrets-encrypt status shows Disabled
+#   2. secrets-encrypt enable
+#   3. add secrets-encryption to the config, restart
+#   4. secrets-encrypt rotate-keys, wait for reencrypt_finished
+#   5. restart
+#   6. status shows Enabled
+# The steps are split around the config write and restart below.
+# ---------------------------------------------------------------------------
+- name: Read the secrets encryption status
+  ansible.builtin.command:
+    argv: [k3s, secrets-encrypt, status]
+  register: k3s_encryption_status
+  changed_when: false
+  check_mode: false
+  when: k3s_binary.stat.exists
+
+# Two facts, so an interrupted run resumes instead of repeating a step:
+#   k3s_encryption_needs_enable  - never started ("no configuration file found")
+#   k3s_enable_encryption        - still Disabled at any point before rotate-keys
+#                                  (either never started, or enabled and restarted)
+- name: Decide which secrets encryption steps this cluster still needs
+  ansible.builtin.set_fact:
+    k3s_encryption_needs_enable: >-
+      {{ k3s_binary.stat.exists
+         and 'no configuration file found' in k3s_encryption_status.stdout }}
+    k3s_enable_encryption: >-
+      {{ k3s_binary.stat.exists
+         and 'Encryption Status: Disabled' in k3s_encryption_status.stdout }}
+
+- name: Enable secrets encryption on the existing cluster (step 2 of 6)
+  when:
+    - k3s_encryption_needs_enable | bool
+    - not ansible_check_mode
+  block:
+    - name: Create the k3s backup directory
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s-backups
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    # Consistent copy of the datastore, CAs and credentials, so a failed
+    # procedure can be restored.
+    - name: Stop k3s for a consistent backup
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+
+    - name: Back up the k3s server state before enabling encryption
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -czf
+          - "/var/lib/rancher/k3s-backups/server-before-encryption-{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}.tar.gz"
+          - -C
+          - /var/lib/rancher/k3s
+          - server
+      changed_when: true
+
+    - name: Start k3s again
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+
+    - name: Wait for the API server
+      ansible.builtin.command:
+        argv: [k3s, kubectl, get, --raw, /readyz]
+      register: k3s_readyz
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: k3s_readyz.rc == 0
+
+    - name: Run secrets-encrypt enable
+      ansible.builtin.command:
+        argv: [k3s, secrets-encrypt, enable]
+      changed_when: true
+
 - name: Create k3s config directory
   ansible.builtin.file:
     path: /etc/rancher/k3s
@@ -31,12 +148,10 @@
       # The API server is not exposed publicly; ufw denies 6443 inbound and
       # remote kubectl reaches it over an SSH tunnel.
       write-kubeconfig-mode: "0600"
+      # Encrypt Secrets at rest (AES-CBC). On an existing cluster this is only
+      # added as part of the procedure above.
+      secrets-encryption: true
   register: k3s_config
-
-- name: Check whether k3s is already installed
-  ansible.builtin.stat:
-    path: /usr/local/bin/k3s
-  register: k3s_binary
 
 - name: Download the k3s installer
   ansible.builtin.get_url:
@@ -56,6 +171,7 @@
   when: not k3s_binary.stat.exists
   changed_when: true
 
+# Also step 3 of the encryption procedure: restart with the new config.
 - name: Restart k3s if configuration changed
   ansible.builtin.systemd:
     name: k3s
@@ -69,6 +185,182 @@
     name: k3s
     enabled: true
     state: started
+
+- name: Finish enabling secrets encryption (steps 4-6 of 6)
+  when:
+    - k3s_enable_encryption | bool
+    - not ansible_check_mode
+  block:
+    - name: Wait for the API server after the restart
+      ansible.builtin.command:
+        argv: [k3s, kubectl, get, --raw, /readyz]
+      register: k3s_readyz
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: k3s_readyz.rc == 0
+
+    # Documented step 4: after enable + restart, status must show encryption
+    # still Disabled but at the "start" stage with matching hashes. Anything
+    # else means the procedure is off track - stop before rotating keys.
+    # The API can report ready before k3s's secrets-encrypt handler serves
+    # ("Internal error occurred"), so retry until the status call answers.
+    - name: Read the secrets-encrypt status once the handler is serving
+      ansible.builtin.command:
+        argv: [k3s, secrets-encrypt, status]
+      register: k3s_encryption_start
+      changed_when: false
+      retries: 24
+      delay: 5
+      until: k3s_encryption_start.rc == 0
+
+    - name: Check the cluster is at the start stage before rotating keys
+      ansible.builtin.assert:
+        that:
+          - "'Encryption Status: Disabled' in k3s_encryption_start.stdout"
+          - "'Current Rotation Stage: start' in k3s_encryption_start.stdout"
+          - "'All hashes match' in k3s_encryption_start.stdout"
+        fail_msg: "Not at the documented start stage; stopping before rotate-keys: {{ k3s_encryption_start.stdout }}"
+        quiet: true
+
+    - name: Run secrets-encrypt rotate-keys (re-encrypts every Secret)
+      ansible.builtin.command:
+        argv: [k3s, secrets-encrypt, rotate-keys]
+      changed_when: true
+
+    - name: Wait for re-encryption to finish
+      ansible.builtin.command:
+        argv: [k3s, secrets-encrypt, status]
+      register: k3s_rotation
+      changed_when: false
+      retries: 60
+      delay: 5
+      until: k3s_rotation.rc == 0 and 'reencrypt_finished' in k3s_rotation.stdout
+
+    - name: Restart k3s to complete the procedure
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+
+    - name: Wait for the API server after the final restart
+      ansible.builtin.command:
+        argv: [k3s, kubectl, get, --raw, /readyz]
+      register: k3s_readyz
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: k3s_readyz.rc == 0
+
+
+- name: Read the final secrets encryption status
+  ansible.builtin.command:
+    argv: [k3s, secrets-encrypt, status]
+  register: k3s_encryption_final
+  changed_when: false
+  retries: 24
+  delay: 5
+  until: k3s_encryption_final.rc == 0
+  when: not ansible_check_mode
+
+- name: Fail unless secrets encryption is enabled and consistent
+  ansible.builtin.assert:
+    that:
+      - "'Encryption Status: Enabled' in k3s_encryption_final.stdout"
+      - "'All hashes match' in k3s_encryption_final.stdout"
+    fail_msg: "{{ k3s_encryption_final.stdout }}"
+    quiet: true
+  when: not ansible_check_mode
+
+# A status line is not proof. Read the kine table in the SQLite datastore:
+#   - every Secret's CURRENT row must be encrypted in both value and old_value;
+#   - plaintext left in OLDER revisions is reported, not failed: those rows go
+#     away with kine compaction (newest 1000 revisions kept) plus the VACUUM
+#     k3s runs at startup.
+#
+# Why old_value matters: kine copies the previous value into old_value on every
+# write, so right after rotate-keys each Secret's current row still carries its
+# old plaintext. Re-applying an unchanged Secret does NOT fix that - the API
+# server skips writes of identical objects. A real change (an annotation) is
+# needed to create a revision whose value and old_value are both ciphertext.
+- name: Check Secrets are encrypted in the datastore
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3
+        db = sqlite3.connect("file:/var/lib/rancher/k3s/server/db/state.db?mode=ro", uri=True)
+        enc = lambda b: b is None or len(b) == 0 or bytes(b).startswith(b"k8s:enc:")
+        current = db.execute("""
+            SELECT k.name, k.value, k.old_value FROM kine k
+            JOIN (SELECT name, MAX(id) AS id FROM kine
+                  WHERE name LIKE '/registry/secrets/%' GROUP BY name) latest
+              ON k.id = latest.id
+            WHERE k.deleted = 0""").fetchall()
+        bad = [n for n, v, o in current if not (enc(v) and enc(o))]
+        history = db.execute("""
+            SELECT value, old_value FROM kine WHERE name LIKE '/registry/secrets/%'""").fetchall()
+        old_plain = sum(1 for v, o in history if not (enc(v) and enc(o)))
+        print(f"{len(current)} secrets; current rows with plaintext: {len(bad)}; "
+              f"older revisions still holding plaintext: {old_plain}")
+        for n in bad:
+            print("PLAINTEXT", n)
+        raise SystemExit(1 if bad or not current else 0)
+  register: k3s_secrets_at_rest
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Write every Secret once more so old_value is ciphertext too
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - annotate
+      - secrets
+      - --all
+      - --all-namespaces
+      - --overwrite
+      - "ipfs-workers/reencrypted-at={{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - k3s_secrets_at_rest.rc != 0
+
+- name: Re-check Secrets are encrypted in the datastore
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import sqlite3
+        db = sqlite3.connect("file:/var/lib/rancher/k3s/server/db/state.db?mode=ro", uri=True)
+        enc = lambda b: b is None or len(b) == 0 or bytes(b).startswith(b"k8s:enc:")
+        current = db.execute("""
+            SELECT k.name, k.value, k.old_value FROM kine k
+            JOIN (SELECT name, MAX(id) AS id FROM kine
+                  WHERE name LIKE '/registry/secrets/%' GROUP BY name) latest
+              ON k.id = latest.id
+            WHERE k.deleted = 0""").fetchall()
+        bad = [n for n, v, o in current if not (enc(v) and enc(o))]
+        history = db.execute("""
+            SELECT value, old_value FROM kine WHERE name LIKE '/registry/secrets/%'""").fetchall()
+        old_plain = sum(1 for v, o in history if not (enc(v) and enc(o)))
+        print(f"{len(current)} secrets; current rows with plaintext: {len(bad)}; "
+              f"older revisions still holding plaintext: {old_plain}")
+        for n in bad:
+            print("PLAINTEXT", n)
+        raise SystemExit(1 if bad or not current else 0)
+  register: k3s_secrets_at_rest
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - k3s_secrets_at_rest.rc != 0
+
+- name: Report Secret encryption at rest
+  ansible.builtin.debug:
+    msg: "{{ k3s_secrets_at_rest.stdout }}"
+  when: not ansible_check_mode
 
 # `kubectl wait` fails immediately with "not found" if the node object has not
 # registered yet - which is exactly the state just after a fresh install or a

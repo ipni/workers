@@ -1,0 +1,35 @@
+---
+# Upgrade k3s on the boxes, one minor version at a time (k3s and Kubernetes do
+# not support skipping minors). Boxes upgrade in parallel; each walks the path
+# in order and skips versions it has already reached, so re-running resumes.
+#
+#   ansible-playbook k3s-upgrade.yml
+#   ansible-playbook k3s-upgrade.yml -l chic-1
+#
+# Every step backs up /var/lib/rancher/k3s/server to /var/lib/rancher/k3s-backups
+# first. After the last step, k3s_version in group_vars must equal the last
+# entry here.
+
+- name: Upgrade k3s
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  vars:
+    # Latest patch of each minor, from https://update.k3s.io/v1-release/channels
+    # (checked 2026-09-15). Ends at the stable channel.
+    k3s_upgrade_path:
+      - v1.31.14+k3s1
+      - v1.32.13+k3s1
+      - v1.33.13+k3s2
+      - v1.34.11+k3s1
+      - v1.35.8+k3s1
+      - v1.36.4+k3s1
+  tasks:
+    - name: Walk the upgrade path
+      ansible.builtin.include_role:
+        name: k3s
+        tasks_from: upgrade_hop
+      loop: "{{ k3s_upgrade_path }}"
+      loop_control:
+        loop_var: k3s_hop_version

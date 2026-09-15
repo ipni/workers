@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bootstrap-wss
+spec:
+  replicas: 1
+  # hostNetwork binds :4443 on the node; Recreate avoids a bind deadlock.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bootstrap-wss
+  template:
+    metadata:
+      labels:
+        app: bootstrap-wss
+    spec:
+      # hostNetwork: kubo's /ws listener is on the host's loopback, and ufw
+      # (with its per-IP connection limit on 4443) only sees traffic addressed
+      # to the host - see k8s/route-origin/deployment.yaml.
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532     # the distroless image's nonroot user
+        runAsGroup: 65532
+        fsGroup: 65532       # lets Envoy read the mounted certificate
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: envoy
+          image: envoy
+          args:
+            - -c
+            - /etc/envoy/config/envoy.yaml
+            - --concurrency
+            - "2"
+            - --disable-hot-restart
+          ports:
+            - name: wss
+              containerPort: 4443
+              protocol: TCP
+
+          # From the bootstrapper's share of the box (see k8s/bootstrap).
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 1Gi
+
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /ready
+              port: 9902
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /ready
+              port: 9902
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy/config
+              readOnly: true
+            # A whole-volume mount, never subPath: subPath mounts do not see
+            # Secret updates, so renewals would never reach Envoy.
+            - name: tls
+              mountPath: /etc/envoy/tls
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: envoy-config
+        # Not optional: if Envoy started before the Secret existed, the
+        # listener would reset every TLS handshake until the next renewal.
+        # roles/bootstrap waits for the Certificate before deploying this.
+        - name: tls
+          secret:
+            secretName: bootstrap-wss-tls
+            defaultMode: 0440

@@ -1,0 +1,10 @@
+# The WSS certificate for envoy.yaml, as a file-based SDS resource. The files
+# come from the bootstrap-wss-tls Secret that cert-manager writes. Envoy watches
+# the directory: kubelet swaps a renewed Secret in with an atomic rename there.
+resources:
+  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret
+    name: libp2p_wss_cert
+    tls_certificate:
+      certificate_chain: { filename: /etc/envoy/tls/tls.crt }
+      private_key: { filename: /etc/envoy/tls/tls.key }
+      watched_directory: { path: /etc/envoy/tls }

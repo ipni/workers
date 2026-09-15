@@ -1,11 +1,13 @@
 ---
-# Deploy the IPFS/libp2p bootstrap nodes (kubo, DHT server) to the prepared boxes.
+# Deploy the IPFS/libp2p bootstrap nodes (kubo, DHT server) to the prepared boxes,
+# with cert-manager for their browser-facing WSS certificates.
 #
 #   ansible-playbook bootstrap.yml                  # all three boxes
 #   ansible-playbook bootstrap.yml -l chic-1        # one box
 #   ansible-playbook bootstrap.yml --check --diff   # dry run
 #
-# Requires site.yml to have run first (admin user, k3s, reserved ports).
+# Requires site.yml to have run first (admin user, k3s, reserved ports), and
+# vault_cloudflare_dns_token in group_vars/ipfs_nodes/vault.yml (see README).
 
 - name: Deploy the bootstrapper
   hosts: ipfs_nodes
@@ -13,6 +15,8 @@
   become: true
   gather_facts: false
   roles:
+    - role: cert_manager
+      tags: [cert-manager]
     - role: bootstrap
       tags: [bootstrap]
 
