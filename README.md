@@ -612,24 +612,37 @@ node browser.mjs /dnsaddr/bootstrap.ipni.io/p2p/<PeerID>   # headless Chrome ($C
 
 ## Secrets
 
-Credentials live in per-host `ansible-vault` files under
-`host_vars/<box>/vault.yml`, encrypted with `.vault_pass`. They were generated
-from a plaintext `servers.txt` by `scripts/bootstrap-vault.sh`; that file was
-gitignored, never committed, and has since been deleted, so **the vault files
-are now the only copy**. Edit them in place with
-`ansible-vault edit host_vars/<box>/vault.yml`.
+**This repository is public, so no credentials are committed, not even
+encrypted.** They live in `ansible-vault` files that sit where Ansible expects
+them but are gitignored (`vault.yml`), encrypted with `.vault_pass` (also
+gitignored). Get both from the operators' secret store before running any
+playbook, and put updated copies back after every change. **Neither can be
+recreated:** the bootstrap private keys are the permanent PeerIDs published in
+DNS.
+
+| File | Variables |
+|------|-----------|
+| `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token` |
+| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token` |
+
+The per-box files were generated from a plaintext `servers.txt` by
+`scripts/bootstrap-vault.sh`; that file was never committed and has since been
+deleted. Bootstrap identities come from `scripts/new-bootstrap-identity.sh`.
+Edit in place with `ansible-vault edit <file>`. The playbooks fail early with
+the variable's name when one is missing.
 
 The password fact is set with `no_log: true`, so the root password does not
 appear in output even at `-vvv`.
 
-**Back up `.vault_pass`.** Without it the vault files cannot be decrypted.
 
 Recovery is via the **provider KVM/web console** using the console password in
 the vault. SSH has no password fallback by design.
 
 ## Outstanding manual steps
 
-- [ ] **Back up `.vault_pass`** somewhere off this machine.
+- [ ] **Store the vault files and `.vault_pass` in the operators' secret
+      store.** They are no longer in git; until then this machine holds the
+      only copy.
 - [ ] **Rotate the root passwords.** They sat in plaintext in `servers.txt`.
       Root SSH login is now disabled, so they only matter for console access,
       but rotating is good hygiene. Then record the new values with
@@ -673,7 +686,7 @@ the vault. SSH has no password fallback by design.
 ansible.cfg               inventory, vault and SSH defaults
 inventory/hosts.yml       the three hosts
 group_vars/ipfs_nodes/    tunables (admin user, firewall, k3s, sysctl)
-host_vars/<box>/vault.yml   encrypted per-box credentials
+host_vars/<box>/vault.yml   encrypted per-box credentials (gitignored, see Secrets)
 roles/{common,storage,hardening,k3s}/   base preparation
 roles/someguy/            someguy firewall + deploy
 roles/route_origin/       Envoy origin: cert preflight, Cloudflare allowlist, TLS secret
@@ -690,7 +703,7 @@ roles/bootstrap/          kubo config from base + vaulted identity, Secret, depl
 host_vars/<box>/bootstrap.yml  the box's permanent bootstrapper PeerID
 certs/                    origin CSR + certificate, origin-pull CA + client certificate (public)
 group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and client keys (AOP, deferred),
-                          Cloudflare DNS token (WSS certificates)
+                          Cloudflare DNS token (WSS certificates) (gitignored, see Secrets)
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
 scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 scripts/check-cloudflare-ranges.sh  pinned Cloudflare ranges vs Cloudflare's API

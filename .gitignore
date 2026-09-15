@@ -4,6 +4,10 @@ servers.txt
 .vault_pass
 *.vault_pass
 
+# Encrypted credentials are not committed either: the repository is public.
+# They live only in the operators' secret store (see "Secrets" in README.md).
+vault.yml
+
 # Fetched kubeconfigs contain cluster admin credentials
 kubeconfigs/
 *.kubeconfig
