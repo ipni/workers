@@ -7,6 +7,8 @@ caught before a deploy, not after the node starts. No kubo binary is needed.
 
   check <expected-peer-id>   private key (kubo Identity.PrivKey, base64) on stdin
                              exit 0 match, 1 mismatch, 2 malformed key
+  derive                     private key on stdin; prints its PeerID
+                             exit 0, or 2 malformed key
   generate                   prints {"PeerID": ..., "PrivKey": ...} as JSON
 
 Formats (libp2p peer-id spec and kubo):
@@ -95,6 +97,13 @@ def main(argv):
             print(f"mismatch: key derives {derived}, expected {argv[2]}")
             return 1
         print(f"ok {derived}")
+        return 0
+    if len(argv) == 2 and argv[1] == "derive":
+        try:
+            print(peer_id_from_privkey(sys.stdin.read().strip()))
+        except (ValueError, IndexError) as e:
+            print(f"malformed key: {e}", file=sys.stderr)
+            return 2
         return 0
     if len(argv) == 2 and argv[1] == "generate":
         print(json.dumps(generate()))
