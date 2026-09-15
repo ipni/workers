@@ -4,10 +4,11 @@ Ansible base preparation for three geographically distributed hosts that will
 run IPFS-related services (someguy, a bootstrapper node, and the "content
 cluster" node serving website content and documentation).
 
-`site.yml` prepares the boxes; `bootstrap.yml` deploys the public bootstrap
-nodes; `routing.yml` deploys the routing service (someguy, the primary
-workload, behind an Envoy origin for Cloudflare). The content cluster node
-comes later.
+`site.yml` prepares the boxes; `routing.yml` deploys the routing service
+(someguy, the primary workload, behind an Envoy origin for Cloudflare);
+`bootstrap.yml` deploys the public bootstrap nodes; `content.yml` deploys the
+content cluster node (kubo + ipfs-cluster, one cluster peer per box) that
+hosts the website content.
 
 | Box    | Site      | IP              | Role                   |
 |--------|-----------|-----------------|------------------------|
@@ -362,6 +363,56 @@ To enable, **in this order**:
 **If the client certificate expires, Envoy rejects all traffic.** The
 preflight fails deploys 30 days before that.
 
+### Comparing with delegated-ipfs.dev
+
+`scripts/routing-compare.sh` is the evidence to gather before asking for any
+traffic cutover. It sends the same lookups to the public
+`delegated-ipfs.dev` (the baseline) and to each `route-<box>.ipni.io` (the
+candidates), all at the same moment. It shows that our boxes return comparable
+results at comparable latency. It does **not** prove capacity: it sends one
+request at a time.
+
+```bash
+./scripts/routing-compare.sh                         # all three boxes, 3 runs each
+./scripts/routing-compare.sh --candidate route-chic-1.ipni.io --runs 5
+./scripts/routing-compare.sh --out results-$(date +%F).json   # keep for later comparison
+```
+
+- **Fixtures** are in `scripts/routing-compare-cids.txt`, one per line:
+  `providers|peers|ipns <id> # what it exercises`. They cover well-provided,
+  sparse DHT-only, sparse IPNI-only and unprovided content, plus live and
+  missing IPNS names and the bootstrapper peer IDs.
+- **Output:** a per-fixture table with each endpoint's median result count and
+  latency, then a verdict per candidate. `low` means the candidate returned
+  fewer than 75% of the baseline's results in *every* run (`--tolerance`). The
+  summary gives p50/p95 latency, error rate and the number of `low` fixtures.
+- **Exit codes:**
+  - 0: every candidate is within tolerance;
+  - 1: a candidate is `low` on any fixture, or its error rate is more than 5
+    points above the baseline's;
+  - 2: the baseline is unreachable, or the arguments are bad.
+- **Why results differ.** DHT walks are nondeterministic, so the counts will
+  not be identical. A single `low` on a sparse DHT fixture with `--runs 1` is
+  often noise. A `low` that repeats across runs on the IPNI-only fixtures means
+  the cid.contact upstream is broken. Zero results for the unprovided fixtures
+  is expected everywhere.
+- **JSON counts are capped at 100.** Well-provided content reads `100` on every
+  healthy endpoint, so shortfalls only show on the moderate and sparse fixtures.
+- **Every request carries a unique query parameter.** delegated-ipfs.dev
+  answers repeat lookups from Cloudflare's cache (`max-age=300`); without the
+  parameter, runs 2 and 3 would time a cache hit against our uncached origin.
+- **IPNS is requested as `application/vnd.ipfs.ipns-record`.** Both
+  implementations answer `application/json` with 406.
+- **Latency includes your path to Cloudflare**, the same for every endpoint.
+  Box-to-box differences partly reflect where you ran it from.
+
+**Do not compare within 24 hours of a someguy restart.** someguy keeps no state,
+so a restart starts from an empty DHT routing table. Lookups work within a
+couple of minutes, but the table keeps filling for about a day, and until then
+our counts and latencies are understated. Check the pod's age first
+(`kubectl -n someguy get pods`), and use `--out` to track how results change
+as the table warms.
+
 ## Bootstrap nodes: bootstrap.ipni.io
 
 Each box runs a public IPFS/libp2p **bootstrap peer**: a kubo node that new
@@ -610,6 +661,157 @@ node browser.mjs /dnsaddr/bootstrap.ipni.io/p2p/<PeerID>   # headless Chrome ($C
   other local user can reach them. Verified as `nobody`: listing, creating and
   deleting are all denied. Keep that parent `0700` (the storage role sets it).
 
+## Content cluster node
+
+Each box runs a kubo node plus an **ipfs-cluster** peer that host the IPFS
+Project website content and documentation. The three peers form **one** CRDT
+cluster (the only state shared across the three otherwise independent k3s
+clusters), so a pin added on any box is pinned on every box.
+
+```bash
+ansible-playbook content.yml                  # all three boxes (also checks peering)
+ansible-playbook content.yml -l chic-1        # one box
+ansible-playbook content.yml --check --diff   # dry run
+```
+
+| Box    | ipfs-cluster PeerID                                    | kubo PeerID                                            |
+|--------|--------------------------------------------------------|--------------------------------------------------------|
+| sing-1 | `12D3KooWNzxaQEZCCw7c9RANwUieUbp9em6No7KrT45L3FLbAcsZ` | `12D3KooWDkwTCdWYVxnZCq6VYWsNjAGakCrqm7Zx3G2RSTR6dbsj` |
+| lith-1 | `12D3KooWQSgVevfuy33SToBfYoCexqvvhgqYp8oGZ8r3CAesguRo` | `12D3KooWRcTH1HzbFt7UCSVaYScStt5wPr4bJo3aXHuvqPk6Gmgr` |
+| chic-1 | `12D3KooWQ7PRw91uNk6e27NCym8CK1v39muL8omoDJzVsub3qZbV` | `12D3KooWKWfhxDGhs7DBgiqGmhCaj4SBoSbeEN2skHLbFsLZJCVS` |
+
+**Ports.**
+
+| Port | Listener | Exposure |
+|------|----------|----------|
+| 4101 tcp+udp | kubo libp2p (TCP, QUIC, WebTransport, WebRTC-direct) | public |
+| 5021 | kubo RPC API | loopback |
+| 9094 | ipfs-cluster REST API | loopback |
+| 9095 | ipfs-cluster IPFS proxy | loopback |
+| 9096 tcp | ipfs-cluster swarm | the other two boxes only (ufw), and the cluster secret |
+
+All five are reserved from the ephemeral range. ipfs-cluster's pinning-service
+API cannot be turned off from its environment, so it listens on a Unix socket
+inside the container rather than on another host port. The start script
+removes a stale socket first: after an unclean exit it would otherwise block
+every restart of the container (verified with `kill -9`).
+
+**Pinning.**
+
+```bash
+k3s kubectl -n content exec deploy/content -c cluster -- \
+  ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 pin add <cid>
+k3s kubectl -n content exec deploy/content -c cluster -- \
+  ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 status        # per-peer state
+```
+
+- **Replication "everywhere" (`-1`/`-1`).** Every peer that is up pins every
+  CID, and a peer that was down catches up from the shared pinset when it
+  returns. A fixed 3/3 would refuse every new pin ("not enough peers to
+  allocate CID") while any one box is restarting or down. Verified: with
+  lith-1 scaled to 0, `pin add` succeeded on the other two, and lith-1 reported
+  `PINNED` about a minute after it came back.
+- **Trade-off: "pinned" means pinned on the peers that are up.** After an
+  outage, check `status` for peers still `PIN_QUEUED`, `UNPINNED`,
+  `PIN_ERROR` or `CLUSTER_ERROR`.
+- **Size before pinning.** Every pin lands on every box. Nothing bounds the
+  blockstore except what is pinned: `Datastore.StorageMax` (90 GB) is only the
+  threshold for kubo's automatic GC, which is not enabled and never removes
+  pinned blocks, and local-path does not enforce the 100 GiB claim. Check the
+  site's total size against free space on the smallest box's `/data` first.
+
+**Cluster peers.**
+
+- **Fixed identities.** Every peer lists all three cluster PeerIDs as CRDT
+  trusted peers and dials the other two directly (`peer_addresses`).
+- **Configured from the environment.** The image's `service.json` is created
+  once; identity, secret, peers, replication factors and listen addresses are
+  environment overrides applied on every start, so `k8s/content/deployment.yaml`
+  is the source of truth. mDNS and relay hop are off.
+- The private key and swarm secret are in the container's environment (the
+  image reads them nowhere else). The same values are on the volume in
+  `identity.json` and `service.json` (mode 0600, uid 10003), so this adds
+  little exposure.
+
+**kubo.**
+
+- **Managed config, replaced on every start**, like the bootstrapper's:
+  `roles/content/files/kubo-config.json` (committed, no secrets) plus the box's
+  identity, bootstrap list and peering, delivered as the `kubo-config` Secret.
+  The init container runs `ipfs init` on the first start and `ipfs repo migrate`
+  plus `ipfs config replace` afterwards, then refuses to start unless the
+  repo's PeerID is the expected one. New kubo defaults therefore cannot drift
+  in across upgrades, and a change made through the RPC API is undone at the
+  next restart. The role compares the running config with the managed one
+  after every deploy (verified: a setting changed through the API fails the
+  check, and a restart restores it).
+- **Fixed identity and permanent peering** with the other two content kubos
+  (TCP and QUIC on 4101). kubo keeps those connections up and exempt from
+  trimming, so blocks one box has already fetched reach the others directly.
+- Bitswap and the DHT **on** (`Routing.Type=auto`), unlike the bootstrapper.
+  Connection manager 200/600.
+- **Only root CIDs are announced** (`Provide.Strategy=roots`). A client that
+  starts from a root (for example DNSLink to the site root, then path
+  resolution) finds these nodes. A client asking the DHT for any other CID (a
+  direct `ipfs://` link to a file or subdirectory) finds no provider unless it
+  is already connected to one of them. The reason was contention with someguy,
+  which runs about 416 DHT lookups/sec on the same boxes. The two do not share a
+  libp2p host or resource manager, only the host's CPU and sockets, and kubo
+  0.43's sweeping provider batches reprovides by keyspace region, so the cost of
+  `pinned` may be small. **Revisit once the site is pinned:** compare
+  `ipfs provide stat` and kubo CPU under `pinned` and `roots`.
+  **kubo 0.43 renamed `Reprovider.Strategy` to `Provide.Strategy`** and refuses
+  to start while the old key is set; check it with `ipfs config Provide.Strategy`.
+- **No Shipyard-operated services.** Autoconf is off: bootstraps from this
+  project's `/dnsaddr/bootstrap.ipni.io` peers plus the pinned public list, no
+  delegated routers, system DNS resolver. **AutoTLS is off**, so no
+  `libp2p.direct` registration, certificate or `/tls/ws` address. Browsers
+  reach IPFS through the bootstrappers' own WSS instead. Relay service off.
+- **No HTTP gateway.** These nodes serve content over libp2p only. Which HTTP
+  gateways put the site in front of browsers without an IPFS client, and who
+  runs them after 2026-09-30, is not yet recorded (see Outstanding).
+
+**Runtime.**
+
+- One Deployment, `content`, with two containers (`kubo`, `cluster`) sharing
+  the `content-repo` volume, mounted at `/repo` (`ipfs/`, `ipfs-cluster/`).
+  Not at `/data`: both images declare `VOLUME /data/...`, and containerd mounts
+  an anonymous volume on the OS disk over those paths unless a pod volume is
+  mounted exactly there. `hostNetwork`, `Recreate`, uid/gid 10003 (distinct
+  from someguy's 10001 and the bootstrapper's 10002), read-only root
+  filesystems.
+- From the ~30% of each box not reserved for someguy, shared with the
+  bootstrapper: kubo requests 500m / 2 GiB (limit 4 CPU / 8 GiB), cluster
+  250m / 512 MiB (limit 2 CPU / 4 GiB). **Initial guesses**, to tune once
+  content is pinned.
+- kubo startup and readiness run `ipfs diag healthy`; liveness is a TCP check
+  on 5021 (an exec would count against the CPU limit). Cluster readiness runs
+  `ipfs-cluster-ctl id`.
+- **The APIs are unauthenticated on loopback, by decision.** Loopback is shared
+  with the host and the other host-network pods, all of them this project's own
+  workloads (someguy, both Envoys and the bootstrapper, several internet-facing).
+  A request from any of them to 9094 or 9095 changes the shared pinset, so
+  **every box** would fetch, store and announce that content from this
+  project's IPs. Changes to kubo's config through 5021 last only until the
+  next restart. A compromised local process doing this is not considered a
+  realistic threat, so plain `ipfs-cluster-ctl` works without credentials.
+
+**Identities and adding a box.** `scripts/new-content-cluster-identity.sh
+<box>` creates the box's cluster and kubo keys (`vault_content_cluster_privkey`,
+`vault_content_kubo_privkey`), the shared swarm secret on first use
+(`vault_content_cluster_secret`), and `host_vars/<box>/content.yml` with the
+public PeerIDs derived from the vaulted keys. It never replaces a key, and
+re-running it finishes an interrupted run. The role derives each PeerID from
+its vaulted key before touching a box. **After adding a box, run
+`content.yml` on all boxes:** the existing boxes' trusted peers, peer
+addresses, kubo peering and 9096 firewall rules all name it.
+
+**Verification** after every deploy: identities preflighted; the kubo RPC and
+cluster REST APIs answer; the running kubo config equals the managed config;
+the cluster peer runs its vaulted PeerID and sees the expected kubo; and, on a
+full run, every cluster peer lists all three peers and every kubo is connected
+to the other two content kubos.
+
 ## Secrets
 
 **This repository is public, so no credentials are committed, not even
@@ -622,8 +824,8 @@ DNS.
 
 | File | Variables |
 |------|-----------|
-| `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token` |
-| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token` |
+| `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token`, `vault_content_cluster_privkey`, `vault_content_kubo_privkey` |
+| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token`, `vault_content_cluster_secret` |
 
 The per-box files were generated from a plaintext `servers.txt` by
 `scripts/bootstrap-vault.sh`; that file was never committed and has since been
@@ -658,7 +860,7 @@ the vault. SSH has no password fallback by design.
       v1.36.4+k3s1 via `k3s-upgrade.yml`, with encryption verified in the datastore.
 - [ ] Delete the pre-encryption backups in `/var/lib/rancher/k3s-backups` once
       the upgrade no longer needs a rollback path; they contain plaintext Secrets.
-- [ ] Watch kubo / go-libp2p security advisories; kubo is unmaintained after
+- [ ] Watch kubo / go-libp2p / ipfs-cluster releases and security advisories; kubo is unmaintained after
       2026-09-30. Review `bootstrap_public_peers` once the official nodes' future is known.
 - [ ] **WSS for the bootstrappers:** add `vault_cloudflare_dns_token` to
       `group_vars/ipfs_nodes/vault.yml`, run `bootstrap.yml`, then import the
@@ -671,11 +873,16 @@ the vault. SSH has no password fallback by design.
       "Deferred: Authenticated Origin Pulls").
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
 - [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
-- [ ] Deploy the bootstrapper and the content cluster node. Service ports are
-      opened by each service's own role, as someguy's are.
+- [ ] Pin the IPFS Project website content through the content cluster
+      (`ipfs-cluster-ctl pin add`), after checking its size against `/data` on
+      the smallest box. Then tune the content node's resources from observed
+      use, and compare `Provide.Strategy` `roots` against `pinned`.
+- [ ] Record which HTTP gateways serve the website to browsers without an IPFS
+      client, who operates them, and whether they continue after 2026-09-30.
 - [ ] Set up monitoring/alerting, and scrape `/debug/metrics/prometheus`. Include
-      `/data` usage: the bootstrappers' DHT record store grows with traffic, and
-      local-path does not enforce the 20 GiB claim.
+      `/data` usage: the bootstrappers' DHT record store grows with traffic, the
+      content repos grow with every pin on every box, and local-path enforces
+      neither the 20 GiB nor the 100 GiB claim.
 - [ ] Optional: every box's host `resolv.conf` lists its two provider
       nameservers twice, so kubelet warns and keeps only three entries. DNS
       works; de-duplicating would silence the warning.
@@ -696,6 +903,10 @@ k8s/someguy/              someguy kustomize manifests
 k8s/route-origin/         Envoy kustomize manifests and envoy.yaml
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
 k8s/bootstrap-wss/        Envoy TLS proxy for the bootstrappers' WSS listener
+k8s/content/              content cluster node manifests (kubo + ipfs-cluster, repo PVC)
+roles/content/            content firewall, identity preflight, kubo config + cluster Secrets, deploy, checks
+  files/kubo-config.json  base content kubo config (no identity)
+host_vars/<box>/content.yml    the box's ipfs-cluster and content kubo PeerIDs
 k8s/cert-manager/         pinned cert-manager release manifest (WSS certificates)
 roles/cert_manager/       cert-manager deploy and webhook readiness
 roles/bootstrap/          kubo config from base + vaulted identity, Secret, deploy, checks
@@ -707,13 +918,17 @@ group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and cl
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
 scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 scripts/check-cloudflare-ranges.sh  pinned Cloudflare ranges vs Cloudflare's API
+scripts/routing-compare.sh          our route-<box>.ipni.io vs delegated-ipfs.dev (results, latency, errors)
+scripts/routing-compare-cids.txt    fixtures for routing-compare.sh
 scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
 scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used by the preflight)
 scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
 scripts/wss-check/                  dial the bootstrappers over WSS from Node or headless Chrome
+scripts/new-content-cluster-identity.sh  create a box's content cluster and kubo identities (and the cluster secret)
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 routing.yml               routing service playbook (someguy + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
+content.yml               content cluster node playbook
 ```
