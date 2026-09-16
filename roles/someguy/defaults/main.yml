@@ -59,13 +59,16 @@ someguy_rollout_timeout: 600s
 # ---------------------------------------------------------------------------
 # Rollout safety
 # ---------------------------------------------------------------------------
-# The cached address book is snapshotted to a per-instance PVC and restored at
-# start, so a restart is cold only for the accelerated DHT client's routing
-# table, which is rebuilt only by serving traffic. With four instances only the
-# one being rolled is cold, and Envoy keeps traffic on the other three, so a
-# rollout costs a quarter of the box's capacity instead of all of it. The warm
-# gate below is satisfied by the restore and stays as the safety net for a lost
-# or stale snapshot - which rebuilds cold, the way these measurements describe:
+# Once the fork image is deployed and a snapshot exists, the cached address
+# book is restored from its per-instance PVC at start, so a restart is cold
+# only for the accelerated DHT client's routing table, which is rebuilt only
+# by serving traffic. Until then - and on the first rollout after either
+# lands - a restart is cold for the address book as well, at the cost
+# described below. With four instances only the one being rolled is cold, and
+# Envoy keeps traffic on the other three, so a rollout costs a quarter of the
+# box's capacity instead of all of it. The warm gate below is satisfied by the
+# restore and stays as the safety net for a lost or stale snapshot - which
+# rebuilds cold, the way these measurements describe:
 #
 #   11 minutes after a restart:  p95 2904ms, 2937 rejected FindPeer lookups,
 #                                3x the CPU of a warm box

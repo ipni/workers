@@ -8,6 +8,10 @@
   warm-up, which the other three absorb. ReadWriteOnce is safe because each
   Deployment is Recreate: the old pod is stopped before the new one mounts the
   same claim, so two pods never share it.
+  1Gi documents intent, not a bound: local-path is hostPath-backed and does
+  not enforce the request. The real bounds are someguy's PeerCacheSize (a
+  26k-peer snapshot is about 6 MiB, ~250 MiB at the 1,000,000-peer cap) and
+  the NVMe behind default-local-storage-path.
 #}
 {% for instance in someguy_running_instances %}
 ---

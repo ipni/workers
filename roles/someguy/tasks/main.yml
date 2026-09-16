@@ -118,7 +118,11 @@
     label: "{{ item.name }}"
 
 # local-path deletes the volume's data with the claim, which is what retiring
-# an instance means: its address book snapshot stops existing too.
+# an instance means: its address book snapshot stops existing too. Both deletes
+# are fire-and-forget (wait: false is the default), so a claim may sit in
+# Terminating behind its pvc-protection finalizer until the old pod exits; it
+# resolves on its own. If wait: true ever lands on one of them, land it on
+# both.
 - name: Delete the snapshots of instances that are not running
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/k3s/k3s.yaml

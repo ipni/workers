@@ -120,6 +120,11 @@ spec:
           # accelerated DHT crawls (lookups fall back to the standard client).
           # host: 127.0.0.1 - the API only listens on loopback, and with
           # hostNetwork the kubelet's loopback is the same one.
+          #
+          # The address book restore runs before the listener binds, so a
+          # snapshot large enough to exceed these budgets would show up here
+          # first: sub-second at this fleet's 23k-26k peers against ~33s of
+          # readiness (3s + 3x10s) and ~150s of liveness (30s + 6x20s).
           readinessProbe:
             httpGet:
               host: 127.0.0.1
