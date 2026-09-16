@@ -146,52 +146,16 @@
   when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
-# Prune superseded generated ConfigMaps. configMapGenerator gives each content
-# version a new hash-suffixed name, and `kubectl apply` never deletes the old
-# ones, so they pile up with every config edit. Runs only after a successful
-# rollout, and only touches ConfigMaps that carry BOTH this app's labels and
-# are not referenced by the live Deployment (kube-root-ca.crt has no labels).
+# Prune superseded generated ConfigMaps, unless the including role defers it.
+#
+# DEFER IT when the app has more than one Deployment and they are rolled one at
+# a time: between the apply and the last resume, the instances still waiting
+# run pods from the OLD ReplicaSet, which names the OLD ConfigMap. Pruning it
+# then leaves those pods unable to restart (CreateContainerConfigError) until
+# their turn comes - hours, with a warm-up gate in between. roles/someguy sets
+# kustomize_prune_configmaps: false and includes prune_configmaps.yml itself
+# once every instance is back.
 # ---------------------------------------------------------------------------
-- name: "Read the ConfigMaps the live {{ kustomize_deployment }} Deployment references"
-  ansible.builtin.command:
-    argv:
-      - k3s
-      - kubectl
-      - "--namespace={{ kustomize_namespace }}"
-      - get
-      - "deployment/{{ kustomize_deployment }}"
-      - -o
-      - >-
-        jsonpath={.spec.template.spec.volumes[*].configMap.name}
-        {.spec.template.spec.containers[*].envFrom[*].configMapRef.name}
-  register: kustomize_cm_used
-  changed_when: false
-  when: not ansible_check_mode
-
-- name: "List {{ kustomize_app }} ConfigMaps"
-  ansible.builtin.command:
-    argv:
-      - k3s
-      - kubectl
-      - "--namespace={{ kustomize_namespace }}"
-      - get
-      - configmaps
-      - "--selector=app.kubernetes.io/part-of=ipfs-workers,app.kubernetes.io/name={{ kustomize_app }}"
-      - -o
-      - jsonpath={.items[*].metadata.name}
-  register: kustomize_cm_all
-  changed_when: false
-  when: not ansible_check_mode
-
-- name: "Delete superseded {{ kustomize_app }} ConfigMaps"
-  ansible.builtin.command:
-    argv: [k3s, kubectl, "--namespace={{ kustomize_namespace }}", delete, configmap, "{{ item }}"]
-  # default(''): a loop is templated before `when`, and under --check the two
-  # reads above are skipped and have no stdout.
-  loop: "{{ (kustomize_cm_all.stdout | default('')).split() | difference((kustomize_cm_used.stdout | default('')).split()) }}"
-  changed_when: true
-  # Refuse to prune if the Deployment references nothing: that would mean the
-  # read failed or the manifests changed shape, not that every ConfigMap is stale.
-  when:
-    - not ansible_check_mode
-    - (kustomize_cm_used.stdout | default('')).split() | length > 0
+- name: "Prune superseded {{ kustomize_app }} ConfigMaps"
+  ansible.builtin.include_tasks: prune_configmaps.yml
+  when: kustomize_prune_configmaps | bool

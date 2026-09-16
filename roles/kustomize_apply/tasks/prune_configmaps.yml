@@ -1,0 +1,58 @@
+---
+# Delete superseded generated ConfigMaps. configMapGenerator gives each content
+# version a new hash-suffixed name, and `kubectl apply` never deletes the old
+# ones, so they pile up with every config edit. Only touches ConfigMaps that
+# carry this app's labels and are referenced by no Deployment in the namespace
+# (kube-root-ca.crt has no labels, so it is never a candidate).
+#
+# EVERY Deployment in the namespace, not just kustomize_deployment: an app can
+# have several (someguy runs four), and each names the ConfigMap it uses. The
+# union can only ever protect more ConfigMaps than it should, never fewer.
+#
+# Included by main.yml at the end of an apply, or later by the including role
+# when the prune has to wait for a serial rollout to finish - see the comment
+# there.
+
+- name: "Read the ConfigMaps the live {{ kustomize_namespace }} Deployments reference"
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - "--namespace={{ kustomize_namespace }}"
+      - get
+      - deployments
+      - -o
+      - >-
+        jsonpath={.items[*].spec.template.spec.volumes[*].configMap.name}
+        {.items[*].spec.template.spec.containers[*].envFrom[*].configMapRef.name}
+  register: kustomize_cm_used
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: "List {{ kustomize_app }} ConfigMaps"
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - "--namespace={{ kustomize_namespace }}"
+      - get
+      - configmaps
+      - "--selector=app.kubernetes.io/part-of=ipfs-workers,app.kubernetes.io/name={{ kustomize_app }}"
+      - -o
+      - jsonpath={.items[*].metadata.name}
+  register: kustomize_cm_all
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: "Delete superseded {{ kustomize_app }} ConfigMaps"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ kustomize_namespace }}", delete, configmap, "{{ item }}"]
+  # default(''): a loop is templated before `when`, and under --check the two
+  # reads above are skipped and have no stdout.
+  loop: "{{ (kustomize_cm_all.stdout | default('')).split() | difference((kustomize_cm_used.stdout | default('')).split()) }}"
+  changed_when: true
+  # Refuse to prune if no Deployment references anything: that would mean the
+  # read failed or the manifests changed shape, not that every ConfigMap is stale.
+  when:
+    - not ansible_check_mode
+    - (kustomize_cm_used.stdout | default('')).split() | length > 0

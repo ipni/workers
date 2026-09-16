@@ -14,3 +14,8 @@ kustomize_rollout_timeout: 600s
 # changing anything, so they do not mark the task changed. The default
 # matches only empty lines, i.e. nothing.
 kustomize_always_configured: '^$'
+
+# Prune superseded generated ConfigMaps at the end of the apply. Set false when
+# the app's Deployments are rolled one at a time after the apply, and include
+# tasks_from: prune_configmaps once they are all back - see tasks/main.yml.
+kustomize_prune_configmaps: true

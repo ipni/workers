@@ -100,6 +100,10 @@
     # and are rolled one at a time below.
     kustomize_deployment: "{{ someguy_running_instances[0].name }}"
     kustomize_rollout_timeout: "{{ someguy_rollout_timeout }}"
+    # Deferred to the end of this file. The paused instances still run pods
+    # from the old ReplicaSet, which names the old ConfigMap; deleting it now
+    # would strand them if one restarted before its turn.
+    kustomize_prune_configmaps: false
 
 - name: Delete instances above someguy_instances
   kubernetes.core.k8s:
@@ -113,19 +117,8 @@
   loop_control:
     label: "{{ item.name }}"
 
-# ---------------------------------------------------------------------------
-# One instance at a time: resume it, wait for its pod, prove its API answers,
-# and (in production) wait for its address book before touching the next.
-# ---------------------------------------------------------------------------
-- name: Roll the remaining instances one at a time
-  ansible.builtin.include_tasks: roll_instance.yml
-  loop: "{{ someguy_running_instances[1:] }}"
-  loop_control:
-    loop_var: someguy_instance
-    label: "{{ someguy_instance.name }}"
-  when: not ansible_check_mode
-
-# The first instance was rolled by the apply above; check it the same way.
+# The first instance was rolled by the apply above; check it the same way
+# roll_instance.yml checks the others.
 - name: Confirm the first instance's API answers locally
   ansible.builtin.uri:
     url: "http://127.0.0.1:{{ someguy_running_instances[0].api }}/version"
@@ -145,10 +138,12 @@
   when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
-# Warm-up gate for the FIRST instance (the others are gated in
-# roll_instance.yml as they are rolled). With `serial`, this is what keeps a
-# rollout from degrading the whole fleet at once: the next box is not touched
-# until this one has rebuilt its address book. See defaults/main.yml.
+# Warm-up gate for the FIRST instance. This runs BEFORE the others are rolled,
+# not after: a restarted instance answers within a minute but serves badly for
+# about an hour, so resuming the second one while the first is still cold would
+# leave half the box degraded - exactly what rolling them one at a time exists
+# to prevent. The same gate inside roll_instance.yml then separates each later
+# instance from the next, and the last one from the next BOX under `serial`.
 #
 # Only runs when this box's pod actually restarted, so re-running the playbook
 # against a settled fleet stays fast.
@@ -161,3 +156,25 @@
   ansible.builtin.include_tasks: wait_warm.yml
   vars:
     someguy_warm_instance: "{{ someguy_running_instances[0] }}"
+
+# ---------------------------------------------------------------------------
+# One instance at a time: resume it, wait for its pod, prove its API answers,
+# and (in production) wait for its address book before touching the next.
+# ---------------------------------------------------------------------------
+- name: Roll the remaining instances one at a time
+  ansible.builtin.include_tasks: roll_instance.yml
+  loop: "{{ someguy_running_instances[1:] }}"
+  loop_control:
+    loop_var: someguy_instance
+    label: "{{ someguy_instance.name }}"
+  when: not ansible_check_mode
+
+# Deferred from the apply: safe now that every instance runs a pod from the new
+# ReplicaSet, so no live pod names the superseded ConfigMap any more.
+- name: Prune superseded someguy ConfigMaps
+  ansible.builtin.include_role:
+    name: kustomize_apply
+    tasks_from: prune_configmaps
+  vars:
+    kustomize_app: someguy
+    kustomize_namespace: someguy
