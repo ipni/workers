@@ -61,3 +61,47 @@
   ansible.builtin.debug:
     msg: "someguy on {{ inventory_hostname }}: {{ someguy_version.content | trim }}"
   when: not ansible_check_mode
+
+# ---------------------------------------------------------------------------
+# Warm-up gate. With `serial`, this is what keeps a rollout from degrading the
+# whole fleet at once: the next box is not touched until this one has rebuilt
+# its address book. See roles/someguy/defaults/main.yml for the measurements.
+#
+# Only runs when this box's pod actually restarted, so re-running the playbook
+# against a settled fleet stays fast.
+# ---------------------------------------------------------------------------
+- name: Wait for someguy's address book to warm up
+  when:
+    - someguy_rollout_wait_warm | bool
+    - not ansible_check_mode
+    - kustomize_deployment_rolled | default(false) | bool
+  block:
+    - name: "Poll the cached address book until it holds {{ someguy_warm_min_peers }} peers"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          curl -sf --max-time 10 http://127.0.0.1:8190/debug/metrics/prometheus
+          | awk '/^someguy_cached_addr_book_peer_state_size/ {print int($2); found = 1}
+                 END {if (!found) print 0}'
+        executable: /bin/bash
+      register: someguy_warm
+      changed_when: false
+      failed_when: false
+      retries: "{{ (someguy_warm_timeout_seconds | int // (someguy_warm_poll_seconds | int)) | int }}"
+      delay: "{{ someguy_warm_poll_seconds | int }}"
+      until: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+
+    - name: Report whether the box warmed up in time
+      ansible.builtin.assert:
+        that: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+        fail_msg: >-
+          {{ inventory_hostname }} still holds only
+          {{ someguy_warm.stdout | trim | default('0', true) }} cached peers after
+          {{ someguy_warm_timeout_seconds }}s (wanted {{ someguy_warm_min_peers }}).
+          Not rolling the next box on the assumption that this one recovered.
+          Re-run with -e someguy_rollout_wait_warm=false to skip this gate.
+        success_msg: >-
+          {{ inventory_hostname }}: address book holds
+          {{ someguy_warm.stdout | trim }} peers; safe to roll the next box.
+        quiet: true
+      when: someguy_warm_fail_on_timeout | bool

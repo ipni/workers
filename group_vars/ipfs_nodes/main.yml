@@ -32,6 +32,24 @@ firewall_allowed_tcp:
 firewall_allowed_udp: []
 
 # ---------------------------------------------------------------------------
+# Rollout mode
+# ---------------------------------------------------------------------------
+# false (dev): playbooks roll every box at once, which is fastest to iterate on.
+# true (production): one box at a time, and someguy's rollout waits for each box
+# to rebuild the state a restart throws away before the next one is touched.
+#
+# Every box is a whole site behind its own hostname with no failover between
+# them, so once these are the only boxes serving traffic, a simultaneous
+# rollout is a full outage - and someguy stays degraded for tens of minutes
+# after a restart, long after its pod reports Ready. Measured at 200 req/s:
+# 11 minutes in, p95 2904ms with 2937 rejected lookups and 3x the CPU; by 69
+# minutes, p95 588-691ms, no rejections, warm CPU.
+#
+# Flip this to true when the boxes go live. A production rollout then takes
+# roughly an hour per box, which is the real cost of restarting someguy.
+production_rollout: false
+
+# ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
 # Each host has a second, blank ~894 GiB NVMe. It becomes the dedicated data

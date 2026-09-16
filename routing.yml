@@ -3,16 +3,35 @@
 #   someguy        Delegated Routing V1 server (hostNetwork, libp2p on 4004)
 #   route_origin   Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io
 #
-#   ansible-playbook routing.yml                     # all three boxes
+#   ansible-playbook routing.yml                     # all three boxes at once (dev)
 #   ansible-playbook routing.yml -l chic-1           # one box
 #   ansible-playbook routing.yml --tags origin       # only the origin
 #   ansible-playbook routing.yml --check --diff      # dry run
 #
+#   # production: one box at a time, each warmed up before the next is touched
+#   ansible-playbook routing.yml -e production_rollout=true
+#
 # Requires site.yml to have run first: this connects as the hardened admin
 # user and expects k3s to be up.
+#
+# ROLLOUT MODE. Each box is a whole site behind its own hostname with no
+# failover between them, so in production a simultaneous rollout takes the
+# entire routing service down - and someguy stays degraded for tens of minutes
+# after a restart, long after the pod reports Ready (see
+# roles/someguy/defaults/main.yml for the measurements).
+#
+#   production_rollout: false (default, dev)  all boxes at once, no warm-up wait
+#   production_rollout: true                  one box at a time, each warmed up
+#                                             before the next is touched
+#
+# Flip it in group_vars/ipfs_nodes/main.yml when these boxes start serving real
+# traffic. `rollout_serial` overrides the batch size on its own if needed.
 
 - name: Deploy the routing service
   hosts: ipfs_nodes
+  serial: >-
+    {{ rollout_serial | default(1 if (production_rollout | default(false) | bool)
+       else (groups['ipfs_nodes'] | length)) }}
   remote_user: "{{ admin_user }}"
   become: true
   gather_facts: false

@@ -1,3 +1,39 @@
 ---
 # First start pulls the image; later rollouts wait for the old pod to stop.
 someguy_rollout_timeout: 600s
+
+# ---------------------------------------------------------------------------
+# Rollout safety
+# ---------------------------------------------------------------------------
+# someguy keeps NO state on disk: a restart throws away the cached address book
+# and the accelerated DHT client's routing table, and both are rebuilt only by
+# serving traffic. Measured on these boxes at 200 req/s:
+#
+#   11 minutes after a restart:  p95 2904ms, 2937 rejected FindPeer lookups,
+#                                3x the CPU of a warm box
+#   69 minutes after a restart:  p95 588-691ms, 0 rejections, warm-box CPU
+#
+# `serial` alone does not protect against this. A pod goes Ready in about a
+# minute, so a serial rollout would still leave every box degraded at once.
+# The play has to wait for the box to warm up before moving to the next one,
+# which is what this gate does.
+#
+# Tied to the single production switch (group_vars/ipfs_nodes/main.yml), so it
+# is off while these boxes are still a dev fleet and rollouts stay fast. Set
+# production_rollout: true - or pass -e production_rollout=true - once they are
+# the only boxes serving traffic.
+someguy_rollout_wait_warm: "{{ production_rollout | default(false) }}"
+
+# Peers in the cached address book that count as warm. A settled box on this
+# fleet holds 23k-26k; 15k is comfortably past the painful phase without
+# waiting for the last slow arrivals.
+someguy_warm_min_peers: 15000
+
+# How long to wait for that, and how often to look. The whole gate is skipped
+# when this run did not actually restart the pod.
+someguy_warm_timeout_seconds: 3600
+someguy_warm_poll_seconds: 60
+
+# Fail the play when a box does not warm up in time, rather than rolling the
+# next box on the assumption that this one recovered.
+someguy_warm_fail_on_timeout: true
