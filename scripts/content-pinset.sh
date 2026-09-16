@@ -183,8 +183,10 @@ for n, src, cid, _, note in missing:
     print(f"  {n:<26} {src:<16} {cid}" + (f"\n  {'':<26} {note}" if note else ""))
 if unclassified:
     print(f"\nUNCLASSIFIED ({len(unclassified)}): found upstream, not pinned until moved into pinset")
-    for n in unclassified:
+    for n in unclassified[:10]:
         print(f"  {n}")
+    if len(unclassified) > 10:
+        print(f"  ... and {len(unclassified) - 10} more in {path}")
 if exclude & {nm(e) for e in entries}:
     print(f"\nEXCLUDED (content_pin_exclude): {', '.join(sorted(exclude & {nm(e) for e in entries}))}")
 print(f"\nPINNED ({len(pinned)})")

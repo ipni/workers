@@ -1040,13 +1040,23 @@ by name. While any entry is pending, the last line names each one and says
 what to do:
 
 ```
-PINSET INCOMPLETE, 8 PENDING, NOT PINNED: research.protocol.ai, js.ipfs.io, ... -- re-run: ansible-playbook content.yml (after branch content-pinset-recovery merges)
+PINSET INCOMPLETE, 4 PENDING, NOT PINNED: js.ipfs.io, docs.libp2p.io, ... -- re-run: ansible-playbook content.yml (once pinset.yml carries their CIDs)
 ```
 
 Nobody is watching for that recovery to merge, so the playbook repeats this
 on every run until nothing is pending. A run fails, after the summary, only if
 an `upstream-cluster` entry cannot be retrieved, a `pin add` fails, or (on a
-full run) a pin is not PINNED on every peer within `content_pin_timeout`.
+full run) a **pinset** entry is not PINNED on every peer within
+`content_pin_timeout`.
+
+**Pins added by hand are reported, not enforced.** The wait covers only the
+CIDs `pinset.yml` asks for. A pin added with `ipfs-cluster-ctl pin add` is
+counted and, if it is not PINNED everywhere, listed by name — but it cannot
+hold up or fail a run, because the run did not ask for it and re-running
+cannot converge it. That matters for content recovered by hand whose blocks
+are not all fetchable: the cluster keeps retrying such a pin by itself
+(`PIN_ERROR`, then a later attempt) without breaking every deploy. To have
+`content.yml` keep a hand-added pin, add it to `pinset.yml`.
 
 To see the state without reading YAML, `scripts/content-pinset.sh <box>` lists
 pending entries first, then entries with a CID the cluster does not hold, then
@@ -1114,9 +1124,19 @@ the vault. SSH has no password fallback by design.
       "Deferred: Authenticated Origin Pulls").
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
 - [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
-- [ ] **Pin the recovered sites:** re-run `content.yml` once branch
-      `content-pinset-recovery` merges and `pinset.yml` has their CIDs. Every
-      run names the pending entries until then.
+- [ ] **Pin the last recovered sites:** `js.ipfs.io`, `docs.libp2p.io`,
+      `ipld.io` and `dnslink.io` are still under `recover_from_upstream` with
+      no CID. Re-run `content.yml` once `pinset.yml` carries them; every run
+      names them until then. (`js.ipfs.io` is already pinned by hand, so
+      adding its CID to the pinset is enough.)
+- [ ] **Classify the upstream leftovers.** `found_upstream_unclassified` holds
+      724 entries recovered from the upstream cluster (conference sites,
+      badbits builds, dated snapshots). Nothing pins them until someone moves
+      what is in scope into `pinset`.
+- [ ] **Two hand-added pins are not in the pinset:** `ipfs.io-legacy` and
+      `ipfs.io-legacy-2`. They are stuck in `PIN_ERROR`/`PINNING` (some blocks
+      have no reachable provider) and the cluster keeps retrying. Add them to
+      `pinset.yml` if they should be kept, or unpin them to stop the retries.
 - [ ] **`cluster.ipfs.io` is not pinned.** One block of its DAG has a single
       provider, reachable only over WebRTC/WebTransport, so the fetch never
       completes and the entry is reported unretrievable on every run. Its
