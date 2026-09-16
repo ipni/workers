@@ -43,6 +43,15 @@ ansible-playbook site.yml --check --diff   # dry run
 
 The playbook is idempotent and safe to re-run.
 
+**Rollout mode.** `production_rollout` in `group_vars/ipfs_nodes/main.yml` is
+`false`, so playbooks roll every box at once, which is what you want while
+iterating. Set it to `true` - or pass `-e production_rollout=true` for one
+deploy - once these boxes serve real traffic: `routing.yml` then rolls one box
+at a time and waits for each to rebuild the state a someguy restart throws
+away, about an hour per box (see "Capacity, and the accepted sing-1
+limitation"). Every box is a whole site with no failover between them, so a
+simultaneous rollout in production is a full outage.
+
 ## Accessing the clusters
 
 The k3s API server is **not exposed to the internet** — ufw denies 6443. Access
@@ -406,12 +415,134 @@ request at a time.
 - **Latency includes your path to Cloudflare**, the same for every endpoint.
   Box-to-box differences partly reflect where you ran it from.
 
-**Do not compare within 24 hours of a someguy restart.** someguy keeps no state,
-so a restart starts from an empty DHT routing table. Lookups work within a
-couple of minutes, but the table keeps filling for about a day, and until then
-our counts and latencies are understated. Check the pod's age first
+**Do not compare within an hour of a someguy restart.** someguy keeps no state,
+so a restart starts from an empty DHT routing table and an empty address book,
+and both are rebuilt only by serving traffic. Until they are, our counts and
+latencies are understated. Measured on sing-1 at 200 req/s after a restart:
+
+| Age | p50 | Address-book hit rate | someguy CPU per 30s |
+|-----|-----|-----------------------|---------------------|
+| 15 min | 5002ms | 51% | 300s |
+| 30 min | 2940ms | 58% | 187s |
+| 46 min | 2529ms | 61% | 130s |
+| 62 min | 2194ms | 69% | 104s |
+
+chic-1 was indistinguishable from its 23-hour state by 69 minutes (p95 588ms,
+no rejected lookups, warm CPU). Check the pod's age first
 (`kubectl -n someguy get pods`), and use `--out` to track how results change
 as the table warms.
+
+### Capacity, and the accepted sing-1 limitation
+
+`routing-compare.sh` shows the boxes answer correctly; it says nothing about
+load. Two scripts measure that:
+
+```bash
+./scripts/routing-load.sh                    # closed loop, run from anywhere
+./scripts/routing-rate-test.sh --url-base https://route-chic-1.ipni.io \
+    --rates 200,400,600,850 --stage-seconds 30 --workload fixtures
+```
+
+`routing-load.sh` holds N requests in flight, so its throughput is
+`concurrency / latency` and a slow link caps the answer. `routing-rate-test.sh`
+drives a fixed **arrival rate** instead, so a box that cannot keep up shows
+growing latency rather than quietly lower throughput, and it samples someguy's
+own counters (CPU, address-book hit rate, rejected lookups, open FDs) around
+every stage. **Run it on the box** (`ansible <box> -m script -a ...`): from a
+workstation, the round trip and the client's own thread pool become the limit
+long before the box does.
+
+Measured 2026-09-16, warm boxes, fixture mix through Cloudflare, zero HTTP
+errors at every rate on every box:
+
+| Target | sing-1 | lith-1 | chic-1 |
+|--------|--------|--------|--------|
+| 200/s | 182/s, p50 2208ms | 199/s, p50 133ms | 199/s, p50 109ms |
+| 400/s | 352/s, p50 5014ms | 389/s, p50 120ms | 379/s, p50 64ms |
+| 600/s | not reached | 573/s, p50 131ms | 557/s, p50 959ms |
+| 850/s | not reached | **773/s**, p50 1698ms | 729/s, p50 2064ms |
+
+For scale, 1.1B requests/month is ~424 req/s across the fleet, or ~141 req/s
+per box at average load and roughly 280-420 at peak. lith-1 and chic-1 cover
+that with room; sing-1 does not.
+
+**What limits a box.** Not CPU: someguy used 3.4 of 32 cores at 200 req/s and
+6.6 at 400. Not errors, not the FindPeer cap (no rejections since it was
+raised, below). It is **DHT round-trip distance**. A lookup whose provider
+records arrive without addresses needs a FindPeer walk, several sequential hops
+each costing a round trip, and every operation inside the accelerated client is
+capped at 5s (`timeoutPerOp` in go-libp2p-kad-dht `fullrt/dht.go`, not exposed
+by someguy - it is why p95 pins at almost exactly 5000ms under load). Walks
+that hit the cap return records without addresses, so fewer addresses are
+cached, so more walks are needed: the further a box sits from the DHT's centre
+of mass, the worse the loop. sing-1 pays it hardest - cold lookups take 594ms
+against chic-1's 303ms, and its address-book hit rate settles at 57-69% against
+chic-1's 76-82%, on identical hardware and identical configuration.
+
+**The 5s cap costs results, on every box.** Running sing-1 on
+`SOMEGUY_DHT=standard` for one comparison (2026-09-16) showed what the
+accelerated client drops: on sparse DHT content a full iterative walk found 45,
+18, 16 and 17 providers where the accelerated boxes returned 38, 14, 14 and 12.
+Well-provided content is unaffected - every box hits `SOMEGUY_RECORDS_LIMIT`
+either way - so the loss is invisible except on exactly the content that has
+few providers to begin with. This is the strongest argument for exposing
+`fullrt`'s `timeoutPerOp`: a value between 5s and 25s would likely recover most
+of that completeness without the 25s latency cliff that made `standard`
+unusable.
+
+**Decision (2026-09-16): sing-1 runs at roughly half the throughput of the
+other two, and that is accepted.** Traffic is to be geo-routed, so sing-1 will
+serve Asia-Pacific rather than a third of global load. Two things this rests
+on, to re-check rather than assume:
+
+- **Geo-routing does not exist yet.** There are three separate hostnames, each
+  a proxied A record to one box, and nothing steers a client to the nearest.
+  It needs a shared name behind a Cloudflare Load Balancer (which would also
+  give the failover these single-origin hostnames lack).
+- **The margin is not large.** If Asia-Pacific is ~20% of 1.1B/month, that is
+  ~85 req/s average and perhaps 130-210 at a regional peak - the range where
+  sing-1 was measured at p50 2208ms. Re-measure when geo-routing lands.
+- **Nearest may not be fastest.** chic-1 answers at p50 109ms. Even adding a
+  trans-Pacific round trip, it may serve an Asian client faster than sing-1
+  does locally. Latency-based steering is worth measuring against pure geo
+  steering before the policy is fixed.
+
+**Expanding a box's capacity**, in order of leverage:
+
+1. **Add boxes.** The constraint is lookups in flight, not CPU, so throughput
+   scales with boxes. A second Asia-Pacific box, or steering that region to a
+   faster box, both work.
+2. **Upstream asks.** Exposing `fullrt`'s `timeoutPerOp`, and persisting the
+   address book across restarts, would respectively bound the tail and remove
+   the hour of warm-up a restart now costs.
+
+**What has already been tried:**
+
+- **Kept:** `SOMEGUY_RECORDS_LIMIT` 100 -> 50 (all boxes). Measured on sing-1
+  at 25: p50 halved at 200 req/s (2208ms -> 1180ms) and response bytes fell
+  ~70%; warm-up was quicker at every checkpoint. But someguy's CPU (100s per
+  30s stage), its p95 (5018ms) and its ceiling (~355 req/s) did not move, so
+  the gain is in building and shipping the response, **not** in fewer provider
+  lookups as expected - the tail is DHT walks, and they happen whatever we
+  return. 50 trades half that measured gain for half the loss in completeness;
+  the spec recommends 100. Bandwidth was never the constraint here, so the
+  ~70% saving is incidental.
+- **Kept:** `SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS` 512 -> 2048.
+  At 200 req/s sing-1 was rejecting 7,809 background FindPeer lookups per 30s
+  while using 5.5 of 32 cores - the cap, not the box, was the limit. Raising it
+  removed the rejections and cut CPU about 2.3x. Inert on chic-1, which never
+  reached the old cap.
+- **Rejected:** `SOMEGUY_DHT=standard` on sing-1. It answered *more*
+  completely - more providers on 7 of 28 fixtures - but many requests then ran
+  someguy's full 25s `routing-timeout` where the accelerated boxes answer in
+  0.1-0.5s. At that latency a public endpoint holds connections and goroutines
+  open until they time out, so throughput would fall below the ~355 req/s
+  sing-1 already manages. `SOMEGUY_DHT=disabled` (cid.contact only) is ruled
+  out by requirement: these endpoints must serve DHT-only content.
+- **Reverted:** connection manager 1000/8000 with a 96h address TTL. It doubled
+  someguy's CPU (2.7 -> 5.5 cores at 200 req/s) and made p50 about 1.5x worse
+  for a marginal hit-rate change. More retained connections cost more to
+  maintain than the dials they saved.
 
 ## Bootstrap nodes: bootstrap.ipni.io
 
@@ -1037,6 +1168,9 @@ group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and cl
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
 scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 scripts/check-cloudflare-ranges.sh  pinned Cloudflare ranges vs Cloudflare's API
+scripts/routing-compare.sh  our routing endpoints vs delegated-ipfs.dev (correctness)
+scripts/routing-load.sh     closed-loop load test, run from anywhere
+scripts/routing-rate-test.sh  open-loop load test with box-side metrics, run ON the box
 scripts/routing-compare.sh          our route-<box>.ipni.io vs delegated-ipfs.dev (results, latency, errors)
 scripts/routing-compare-cids.txt    fixtures for routing-compare.sh
 scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
