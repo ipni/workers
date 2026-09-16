@@ -94,14 +94,15 @@ pinset:
     cid: bafybeihx5dqywnppycwmqk7py6xcrisbthx3n2bk6kzxdu3mejucczcb7y
     description: >-
       IPFS Cluster website, from the UPSTREAM snapshot, because the CID its own
-      DNSLink resolves to cannot be fetched from anywhere: tried over the DHT
-      (stalls on a block whose only provider is reachable solely over
-      WebRTC/WebTransport) and then connected directly to both surviving
-      upstream collab peers, which yielded 8 blocks in 900s. The upstream
-      snapshot fetched completely from those same peers. Every run still
-      re-resolves DNSLink, reports the difference and will pin the live root
-      the day it becomes fetchable again - which costs one content_pin_timeout
-      per run until then.
+      DNSLink resolves to cannot be completed: 36 of that root's 46 links are
+      unretrievable. This is upstream garbage collection rather than a
+      transport problem - connecting directly to both surviving upstream collab
+      peers yielded only 8 blocks in 900s, and the same peers served the
+      upstream snapshot completely, so the missing blocks are gone rather than
+      merely hard to reach. Better connectivity will not recover them; the site
+      would have to be republished. Every run still re-resolves DNSLink,
+      reports the difference and would pin the live root if it ever became
+      fetchable - which costs one content_pin_timeout per run until then.
     source: dnslink
     recovered_on: "2026-09-16"
     verified: "2026-09-16"

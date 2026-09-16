@@ -1019,9 +1019,10 @@ under a minute.
 An entry whose DAG cannot be fetched completely — one block with no reachable
 provider is enough — is reported and **not** pinned, and costs a full
 `content_pin_timeout` on **every** run, because a re-run is also how such an
-entry eventually succeeds. That is why the default is 10 minutes rather than
-an hour: `cluster.ipfs.io` is in exactly that state, so an hour-long default
-would make every routine run take an hour. Raise it for the run
+entry eventually succeeds. The same cost falls on an entry that *is* pinned
+but whose DNSLink has drifted to a root that cannot be fetched: every run
+re-resolves it and tries. `cluster.ipfs.io` is in that state, so an hour-long
+default would make every routine run take an hour. Raise it for the run
 (`-e content_pin_timeout=3600`) when something large and slow is worth waiting
 for. Blocks fetched before the timeout stay in the repo: nothing pins them,
 and GC is off.
@@ -1040,7 +1041,7 @@ by name. While any entry is pending, the last line names each one and says
 what to do:
 
 ```
-PINSET INCOMPLETE, 4 PENDING, NOT PINNED: js.ipfs.io, docs.libp2p.io, ... -- re-run: ansible-playbook content.yml (once pinset.yml carries their CIDs)
+PINSET INCOMPLETE, 3 PENDING, NOT PINNED: docs.libp2p.io, ipld.io, dnslink.io -- re-run: ansible-playbook content.yml (once pinset.yml carries their CIDs)
 ```
 
 Nobody is watching for that recovery to merge, so the playbook repeats this
@@ -1124,11 +1125,15 @@ the vault. SSH has no password fallback by design.
       "Deferred: Authenticated Origin Pulls").
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
 - [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
-- [ ] **Pin the last recovered sites:** `js.ipfs.io`, `docs.libp2p.io`,
-      `ipld.io` and `dnslink.io` are still under `recover_from_upstream` with
-      no CID. Re-run `content.yml` once `pinset.yml` carries them; every run
-      names them until then. (`js.ipfs.io` is already pinned by hand, so
-      adding its CID to the pinset is enough.)
+- [ ] **Three sites have no CID anywhere:** `docs.libp2p.io`, `ipld.io` and
+      `dnslink.io` are under `recover_from_upstream`, and the 2026-09-16 search
+      found them neither in the upstream pinset nor in
+      `found_upstream_unclassified`. Every run names them until they are
+      resolved. All three are still live over HTTPS, so the remaining routes
+      are asking their maintainers to republish DNSLink, or mirroring the live
+      site under a new CID — a new copy, not the original, needing its own
+      `source`. (`js.ipfs.io` was in this list and is now pinned, from a copy
+      found outside the upstream listing.)
 - [ ] **Classify the upstream leftovers.** `found_upstream_unclassified` holds
       724 entries recovered from the upstream cluster (conference sites,
       badbits builds, dated snapshots). Nothing pins them until someone moves
@@ -1137,11 +1142,15 @@ the vault. SSH has no password fallback by design.
       `ipfs.io-legacy-2`. They are stuck in `PIN_ERROR`/`PINNING` (some blocks
       have no reachable provider) and the cluster keeps retrying. Add them to
       `pinset.yml` if they should be kept, or unpin them to stop the retries.
-- [ ] **`cluster.ipfs.io` is not pinned.** One block of its DAG has a single
-      provider, reachable only over WebRTC/WebTransport, so the fetch never
-      completes and the entry is reported unretrievable on every run. Its
-      DNSLink still resolves, so a later run picks it up if the block returns;
-      otherwise the site needs re-publishing from a copy.
+- [ ] **`cluster.ipfs.io` is pinned, but not at its live DNSLink root.** The
+      site is PINNED 3/3 from an upstream snapshot. Its live DNSLink root is a
+      different, older CID whose DAG cannot be completed: 36 of its 46 links
+      are unretrievable. That is upstream garbage collection — the blocks are
+      gone, not merely hard to reach — so no amount of retrying or better
+      connectivity recovers it. Every run still re-resolves DNSLink, reports
+      the difference and pays one `content_pin_timeout` trying. Either accept
+      the snapshot as the record of the site, or have it republished so
+      DNSLink points at something fetchable.
 - [ ] Decide whether `dist.ipfs.tech` (~128 GB, binary distributions) belongs
       here; if so, resize `content-repo` first (see "Size gate").
 - [ ] Tune the content node's resources from observed use now that the sites
