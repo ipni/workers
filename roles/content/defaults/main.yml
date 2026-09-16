@@ -18,3 +18,41 @@ content_public_bootstrap_peers:
   - /dnsaddr/va1.bootstrap.libp2p.io/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8
   - /ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
   - /ip4/104.131.131.82/udp/4001/quic-v1/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
+
+# ---------------------------------------------------------------------------
+# Pinset loading. The pinset itself is roles/content/vars/pinset.yml, read on
+# every run; these only bound how it is loaded.
+# ---------------------------------------------------------------------------
+# How long one entry may take to fetch (dag stat) or to reach PINNED on every
+# peer. Several roots now have far fewer providers than when they were
+# published, so a site of tens of MB can still take many minutes: the slowest
+# site in the pinset took about 8 minutes to fetch, and propagation to the
+# other two peers took under a minute.
+#
+# This also bounds what an entry that can never complete costs: one block with
+# no reachable provider burns this much on EVERY run (retrying is how such an
+# entry eventually succeeds). Raise it for the run when something large and
+# slow is genuinely worth waiting for: -e content_pin_timeout=3600
+content_pin_timeout: 600
+
+# How long to look for an entry's root block before calling it unretrievable.
+# Kept short, so a root nobody provides costs minutes, not content_pin_timeout.
+content_root_timeout: 300
+
+# Entries larger than this (GB, 10^9 bytes) are skipped and reported, not
+# pinned: every pin lands on every box. The size is first estimated from the
+# root block alone, so an oversized DAG is never fetched just to measure it;
+# entries under the estimate are then measured exactly with `ipfs dag stat`.
+content_size_gate_gb: 5
+
+# Explicit per-entry override of the size gate, e.g.
+#   -e '{"content_size_gate_allow": ["dist.ipfs.tech"]}'
+# dist.ipfs.tech (binary distributions, not a website) estimated ~128 GB on
+# 2026-09-15, more than the 100 GiB content-repo claim: resize first.
+content_size_gate_allow: []
+
+# Entries in the pinset that are not to be pinned, by name. Never pinned, and
+# reported by name on every run. Empty: everything in pinset.yml is in scope.
+# (pinset.yml recommends dropping saftproject.com as not an IPFS Project site;
+# it is kept because it is tens of MB and was in the upstream list.)
+content_pin_exclude: []

@@ -302,3 +302,351 @@
       {{ inventory_hostname }}: kubo {{ content_kubo_version.json.Version }},
       ipfs-cluster {{ peer.version }} as {{ peer.id }}, kubo peer {{ peer.ipfs.id }}
   when: not ansible_check_mode
+
+# ---------------------------------------------------------------------------
+# Pinset. roles/content/vars/pinset.yml is the source of truth. It is read
+# fresh on every run and may be mid-edit (recovered entries gaining CIDs), so
+# nothing below assumes which entries it holds or fails because one is absent.
+#
+# Pins are added from ONE peer only (run_once): the cluster replicates its
+# pinset to the other peers itself (replication -1/-1, pin everywhere; see
+# k8s/content/deployment.yaml). Pinning from every box would add nothing.
+#
+# Nothing is ever unpinned. content.yml then waits for PINNED on every peer
+# and ends with a summary (pending entries, drift, size gate, failures).
+#
+# In --check mode only reads run: DNSLink, `pin ls` and CID formatting. Nothing
+# is fetched (a size check fetches blocks into the repo) and nothing is pinned.
+# ---------------------------------------------------------------------------
+- name: Load the pinset into the content cluster
+  run_once: true
+  # On a first --check the node does not exist yet.
+  when: not ansible_check_mode or content_ns.stdout
+  block:
+    - name: Load the pinset
+      vars:
+        pinset_file: "{{ role_path }}/vars/pinset.yml"
+      ansible.builtin.set_fact:
+        content_pinset_found: "{{ pinset_file is file }}"
+        content_pinset: >-
+          {{ ((lookup('ansible.builtin.file', pinset_file) | from_yaml) if pinset_file is file else {})
+             | default({}, true) }}
+
+    # Entries in `pinset` with a CID are pinnable. `source` is dnslink (the
+    # default: the file's original entries were all resolved from DNSLink) or
+    # upstream-cluster. Everything listed under recover_from_upstream is pending
+    # unless `pinset` already carries it with a CID. found_upstream_unclassified
+    # is reported, never pinned: nobody has yet decided it is in scope.
+    # Entries may be plain names or mappings with a `name`.
+    - name: Classify the pinset entries
+      vars:
+        known_sections: [resolved_on, pinset, recover_from_upstream, found_upstream_unclassified, retired]
+      ansible.builtin.set_fact:
+        content_pinset_plan: >-
+          {%- set p = content_pinset if content_pinset is mapping else {} -%}
+          {%- set r = {'pinnable': [], 'pending': [], 'excluded': [], 'invalid': [], 'unclassified': [],
+                       'unknown_sections': p.keys() | reject('in', known_sections) | list} -%}
+          {%- for e in p.pinset | default([], true) -%}
+            {%- set name = ((e.name | default('', true)) if e is mapping else e) | string | trim -%}
+            {%- set cid = ((e.cid | default('', true)) if e is mapping else '') | string | trim -%}
+            {%- set source = ((e.source | default('dnslink', true)) if e is mapping else 'dnslink') | string | trim -%}
+            {%- if not name -%}
+              {%- set _ = r.invalid.append({'name': 'pinset entry ' ~ loop.index, 'reason': 'no name'}) -%}
+            {%- elif name in content_pin_exclude -%}
+              {%- set _ = r.excluded.append(name) -%}
+            {%- elif not cid -%}
+              {%- set _ = r.pending.append({'name': name, 'reason': 'in pinset without a cid'}) -%}
+            {%- elif source not in ['dnslink', 'upstream-cluster'] -%}
+              {%- set _ = r.invalid.append({'name': name, 'reason': 'unrecognised source: ' ~ source}) -%}
+            {%- else -%}
+              {%- set _ = r.pinnable.append({'name': name, 'cid': cid, 'source': source}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- for e in p.recover_from_upstream | default([], true) -%}
+            {%- set name = ((e.name | default('', true)) if e is mapping else e) | string | trim -%}
+            {%- if not name -%}
+              {%- set _ = r.invalid.append({'name': 'recover_from_upstream entry ' ~ loop.index, 'reason': 'no name'}) -%}
+            {%- elif name not in content_pin_exclude
+                   and name not in r.pinnable | map(attribute='name') | list
+                   and name not in r.pending | map(attribute='name') | list -%}
+              {%- set _ = r.pending.append({'name': name, 'reason': 'recover_from_upstream'}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- for e in p.found_upstream_unclassified | default([], true) -%}
+            {%- set _ = r.unclassified.append(((e.name | default(e.cid | default(e, true), true)) if e is mapping else e) | string) -%}
+          {%- endfor -%}
+          {{ r }}
+
+    - name: Read the pins the cluster already holds
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, cluster, --,
+               ipfs-cluster-ctl, --host, /ip4/127.0.0.1/tcp/9094, pin, ls]
+      register: content_pin_ls
+      changed_when: false
+      check_mode: false   # read-only
+
+    # The recorded CID of a dnslink entry is a dated snapshot. kubo resolves
+    # the _dnslink.<name> TXT record (following any /ipns/ indirection) with
+    # the box's resolver, the same answer IPFS clients get.
+    - name: Re-resolve DNSLink for the dnslink entries
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
+               ipfs, --api=/ip4/127.0.0.1/tcp/5021, --timeout=60s, resolve, -r, "/ipns/{{ item.name }}"]
+      loop: "{{ content_pinset_plan.pinnable | selectattr('source', 'eq', 'dnslink') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: content_dnslink
+      changed_when: false
+      failed_when: false   # reported in the summary; the recorded CID is still pinned
+      check_mode: false    # read-only
+
+    # Every recorded CID, plus the DNSLink CID of each dnslink entry whose
+    # record still resolves to a plain /ipfs/<cid>.
+    - name: Collect the CIDs the pinset asks for
+      ansible.builtin.set_fact:
+        content_pin_candidates: >-
+          {%- set c = [] -%}
+          {%- for e in content_pinset_plan.pinnable -%}
+            {%- set _ = c.append({'name': e.name, 'source': e.source, 'snapshot': 'recorded', 'cid': e.cid}) -%}
+          {%- endfor -%}
+          {%- for res in content_dnslink.results | default([]) -%}
+            {%- set path = res.stdout | default('') | trim -%}
+            {%- if res.rc | default(1) == 0 and path is match('^/ipfs/[^/]+$') -%}
+              {%- set _ = c.append({'name': res.item.name, 'source': 'dnslink', 'snapshot': 'resolved',
+                                    'cid': path[6:], 'recorded': res.item.cid}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ c }}
+        # `pin ls` prints one pin per line: <CID> | <name> | PIN | ...
+        content_pin_live_cids: >-
+          {{ content_pin_ls.stdout_lines | select | map('split', ' | ') | map('first') | map('trim') | list }}
+
+    # The same content can be written as CIDv0 (Qm...) or CIDv1, and DNSLink
+    # may use either. Compare CIDv1 base32 forms, so a snapshot is not reported
+    # as drift, or pinned twice, only because it is spelled differently.
+    # One output line per argument, "invalid" for a string that is not a CID.
+    - name: Normalise the CIDs for comparison
+      vars:
+        cids: "{{ (content_pin_candidates | map(attribute='cid') | list + content_pin_live_cids) | unique }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['k3s', 'kubectl', '--namespace=content', 'exec', 'deploy/content', '-c', 'kubo', '--',
+              'sh', '-c', 'for c; do ipfs --api=/ip4/127.0.0.1/tcp/5021 cid format -v 1 -b base32 "$c" 2>/dev/null || echo invalid; done',
+              'sh'] + cids }}
+      register: content_cid_format
+      changed_when: false
+      failed_when: content_cid_format.rc != 0 or content_cid_format.stdout_lines | length != cids | length
+      check_mode: false   # local computation
+      when: cids | length > 0
+
+    - name: Work out which CIDs are missing from the cluster
+      vars:
+        cids: "{{ (content_pin_candidates | map(attribute='cid') | list + content_pin_live_cids) | unique }}"
+        v1: "{{ dict(cids | zip(content_cid_format.stdout_lines | default([]))) }}"
+        live: "{{ content_pin_live_cids | map('extract', v1) | list }}"
+      ansible.builtin.set_fact:
+        content_pin_state: >-
+          {%- set s = {'present': [], 'missing': [], 'invalid': [], 'drift': [], 'dnslink_unresolved': []} -%}
+          {%- set seen = [] -%}
+          {%- for c in content_pin_candidates -%}
+            {%- set key = v1[c.cid] -%}
+            {%- if key == 'invalid' -%}
+              {%- set _ = s.invalid.append({'name': c.name, 'reason': c.snapshot ~ ' CID is not a CID: ' ~ c.cid}) -%}
+            {%- elif c.snapshot == 'resolved' and key == v1[c.recorded] -%}
+              {#- DNSLink still points at the recorded snapshot. -#}
+            {%- else -%}
+              {%- if c.snapshot == 'resolved' -%}
+                {%- set _ = s.drift.append({'name': c.name, 'recorded': c.recorded, 'recorded_key': v1[c.recorded],
+                                            'resolved': c.cid, 'resolved_key': key}) -%}
+              {%- endif -%}
+              {%- if key in live -%}
+                {%- set _ = s.present.append(c | combine({'key': key})) -%}
+              {%- elif key not in seen -%}
+                {%- set _ = s.missing.append(c | combine({'key': key})) -%}
+              {%- endif -%}
+              {%- set _ = seen.append(key) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- for res in content_dnslink.results | default([]) -%}
+            {%- set path = res.stdout | default('') | trim -%}
+            {%- if res.rc | default(1) != 0 or path is not match('^/ipfs/[^/]+$') -%}
+              {%- set _ = s.dnslink_unresolved.append({'name': res.item.name,
+                    'error': res.stderr | default('', true) | trim or path or 'no output'}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ s }}
+
+    # `files stat` needs only the root block: its cumulative size comes from the
+    # links' recorded sizes, so an oversized DAG is gated without fetching it.
+    # Failing to find the root at all means the entry is unretrievable.
+    - name: Find each missing root and estimate its size
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
+               ipfs, --api=/ip4/127.0.0.1/tcp/5021, "--timeout={{ content_root_timeout }}s",
+               files, stat, --format=<cumulsize>, "/ipfs/{{ item.cid }}"]
+      loop: "{{ content_pin_state.missing }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.cid }}"
+      register: content_pin_estimate
+      changed_when: false
+      failed_when: false   # upstream-cluster: failed loudly below; dnslink: reported
+      timeout: "{{ content_root_timeout | int + 60 }}"
+      when: not ansible_check_mode
+
+    # source: upstream-cluster content is not re-resolvable: the recorded CID is
+    # the only copy that exists. Say so now, by name. The run continues with the
+    # other entries and fails at the end (content.yml summary).
+    - name: Fail loudly for upstream-cluster roots that cannot be found
+      ansible.builtin.fail:
+        msg: >-
+          UNRETRIEVABLE {{ item.name }}: root {{ item.cid }} was not found on the
+          network within {{ content_root_timeout }}s ({{ item.error }}).
+          This upstream-cluster CID is the only record of the site; its content may no
+          longer be retrievable from anywhere.
+      # A compact list, not the command results: a failed item prints whatever it
+      # loops over, and the full result would bury the message.
+      # rc is absent when the task timeout fired, so default it to a failure.
+      loop: >-
+        {%- set l = [] -%}
+        {%- for r in content_pin_estimate.results | default([])
+              if not r.skipped | default(false) and r.rc | default(1) != 0
+              and r.item.source == 'upstream-cluster' -%}
+          {%- set _ = l.append({'name': r.item.name, 'cid': r.item.cid,
+                                'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
+        {%- endfor -%}
+        {{ l }}
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    # Fetches the whole DAG (which the pin would fetch anyway), so it runs only
+    # for entries whose estimate is under the gate, and not for entries allowed
+    # past the gate by content_size_gate_allow.
+    - name: Measure each missing entry under the size gate (fetches its blocks)
+      vars:
+        gate_bytes: "{{ (content_size_gate_gb | float * 1000000000) | int }}"
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
+               ipfs, --api=/ip4/127.0.0.1/tcp/5021, "--timeout={{ content_pin_timeout }}s",
+               dag, stat, --progress=false, --enc=json, "{{ item.item.cid }}"]
+      loop: >-
+        {%- set l = [] -%}
+        {%- for r in content_pin_estimate.results | default([])
+              if r.rc | default(1) == 0 and r.item.name not in content_size_gate_allow -%}
+          {%- set _ = l.append(r) -%}
+        {%- endfor -%}
+        {{ l }}
+      loop_control:
+        label: "{{ item.item.name }} (estimate {{ item.stdout | trim }} bytes)"
+      register: content_pin_dagstat
+      changed_when: false
+      failed_when: false
+      timeout: "{{ content_pin_timeout | int + 60 }}"
+      when: item.stdout | trim | int <= gate_bytes | int
+
+    - name: Fail loudly for upstream-cluster content that could not be fetched
+      ansible.builtin.fail:
+        msg: >-
+          UNRETRIEVABLE {{ item.name }}: the DAG under {{ item.cid }} could not be
+          fetched within {{ content_pin_timeout }}s ({{ item.error }}).
+          This upstream-cluster CID is the only record of the site; its content may no
+          longer be retrievable from anywhere.
+      loop: >-
+        {%- set l = [] -%}
+        {%- for r in content_pin_dagstat.results | default([])
+              if not r.skipped | default(false) and r.rc | default(1) != 0
+              and r.item.item.source == 'upstream-cluster' -%}
+          {%- set _ = l.append({'name': r.item.item.name, 'cid': r.item.item.cid,
+                                'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
+        {%- endfor -%}
+        {{ l }}
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    - name: Decide which missing entries to pin
+      vars:
+        gate_bytes: "{{ (content_size_gate_gb | float * 1000000000) | int }}"
+        measured: >-
+          {%- set m = {} -%}
+          {%- for r in content_pin_dagstat.results | default([]) if not r.skipped | default(false) -%}
+            {%- set _ = m.update({r.item.item.key: r}) -%}
+          {%- endfor -%}
+          {{ m }}
+      ansible.builtin.set_fact:
+        content_pin_decision: >-
+          {%- set d = {'pin': [], 'gated': [], 'unretrievable': []} -%}
+          {%- for est in content_pin_estimate.results | default([]) if not est.skipped | default(false) -%}
+            {%- set c = est.item -%}
+            {%- set m = measured[c.key] | default(none) -%}
+            {%- if est.rc | default(1) != 0 -%}
+              {%- set _ = d.unretrievable.append({'name': c.name, 'cid': c.cid, 'source': c.source, 'snapshot': c.snapshot,
+                    'error': 'root not found: ' ~ (est.stderr | default('', true) | trim or est.msg | default('') | trim)}) -%}
+            {%- elif c.name in content_size_gate_allow -%}
+              {%- set _ = d.pin.append(c | combine({'size': est.stdout | trim | int, 'size_from': 'estimate, gate overridden'})) -%}
+            {%- elif est.stdout | trim | int > gate_bytes | int -%}
+              {%- set _ = d.gated.append({'name': c.name, 'cid': c.cid, 'size': est.stdout | trim | int, 'size_from': 'root estimate'}) -%}
+            {%- elif m is none or m.rc | default(1) != 0 -%}
+              {%- set _ = d.unretrievable.append({'name': c.name, 'cid': c.cid, 'source': c.source, 'snapshot': c.snapshot,
+                    'error': 'DAG not fetched: ' ~ ((m.stderr | default('', true) | trim or m.msg | default('') | trim)
+                                                       if m is not none else 'not measured')}) -%}
+            {%- elif (m.stdout | from_json).TotalSize | int > gate_bytes | int -%}
+              {%- set _ = d.gated.append({'name': c.name, 'cid': c.cid, 'size': (m.stdout | from_json).TotalSize | int, 'size_from': 'dag stat'}) -%}
+            {%- else -%}
+              {%- set _ = d.pin.append(c | combine({'size': (m.stdout | from_json).TotalSize | int, 'size_from': 'dag stat'})) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ d }}
+      when: not ansible_check_mode
+
+    # Replication is left to the cluster's own setting (-1/-1, pin everywhere,
+    # k8s/content/deployment.yaml), which the cluster records on the pin. A
+    # per-pin 3/3 would make every pin fail while any one box is down.
+    # --no-status: the peers' progress is waited for in content.yml.
+    - name: Pin the missing entries through the cluster
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, cluster, --,
+               ipfs-cluster-ctl, --host, /ip4/127.0.0.1/tcp/9094, pin, add,
+               --name, "{{ item.name }}",
+               --metadata, "source={{ item.source }}",
+               --metadata, "snapshot={{ 'recorded' if item.snapshot == 'recorded' else 'dnslink-' ~ now(utc=true, fmt='%Y-%m-%d') }}",
+               --no-status, "{{ item.cid }}"]
+      loop: "{{ content_pin_decision.pin | default([]) }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.cid }} ({{ item.snapshot }}, {{ item.size | filesizeformat }})"
+      register: content_pin_add
+      changed_when: content_pin_add.rc == 0
+      failed_when: false   # reported by name, and failed, in the content.yml summary
+      timeout: 300
+      when: not ansible_check_mode
+
+    - name: Record the pinset result for the summary
+      ansible.builtin.set_fact:
+        content_pinset_report:
+          found: "{{ content_pinset_found }}"
+          check_mode: "{{ ansible_check_mode }}"
+          present: "{{ content_pin_state.present }}"
+          pinned: >-
+            {%- set p = [] -%}
+            {%- for res in content_pin_add.results | default([]) if res.rc | default(1) == 0 -%}
+              {%- set _ = p.append(res.item) -%}
+            {%- endfor -%}
+            {{ p }}
+          pin_errors: >-
+            {%- set e = [] -%}
+            {%- for res in content_pin_add.results | default([])
+                  if not res.skipped | default(false) and res.rc | default(1) != 0 -%}
+              {%- set _ = e.append({'name': res.item.name, 'cid': res.item.cid,
+                                    'error': res.stderr | default('', true) | trim or res.stdout | trim}) -%}
+            {%- endfor -%}
+            {{ e }}
+          would_pin: "{{ content_pin_state.missing if ansible_check_mode else [] }}"
+          drift: "{{ content_pin_state.drift }}"
+          dnslink_unresolved: "{{ content_pin_state.dnslink_unresolved }}"
+          gated: "{{ content_pin_decision.gated | default([]) }}"
+          unretrievable: "{{ content_pin_decision.unretrievable | default([]) }}"
+          pending: "{{ content_pinset_plan.pending }}"
+          excluded: "{{ content_pinset_plan.excluded }}"
+          invalid: "{{ content_pinset_plan.invalid + content_pin_state.invalid }}"
+          unclassified: "{{ content_pinset_plan.unclassified }}"
+          unknown_sections: "{{ content_pinset_plan.unknown_sections }}"

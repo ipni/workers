@@ -669,9 +669,10 @@ cluster (the only state shared across the three otherwise independent k3s
 clusters), so a pin added on any box is pinned on every box.
 
 ```bash
-ansible-playbook content.yml                  # all three boxes (also checks peering)
-ansible-playbook content.yml -l chic-1        # one box
-ansible-playbook content.yml --check --diff   # dry run
+ansible-playbook content.yml                  # all three boxes: deploy, pin, wait for PINNED everywhere
+ansible-playbook content.yml -l chic-1        # one box (pins, reports status without waiting)
+ansible-playbook content.yml --check --diff   # dry run: reads DNSLink and the pinset, fetches and pins nothing
+./scripts/content-pinset.sh chic-1            # the cluster's pins and status beside pinset.yml
 ```
 
 | Box    | ipfs-cluster PeerID                                    | kubo PeerID                                            |
@@ -696,11 +697,13 @@ inside the container rather than on another host port. The start script
 removes a stale socket first: after an unclean exit it would otherwise block
 every restart of the container (verified with `kill -9`).
 
-**Pinning.**
+**Pinning by hand.** Prefer adding the entry to `pinset.yml` and running
+`content.yml`. A pin added by hand is not in the pinset, and
+`scripts/content-pinset.sh` lists it under "cluster pins not in pinset.yml".
 
 ```bash
 k3s kubectl -n content exec deploy/content -c cluster -- \
-  ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 pin add <cid>
+  ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 pin add --name <domain> <cid>
 k3s kubectl -n content exec deploy/content -c cluster -- \
   ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 status        # per-peer state
 ```
@@ -717,8 +720,11 @@ k3s kubectl -n content exec deploy/content -c cluster -- \
 - **Size before pinning.** Every pin lands on every box. Nothing bounds the
   blockstore except what is pinned: `Datastore.StorageMax` (90 GB) is only the
   threshold for kubo's automatic GC, which is not enabled and never removes
-  pinned blocks, and local-path does not enforce the 100 GiB claim. Check the
+  pinned blocks, and local-path does not enforce the 100 GiB claim. The
+  playbook's size gate covers the pinset; for a pin added by hand, check the
   site's total size against free space on the smallest box's `/data` first.
+  GC being off also means blocks fetched by a size check or a pin attempt that
+  timed out stay in the repo.
 
 **Cluster peers.**
 
@@ -810,7 +816,111 @@ addresses, kubo peering and 9096 firewall rules all name it.
 cluster REST APIs answer; the running kubo config equals the managed config;
 the cluster peer runs its vaulted PeerID and sees the expected kubo; and, on a
 full run, every cluster peer lists all three peers and every kubo is connected
-to the other two content kubos.
+to the other two content kubos. Then the pinset is loaded from one peer, and
+on a full run every pin must reach PINNED on every peer (see "Pinset changes:
+re-run the playbook").
+
+### What it holds: the pinset
+
+**IPFS Project websites only**, the ones the upstream collab cluster
+(`collab.ipfscluster.io`, "IPFS Websites") carried: ipfs.tech and its docs,
+blog, specs and web UI, the legacy `*.ipfs.io` sites and tools, and the
+libp2p, IPLD and multiformats sites. The collab cluster's other pinsets
+(Filecoin Params, Project Gutenberg, Wikipedia, Pacman.store, Ravencoin,
+IPFS-search) are out of scope and must not be pinned here.
+
+**`roles/content/vars/pinset.yml` is the source of truth.** `content.yml` reads
+it on every run and pins whatever the cluster does not already hold. Each
+entry has a `name` (the domain, also used as the pin's name), a `cid`, a
+`description` and a `source`:
+
+- `source: dnslink` (the default when absent): the CID is a dated snapshot of
+  the site's DNSLink record. Every run re-resolves `_dnslink.<name>`. If it now
+  points somewhere else, the new CID is pinned **as well** and the drift is
+  reported; nothing is unpinned automatically. The sites are small, and losing
+  a snapshot is worse than holding two. Drift pins carry the metadata
+  `snapshot=dnslink-<date>`.
+- `source: upstream-cluster`: recovered from the upstream cluster's pinset
+  because the site no longer publishes DNSLink. It cannot be re-resolved; the
+  CID is the only record of the site. If its content cannot be found on the
+  network, the run **fails and names the domain**.
+- Names under `recover_from_upstream` have no CID yet and are **pending**:
+  skipped, named in every run's summary, not an error.
+- `found_upstream_unclassified` entries are reported and never pinned until
+  someone moves them into `pinset`.
+- `content_pin_exclude` (role defaults) names entries not to pin. It is empty:
+  everything in `pinset.yml` is pinned, including `saftproject.com`, which the
+  file itself suggests dropping as not an IPFS Project site — it is tens of MB
+  and was in the upstream list, so it costs little to keep.
+
+**Replication: every box holds every pin.** Pins are added from one peer only
+(the first host of the run) and the cluster replicates its pinset to the
+others, so the playbook never pins box by box. The cluster runs with
+replication `-1`/`-1` (see "Pinning by hand" above), which with three peers
+means three copies on three boxes; the pins do not override it with a fixed
+3/3, which would refuse every new pin while any one box is down.
+
+**Only roots are reprovided.** `Provide.Strategy` is `roots` (the kubo 0.43
+name for `Reprovider.Strategy`): each pin's root CID is announced to the DHT,
+not every block. someguy runs about 416 DHT lookups/sec on the same boxes, and
+reproviding every block of every site would compete with it. Clients reach a
+site through its root (DNSLink, then path resolution) and fetch the rest over
+Bitswap. See **kubo** above.
+
+**Size gate.** Every pin lands on every box, so an entry larger than
+`content_size_gate_gb` (default **5 GB**) is skipped and reported instead of
+pinned. The size is first estimated from the root block alone (`ipfs files
+stat`), so an oversized site is never downloaded just to be measured; smaller
+entries are then measured exactly with `ipfs dag stat`, which fetches them.
+**`dist.ipfs.tech` is gated**: it holds binary distributions, not a website,
+and its root reported about **128 GB** on 2026-09-15, more than the 100 GiB
+`content-repo` claim (and far more than the ~30 GB the upstream page listed
+for all its sites). Pinning it is a deliberate decision: resize the claim,
+then `-e '{"content_size_gate_allow": ["dist.ipfs.tech"]}'`.
+
+**Timeouts.** A root is looked for for `content_root_timeout` (300 s) before
+the entry counts as unretrievable; fetching a site and waiting for PINNED on
+every peer each get `content_pin_timeout` (600 s). Several roots now have far
+fewer providers than when they were published: the slowest site in the pinset
+took about 8 minutes to fetch, while propagation to the other two peers took
+under a minute.
+
+An entry whose DAG cannot be fetched completely — one block with no reachable
+provider is enough — is reported and **not** pinned, and costs a full
+`content_pin_timeout` on **every** run, because a re-run is also how such an
+entry eventually succeeds. That is why the default is 10 minutes rather than
+an hour: `cluster.ipfs.io` is in exactly that state, so an hour-long default
+would make every routine run take an hour. Raise it for the run
+(`-e content_pin_timeout=3600`) when something large and slow is worth waiting
+for. Blocks fetched before the timeout stay in the repo: nothing pins them,
+and GC is off.
+
+### Pinset changes: re-run the playbook
+
+**`content.yml` is safe to re-run at any time, and re-running it is the
+normal way to converge after `pinset.yml` changes**: when recovered entries
+gain CIDs, when an entry is added, or when a site republishes. It only adds
+pins the cluster does not hold, so a re-run with nothing new reports zero
+changed tasks. It never unpins.
+
+Every run ends with a summary: pins held and PINNED on every peer, what was
+pinned on this run, DNSLink drift, gated entries, and everything not pinned,
+by name. While any entry is pending, the last line names each one and says
+what to do:
+
+```
+PINSET INCOMPLETE, 8 PENDING, NOT PINNED: research.protocol.ai, js.ipfs.io, ... -- re-run: ansible-playbook content.yml (after branch content-pinset-recovery merges)
+```
+
+Nobody is watching for that recovery to merge, so the playbook repeats this
+on every run until nothing is pending. A run fails, after the summary, only if
+an `upstream-cluster` entry cannot be retrieved, a `pin add` fails, or (on a
+full run) a pin is not PINNED on every peer within `content_pin_timeout`.
+
+To see the state without reading YAML, `scripts/content-pinset.sh <box>` lists
+pending entries first, then entries with a CID the cluster does not hold, then
+the pinned entries with per-peer status and DNSLink drift, followed by the raw
+`ipfs-cluster-ctl pin ls` and `status`.
 
 ## Secrets
 
@@ -873,10 +983,18 @@ the vault. SSH has no password fallback by design.
       "Deferred: Authenticated Origin Pulls").
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
 - [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
-- [ ] Pin the IPFS Project website content through the content cluster
-      (`ipfs-cluster-ctl pin add`), after checking its size against `/data` on
-      the smallest box. Then tune the content node's resources from observed
-      use, and compare `Provide.Strategy` `roots` against `pinned`.
+- [ ] **Pin the recovered sites:** re-run `content.yml` once branch
+      `content-pinset-recovery` merges and `pinset.yml` has their CIDs. Every
+      run names the pending entries until then.
+- [ ] **`cluster.ipfs.io` is not pinned.** One block of its DAG has a single
+      provider, reachable only over WebRTC/WebTransport, so the fetch never
+      completes and the entry is reported unretrievable on every run. Its
+      DNSLink still resolves, so a later run picks it up if the block returns;
+      otherwise the site needs re-publishing from a copy.
+- [ ] Decide whether `dist.ipfs.tech` (~128 GB, binary distributions) belongs
+      here; if so, resize `content-repo` first (see "Size gate").
+- [ ] Tune the content node's resources from observed use now that the sites
+      are pinned, and compare `Provide.Strategy` `roots` against `pinned`.
 - [ ] Record which HTTP gateways serve the website to browsers without an IPFS
       client, who operates them, and whether they continue after 2026-09-30.
 - [ ] Set up monitoring/alerting, and scrape `/debug/metrics/prometheus`. Include
@@ -904,8 +1022,9 @@ k8s/route-origin/         Envoy kustomize manifests and envoy.yaml
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
 k8s/bootstrap-wss/        Envoy TLS proxy for the bootstrappers' WSS listener
 k8s/content/              content cluster node manifests (kubo + ipfs-cluster, repo PVC)
-roles/content/            content firewall, identity preflight, kubo config + cluster Secrets, deploy, checks
+roles/content/            content firewall, identity preflight, kubo config + cluster Secrets, deploy, checks, pinset loading
   files/kubo-config.json  base content kubo config (no identity)
+  vars/pinset.yml         the content cluster's pinset (IPFS Project websites), source of truth
 host_vars/<box>/content.yml    the box's ipfs-cluster and content kubo PeerIDs
 k8s/cert-manager/         pinned cert-manager release manifest (WSS certificates)
 roles/cert_manager/       cert-manager deploy and webhook readiness
@@ -925,10 +1044,11 @@ scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used b
 scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
 scripts/wss-check/                  dial the bootstrappers over WSS from Node or headless Chrome
 scripts/new-content-cluster-identity.sh  create a box's content cluster and kubo identities (and the cluster secret)
+scripts/content-pinset.sh           a box's cluster pins and per-peer status beside pinset.yml (pending first)
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 routing.yml               routing service playbook (someguy + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
-content.yml               content cluster node playbook
+content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)
 ```

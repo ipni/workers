@@ -1,9 +1,11 @@
 ---
 # Deploy the content cluster node (kubo + ipfs-cluster peer) to the prepared
-# boxes. It hosts the IPFS Project website content; this playbook provisions
-# an empty cluster, and pins are added through ipfs-cluster.
+# boxes and load the IPFS Project website pinset (roles/content/vars/pinset.yml)
+# into the cluster. Safe to re-run at any time: it pins only what the cluster
+# does not hold yet, and re-running is how the cluster converges after
+# pinset.yml changes.
 #
-#   ansible-playbook content.yml                  # all three boxes (also checks peering)
+#   ansible-playbook content.yml                  # all three boxes (also checks peering and PINNED)
 #   ansible-playbook content.yml -l chic-1        # one box
 #   ansible-playbook content.yml --check --diff   # dry run
 #
@@ -91,3 +93,156 @@
              'cluster lists all ' ~ all_peer_ids | length ~ ' peers; kubo connected to the other '
              ~ other_kubo_ids | length ~ ' content kubos' }}
       when: not ansible_check_mode
+
+# The role added any missing pins from one peer; the cluster replicates them to
+# the others. Wait until every pin is PINNED on every peer. With -l (a partial
+# run) status is read once and reported, without waiting. Nothing here fails:
+# the summary below runs on every run and fails last, so the pending list and
+# per-domain report are never cut off.
+- name: Wait for the pinset to be pinned on every peer
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  tags: [content]
+  # content_pin_timeout (role defaults are not visible outside the role's play).
+  vars_files:
+    - roles/content/defaults/main.yml
+  vars:
+    full_run: "{{ ansible_play_hosts_all | length == groups['ipfs_nodes'] | length }}"
+    # `status` prints each pin, then one line per cluster peer:
+    #   <CID> | <name>:
+    #       > sing-1               : PINNED | 2026-09-15T22:40:01Z | Attempts: 0 | Priority: false
+    status_lines: "{{ content_pin_status.stdout_lines | default([]) | select | list }}"
+    status_pins: "{{ status_lines | reject('match', '^\\s') | list }}"
+    status_peer_lines: "{{ status_lines | select('match', '^\\s+>') | list }}"
+    # "<CID> | <name>: > <peer> : <STATE> ..." for every peer not PINNED.
+    # No \b in the pattern: Jinja reads '\b' in a string literal as a backspace,
+    # which would make every peer line look like it is not PINNED.
+    status_not_pinned: >-
+      {%- set ns = namespace(pin='', out=[]) -%}
+      {%- for line in status_lines -%}
+        {%- if line is not match('^\s') -%}{%- set ns.pin = line -%}
+        {%- elif line is not search(':\s+PINNED(\s|$)') -%}{%- set ns.out = ns.out + [ns.pin ~ ' ' ~ (line | trim)] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.out }}
+    status_complete: >-
+      {{ status_peer_lines | length == status_pins | length * groups['ipfs_nodes'] | length
+         and status_not_pinned | length == 0 }}
+  tasks:
+    - name: Wait for every pin to be PINNED on every cluster peer
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, cluster, --,
+               ipfs-cluster-ctl, --host, /ip4/127.0.0.1/tcp/9094, status]
+      register: content_pin_status
+      changed_when: false
+      check_mode: false   # read-only: read once in --check, for the summary
+      run_once: true
+      retries: "{{ (content_pin_timeout | int / 30) | round(0, 'ceil') | int }}"
+      delay: 30
+      until: >-
+        content_pin_status.rc == 0
+        and (ansible_check_mode or not full_run | bool or status_complete | bool)
+      failed_when: false   # reported, and failed, in the summary
+      # Only when the role processed the pinset on this run.
+      when: content_pinset_report is defined
+
+    - name: Record pin status on every peer
+      ansible.builtin.set_fact:
+        content_pin_status_report:
+          read: "{{ content_pin_status.rc | default(1) == 0 }}"
+          error: "{{ content_pin_status.stderr | default('') | trim }}"
+          full_run: "{{ full_run | bool }}"
+          pins: "{{ status_pins | length }}"
+          peers: "{{ groups['ipfs_nodes'] | length }}"
+          complete: "{{ status_complete | bool }}"
+          not_pinned: "{{ status_not_pinned }}"
+      run_once: true
+      when: content_pin_status is not skipped
+
+# Ends every run. Reports what the cluster holds and everything that is not
+# pinned, by name. Entries pending recovery are not an error; the run fails
+# only for content that could not be pinned, after everything is printed.
+- name: Summarise the content pinset
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  tags: [content]
+  vars_files:
+    - roles/content/defaults/main.yml
+  vars:
+    report: "{{ content_pinset_report | default({}) }}"
+    status: "{{ content_pin_status_report | default({}) }}"
+    pending_names: "{{ report.pending | default([]) | map(attribute='name') | list }}"
+    # Content that should be pinned and is not: fails the run (last task).
+    upstream_unretrievable: "{{ report.unretrievable | default([]) | selectattr('source', 'eq', 'upstream-cluster') | list }}"
+    status_failed: "{{ status.read | default(false) and status.full_run and not status.complete and not report.check_mode }}"
+  tasks:
+    - name: Summarise the pinset
+      run_once: true
+      ansible.builtin.debug:
+        msg: >-
+          {%- set m = [] -%}
+          {%- if not report -%}
+            {%- set _ = m.append('pinset NOT processed on this run (no content node reached it); re-run content.yml') -%}
+          {%- else -%}
+            {%- if not report.found -%}
+              {%- set _ = m.append('NO PINSET FILE: roles/content/vars/pinset.yml does not exist; nothing to pin') -%}
+            {%- endif -%}
+            {%- if report.check_mode -%}
+              {%- set _ = m.append('CHECK MODE: nothing fetched or pinned') -%}
+            {%- endif -%}
+            {%- if status.read | default(false) -%}
+              {%- set _ = m.append('cluster holds ' ~ status.pins ~ ' pins' ~
+                    ('' if status.pins | int == 0 else
+                     ('; PINNED on all ' ~ status.peers ~ ' peers') if status.complete else '; ' ~
+                     (((status.not_pinned | length) ~ ' peer states not PINNED') if status.not_pinned
+                       else 'not yet reported by every peer') ~
+                     ('' if status.full_run else ' (partial run, not enforced)'))) -%}
+              {%- for line in status.not_pinned -%}{%- set _ = m.append('  not pinned: ' ~ line) -%}{%- endfor -%}
+            {%- else -%}
+              {%- set _ = m.append('pin status could not be read: ' ~ status.error | default('not checked')) -%}
+            {%- endif -%}
+            {%- set _ = m.append((report.present | length) ~ ' pinset CIDs already pinned, ' ~ (report.pinned | length) ~ ' pinned on this run') -%}
+            {%- for e in report.pinned -%}{%- set _ = m.append('  pinned: ' ~ e.name ~ ' ' ~ e.cid ~ ' (' ~ e.snapshot ~ ', ' ~ e.size | filesizeformat ~ ')') -%}{%- endfor -%}
+            {%- for e in report.would_pin -%}{%- set _ = m.append('  would size-check and pin: ' ~ e.name ~ ' ' ~ e.cid ~ ' (' ~ e.snapshot ~ ')') -%}{%- endfor -%}
+            {%- set pinned_keys = (report.present | map(attribute='key') | list) + (report.pinned | map(attribute='key') | list) -%}
+            {%- for e in report.drift -%}{%- set _ = m.append('DNSLINK DRIFT ' ~ e.name ~ ': recorded ' ~ e.recorded ~
+                  (' (pinned, kept)' if e.recorded_key in pinned_keys else ' (NOT pinned)') ~ ', DNSLink now ' ~ e.resolved ~
+                  (' (pinned)' if e.resolved_key in pinned_keys else ' (NOT pinned)')) -%}{%- endfor -%}
+            {%- for e in report.dnslink_unresolved -%}{%- set _ = m.append('DNSLINK UNRESOLVED ' ~ e.name ~ ': ' ~ e.error ~ ' (recorded CID pinned only)') -%}{%- endfor -%}
+            {%- for e in report.gated -%}{%- set _ = m.append('SIZE GATE ' ~ e.name ~ ' ' ~ e.cid ~ ': ' ~ e.size | filesizeformat ~ ' (' ~ e.size_from ~ ') > ' ~ content_size_gate_gb ~ ' GB, not pinned; override with content_size_gate_allow') -%}{%- endfor -%}
+            {%- for e in report.unretrievable -%}{%- set _ = m.append('UNRETRIEVABLE ' ~ e.name ~ ' ' ~ e.cid ~ ' (' ~ e.source ~ ', ' ~ e.snapshot ~ '): ' ~ e.error) -%}{%- endfor -%}
+            {%- for e in report.pin_errors -%}{%- set _ = m.append('PIN FAILED ' ~ e.name ~ ' ' ~ e.cid ~ ': ' ~ e.error) -%}{%- endfor -%}
+            {%- for e in report.invalid -%}{%- set _ = m.append('INVALID ENTRY ' ~ e.name ~ ': ' ~ e.reason) -%}{%- endfor -%}
+            {%- for n in report.excluded -%}{%- set _ = m.append('excluded (content_pin_exclude, out of scope): ' ~ n) -%}{%- endfor -%}
+            {%- for n in report.unclassified -%}{%- set _ = m.append('unclassified, not pinned until moved into pinset: ' ~ n) -%}{%- endfor -%}
+            {%- for n in report.unknown_sections -%}{%- set _ = m.append('unknown pinset.yml section, ignored: ' ~ n) -%}{%- endfor -%}
+            {%- for e in report.pending -%}{%- set _ = m.append('pending: ' ~ e.name ~ ' (' ~ e.reason ~ ')') -%}{%- endfor -%}
+          {%- endif -%}
+          {{ m }}
+
+    - name: Report outstanding pinset work
+      run_once: true
+      ansible.builtin.debug:
+        msg: >-
+          PINSET INCOMPLETE, {{ pending_names | length }} PENDING, NOT PINNED: {{ pending_names | join(', ') }}
+          -- re-run: ansible-playbook content.yml (after branch content-pinset-recovery merges)
+      when: pending_names | length > 0
+
+    - name: Fail unless every pinnable entry is pinned
+      run_once: true
+      ansible.builtin.assert:
+        that:
+          - upstream_unretrievable | length == 0
+          - report.pin_errors | default([]) | length == 0
+          - not status_failed | bool
+        fail_msg: >-
+          {{ ('UNRETRIEVABLE upstream-cluster content (the only copy): '
+              ~ upstream_unretrievable | map(attribute='name') | join(', ') ~ '. ') if upstream_unretrievable else '' }}
+          {{- ('pin add failed: ' ~ report.pin_errors | map(attribute='name') | join(', ') ~ '. ') if report.pin_errors | default([]) else '' }}
+          {{- ('not PINNED on every peer after ' ~ content_pin_timeout ~ 's: '
+              ~ status.not_pinned | join('; ')) if status_failed | bool else '' }}
+        quiet: true
