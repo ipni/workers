@@ -162,6 +162,8 @@ pinset:
       for the site
     source: upstream-cluster
     recovered_on: "2026-09-16"
+    verified: "2026-09-16"
+    status: retrievable
     upstream_name: "research.protocol.ai build 3412"
     upstream_other_cids:
       - bafybeiex7iu23rujyw4ewin64wnonsk3vm2osl5pzdarp4yhwsj752pa44
@@ -192,6 +194,8 @@ pinset:
       record since at least 2026-09-15)
     source: upstream-cluster
     recovered_on: "2026-09-16"
+    verified: "2026-09-16"
+    status: retrievable
     upstream_name: libp2p.io__2024-08-07_220424
     upstream_other_cids:
       - QmUBRqAEsbNQxuhSVdXnWanD2XkGLYX55FFg7Myz5yuRYZ
@@ -204,6 +208,8 @@ pinset:
       there (no DNSLink record since at least 2026-09-15)
     source: upstream-cluster
     recovered_on: "2026-09-16"
+    verified: "2026-09-16"
+    status: retrievable
     upstream_name: multiformats.io__2024-11-27_164202
     upstream_other_cids:
       - QmdhYERxeB8qdbcFby1ptnRLY9r5Y7nwKgkwFevZBWpUMH
