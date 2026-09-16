@@ -1,0 +1,87 @@
+---
+# Render every k8s/<app>/*.j2 the way roles/kustomize_apply does on a node, into
+# a directory you can read or run `kustomize build` against.
+#
+# Two jobs, one file: CI checks the manifests through the same path that
+# produces them, so a template that renders invalid YAML fails a pull request
+# rather than a deploy. Locally it answers "what will actually be applied to
+# the box?" without touching one.
+#
+#   ansible-playbook scripts/render-manifests.yml                  # -> ./rendered/
+#   ansible-playbook scripts/render-manifests.yml -e dest=/tmp/out
+#   ansible-playbook scripts/render-manifests.yml -e someguy_instances=1
+#
+# A relative dest is taken from the repo root, not your shell's cwd.
+#
+# The someguy instance table is read straight from the role's defaults, so this
+# cannot disagree with what a deploy would render.
+
+- name: Render the k8s manifest templates
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars_files:
+    - "{{ playbook_dir }}/../roles/someguy/defaults/main.yml"
+  vars:
+    repo_root: "{{ (playbook_dir ~ '/..') | realpath }}"
+    dest: rendered
+    # A relative dest does NOT resolve against the shell's cwd here - with a
+    # local connection the modules run from wherever the worker happens to be,
+    # so `-e dest=rendered` would report success and write somewhere else
+    # entirely. Anchor it to the repo root and say so.
+    render_dest: "{{ dest if dest.startswith('/') else repo_root ~ '/' ~ dest }}"
+  tasks:
+    - name: Find the manifest directories
+      ansible.builtin.find:
+        paths: "{{ repo_root }}/k8s"
+        file_type: directory
+      register: manifest_dirs
+
+    - name: Start from an empty destination
+      ansible.builtin.file:
+        path: "{{ render_dest }}"
+        state: "{{ item }}"
+      loop: [absent, directory]
+
+    # Straight copy first, templates over the top: the same order as the role,
+    # so anything that works here works there.
+    - name: Copy each manifest directory
+      ansible.builtin.copy:
+        src: "{{ item.path }}/"
+        dest: "{{ render_dest }}/{{ item.path | basename }}/"
+      loop: "{{ manifest_dirs.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Find the templates
+      ansible.builtin.find:
+        paths: "{{ repo_root }}/k8s"
+        patterns: "*.j2"
+        recurse: true
+      register: manifest_templates
+
+    - name: Render the templates
+      ansible.builtin.template:
+        src: "{{ item.path }}"
+        dest: "{{ render_dest }}/{{ item.path | dirname | basename }}/{{ item.path | basename | regex_replace('[.]j2$', '') }}"
+      loop: "{{ manifest_templates.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    # The .j2 sources came along with the copy; a node does not keep them and
+    # neither should this.
+    - name: Drop the copied template sources
+      ansible.builtin.file:
+        path: "{{ render_dest }}/{{ item.path | dirname | basename }}/{{ item.path | basename }}"
+        state: absent
+      loop: "{{ manifest_templates.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Report what was rendered
+      ansible.builtin.debug:
+        msg: >-
+          {{ manifest_dirs.files | length }} manifest directories into {{ render_dest }},
+          {{ manifest_templates.files | length }} templates rendered
+          ({{ manifest_templates.files | map(attribute='path') | map('basename') | sort | join(', ') }});
+          someguy_instances={{ someguy_instances }}

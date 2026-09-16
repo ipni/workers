@@ -43,14 +43,26 @@ ansible-playbook site.yml --check --diff   # dry run
 
 The playbook is idempotent and safe to re-run.
 
+**Controller prerequisites.** `ansible-core` with the `community.general` and
+`ansible.posix` collections, and `kubectl` for the tunnel scripts. A **first**
+run against a freshly provisioned box also needs `sshpass` installed on the
+controller: site.yml falls back to root password authentication when the admin
+key does not work yet, and Ansible shells out to `sshpass` for that
+(`ansible.cfg` keeps `password` in `PreferredAuthentications` for the same
+reason). Once hardening has run, every later connection is key-based and
+`sshpass` is no longer used.
+
 **Rollout mode.** `production_rollout` in `group_vars/ipfs_nodes/main.yml` is
 `false`, so playbooks roll every box at once, which is what you want while
 iterating. Set it to `true` - or pass `-e production_rollout=true` for one
-deploy - once these boxes serve real traffic: `routing.yml` then rolls one box
-at a time and waits for each to rebuild the state a someguy restart throws
-away, about an hour per box (see "Capacity, and the accepted sing-1
-limitation"). Every box is a whole site with no failover between them, so a
-simultaneous rollout in production is a full outage.
+deploy - once these boxes serve real traffic: `routing.yml`, `bootstrap.yml`,
+`content.yml` and `k3s-upgrade.yml` then roll one box at a time, and
+`routing.yml` additionally waits for each box to rebuild the state a someguy
+restart throws away, about an hour per box (see "Capacity: four someguy
+instances per box"). Every box is a whole site with no failover between them,
+so a simultaneous rollout in production is a full outage. `site.yml` is the
+exception: it is not serialised, so re-run it against a live fleet one box at
+a time with `-l`.
 
 ## Accessing the clusters
 
@@ -103,10 +115,12 @@ with the OS disk.
 passwordless sudo, then locks SSH down to key-only with root login disabled,
 enables ufw with a default-deny inbound policy, and configures fail2ban.
 
-> **The key file is the single source of truth.** `authorized_key` runs with
+> **The key files are the single source of truth.** `authorized_key` runs with
 > `exclusive: true`, so any key added to the `ipni` account by hand is removed
-> on the next run. To give a second operator access, turn `admin_pubkey_file`
-> into a list in `group_vars` rather than editing the host.
+> on the next run. `admin_pubkey_file` in `group_vars` takes either one path or
+> a list of them; to give a second operator access, add their key file to that
+> list rather than editing the host. Do it **before** the run that would
+> otherwise strip their key.
 
 fail2ban is kept mainly to cut log noise: with password authentication
 disabled there are few credential guesses left for it to ban.
@@ -138,8 +152,10 @@ those with this box's own IP (the same machine under its old name) and any
 that are not Ready. A Ready node on another IP is never deleted.
 
 **Upgrading k3s.** Add the latest patch of each minor version you need, up to
-the stable channel, to `k3s_upgrade_path` in `k3s-upgrade.yml`. Run it, then
-set `k3s_version` to the last entry. Look versions up at
+the stable channel, to `k3s_upgrade_path` in `group_vars/ipfs_nodes/main.yml`,
+and set `k3s_version` there to the last entry — the playbook refuses to run
+unless the two agree, so the target and the route to it stay in step. Then run
+`k3s-upgrade.yml`. Look versions up at
 `https://update.k3s.io/v1-release/channels`, never from memory.
 
 - Kubernetes does not support skipping minor versions, so the playbook refuses
@@ -281,7 +297,7 @@ terminates TLS with a **Cloudflare Origin CA certificate**.
   unclean paths.
 - **Host allowlist.** Only the three `route-<box>.ipni.io` names are served; any
   other Host gets **421**. If the live Cloudflare router sends a different Host,
-  add it to `domains` in `k8s/route-origin/envoy.yaml`.
+  add it to `domains` in `k8s/route-origin/envoy.yaml.j2`.
 - **The Cloudflare IP allowlist is not authentication.** ufw allows 443 only
   from Cloudflare's published ranges (pinned in
   `roles/route_origin/defaults/main.yml`). But *any* Cloudflare account can
@@ -397,7 +413,7 @@ To enable, **in this order**:
    AOP **On**. Origins that do not request a client certificate never see it,
    so other sites in the zone are unaffected. Do **not** use Cloudflare's shared
    global AOP certificate: every Cloudflare customer has it.
-2. Add to the `DownstreamTlsContext` in `k8s/route-origin/envoy.yaml`:
+2. Add to the `DownstreamTlsContext` in `k8s/route-origin/envoy.yaml.j2`:
    ```yaml
    require_client_certificate: true
    common_tls_context:
@@ -536,7 +552,7 @@ instance each, before the rollout):
 Both reject zero lookups at every rate, so the FindPeer cap that bound sing-1
 never binds here. chic-1's limit is **our own rate limiter** - the 429s are
 Envoy's 1000 req/s lookup bucket, which these runs are what turned from a
-starting guess into a measured setting (see `envoy.yaml`, and item 2 below).
+starting guess into a measured setting (see `envoy.yaml.j2`, and item 2 below).
 lith-1's is latency: p50 4078ms at 890/s, heading for the 5s wall. Both boxes were rolled to four instances on the strength of the
 sing-1 latency result; the throughput gain there is expected to be smaller.
 
@@ -1075,8 +1091,10 @@ entry has a `name` (the domain, also used as the pin's name), a `cid`, a
   network, the run **fails and names the domain**.
 - Names under `recover_from_upstream` have no CID yet and are **pending**:
   skipped, named in every run's summary, not an error.
-- `found_upstream_unclassified` entries are reported and never pinned until
-  someone moves them into `pinset`.
+- `found_upstream_unclassified` has no entries left: the section was classified
+  and removed on 2026-09-16 (see the comment block at the end of `pinset.yml`).
+  The role still reads it, so re-adding the section reports those entries
+  without pinning them, until someone moves them into `pinset`.
 - `content_pin_exclude` (role defaults) names entries not to pin. It is empty:
   everything in `pinset.yml` is pinned, including `saftproject.com`, which the
   file itself suggests dropping as not an IPFS Project site — it is tens of MB
@@ -1109,7 +1127,7 @@ then `-e '{"content_size_gate_allow": ["dist.ipfs.tech"]}'`.
 
 **Timeouts.** A root is looked for for `content_root_timeout` (300 s) before
 the entry counts as unretrievable; fetching a site and waiting for PINNED on
-every peer each get `content_pin_timeout` (600 s). Several roots now have far
+every peer each get `content_pin_timeout` (120 s). Several roots now have far
 fewer providers than when they were published: the slowest site in the pinset
 took about 8 minutes to fetch, while propagation to the other two peers took
 under a minute.
@@ -1190,6 +1208,29 @@ appear in output even at `-vvv`.
 Recovery is via the **provider KVM/web console** using the console password in
 the vault. SSH has no password fallback by design.
 
+## CI
+
+Nothing in CI talks to a box; there is no environment to test against. What it
+checks is **drift** — the failure mode this repo has actually had, where a
+generated file, a checksum or a section list quietly stops matching the thing
+it describes. Manifests are rendered first (`scripts/render-manifests.yml`, the
+same path a deploy takes), so what is checked is what would be applied:
+
+| Check | Catches |
+| --- | --- |
+| `ansible-playbook --syntax-check` on all five playbooks | a role edit that breaks a playbook nobody ran |
+| `ansible-lint`, `yamllint` | the rest, minus the style rules in `.ansible-lint` |
+| `kubectl kustomize` on every rendered `k8s/*/` | a patch or digest pin that no longer applies |
+| rendering at `someguy_instances` 1, 2 and 4 | the Deployments and Envoy's endpoint list falling out of step |
+| `sha256sum -c` on `cert-manager.yaml` | the vendored release manifest changing under its pin |
+| `bootstrap-dns.py \| diff - dns.txt` | `dns.txt` drifting from its generator |
+| every `pinset.yml` section is in the role's `known_sections` | a section the content role silently ignores |
+| `shellcheck scripts/*.sh` | the usual shell traps |
+
+The Cloudflare range check is a separate weekly workflow rather than part of
+this one, because it reaches `api.cloudflare.com`: an outage there should not
+turn an unrelated pull request red.
+
 ## Outstanding manual steps
 
 - [ ] **Store the vault files and `.vault_pass` in the operators' secret
@@ -1204,7 +1245,9 @@ the vault. SSH has no password fallback by design.
       certificate~~ — done. Verified end to end through Cloudflare on all three
       boxes: `/version` 200, streaming provider lookups, `/debug/` 404, and each
       request's `cf-ray` appears in the correct box's Envoy access log.
-- [ ] Run `scripts/check-cloudflare-ranges.sh` periodically (cron or CI).
+- [x] ~~Run `scripts/check-cloudflare-ranges.sh` periodically (cron or CI)~~ —
+      `.github/workflows/cloudflare-ranges.yml` runs it weekly and on demand.
+      Real drift fails the run; Cloudflare being unreachable only warns.
 - [x] ~~Create the `bootstrap.ipni.io` DNS records~~ — live and verified; `dns.txt` is the source.
 - [x] ~~Upgrade k3s off v1.31 and enable Secret encryption~~. All boxes are on
       v1.36.4+k3s1 via `k3s-upgrade.yml`, with encryption verified in the datastore.
@@ -1217,7 +1260,7 @@ the vault. SSH has no password fallback by design.
       `tcp/4443/wss` records from `dns.txt`.
 - [ ] **Before putting these boxes behind the live Cloudflare router:**
   - find out which Host it sends and which zone it lives in;
-  - add that Host to `domains` in `k8s/route-origin/envoy.yaml` (otherwise 421);
+  - add that Host to `domains` in `k8s/route-origin/envoy.yaml.j2` (otherwise 421);
   - point the router's health check at `/version`.
 - [ ] **Enable Authenticated Origin Pulls** once the zones are known (see
       "Deferred: Authenticated Origin Pulls").
@@ -1225,17 +1268,21 @@ the vault. SSH has no password fallback by design.
 - [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
 - [ ] **Three sites have no CID anywhere:** `docs.libp2p.io`, `ipld.io` and
       `dnslink.io` are under `recover_from_upstream`, and the 2026-09-16 search
-      found them neither in the upstream pinset nor in
-      `found_upstream_unclassified`. Every run names them until they are
-      resolved. All three are still live over HTTPS, so the remaining routes
+      found them nowhere in the upstream pinset listings committed beside
+      `pinset.yml`. Every run names them until they are resolved. All three are still live over HTTPS, so the remaining routes
       are asking their maintainers to republish DNSLink, or mirroring the live
       site under a new CID — a new copy, not the original, needing its own
       `source`. (`js.ipfs.io` was in this list and is now pinned, from a copy
       found outside the upstream listing.)
-- [ ] **Classify the upstream leftovers.** `found_upstream_unclassified` holds
-      724 entries recovered from the upstream cluster (conference sites,
-      badbits builds, dated snapshots). Nothing pins them until someone moves
-      what is in scope into `pinset`.
+- [x] ~~Classify the upstream leftovers~~ — the 724 entries recovered from the
+      upstream cluster were triaged on 2026-09-16 and the
+      `found_upstream_unclassified` section was removed. They are CI build
+      history (badbits, ipfs-specs, ipfs-docs, ipfs-website builds) and
+      out-of-scope sites, not sites this cluster is missing; the reasoning and
+      the group counts are in the comment block at the end of `pinset.yml`.
+      Every CID remains in the raw listings committed beside it, so any one of
+      them can still be adopted before the upstream cluster shuts down on
+      2026-09-30.
 - [x] ~~Two hand-added pins are not in the pinset~~ — `ipfs.io-legacy` and
       `ipfs.io-legacy-2` were unpinned on 2026-09-16. Both had been retrying
       for 60+ attempts per peer and sat in `PIN_ERROR` on all three; the
@@ -1276,8 +1323,8 @@ roles/someguy/            someguy firewall + deploy
 roles/route_origin/       Envoy origin: cert preflight, Cloudflare allowlist, TLS secret
   tasks/verify.yml        post-deploy request checks (paths, Host, traversal; AOP when enforced)
 roles/kustomize_apply/    shared: ship, dry-run/apply, wait, prune stale ConfigMaps
-k8s/someguy/              someguy kustomize manifests
-k8s/route-origin/         Envoy kustomize manifests and envoy.yaml
+k8s/someguy/              someguy kustomize manifests; the Deployments are .j2, rendered from someguy_all_instances
+k8s/route-origin/         Envoy kustomize manifests and envoy.yaml.j2 (someguy endpoints rendered)
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
 k8s/bootstrap-wss/        Envoy TLS proxy for the bootstrappers' WSS listener
 k8s/content/              content cluster node manifests (kubo + ipfs-cluster, repo PVC)
@@ -1296,7 +1343,6 @@ group_vars/ipfs_nodes/vault.yml  encrypted origin TLS key, origin-pull CA and cl
 scripts/bootstrap-vault.sh  servers.txt -> encrypted vaults (one-time; source now deleted)
 scripts/kubectl-tunnel.sh   SSH tunnel to a box's API server
 scripts/check-cloudflare-ranges.sh  pinned Cloudflare ranges vs Cloudflare's API
-scripts/routing-compare.sh  our routing endpoints vs delegated-ipfs.dev (correctness)
 scripts/routing-load.sh     closed-loop load test, run from anywhere
 scripts/routing-rate-test.sh  open-loop load test with box-side metrics, run ON the box
 scripts/routing-compare.sh          our route-<box>.ipni.io vs delegated-ipfs.dev (results, latency, errors)
@@ -1304,13 +1350,18 @@ scripts/routing-compare-cids.txt    fixtures for routing-compare.sh
 scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
 scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used by the preflight)
 scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
+scripts/render-manifests.yml        render k8s/*/*.j2 the way a deploy does, to read or kustomize build
 scripts/wss-check/                  dial the bootstrappers over WSS from Node or headless Chrome
 scripts/new-content-cluster-identity.sh  create a box's content cluster and kubo identities (and the cluster secret)
 scripts/content-pinset.sh           a box's cluster pins and per-peer status beside pinset.yml (pending first)
+scripts/fetch-upstream-entry.sh     fetch one upstream-recovered CID straight from the upstream peers and pin it
+scripts/recover-upstream-pinset.sh  capture the upstream collab cluster's pinset as a follower (fetches no content)
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 routing.yml               routing service playbook (someguy + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)
+.github/workflows/ci.yml  drift checks: playbook syntax, lint, kustomize build, generated files, shellcheck
+.github/workflows/cloudflare-ranges.yml  weekly pinned-vs-published Cloudflare range check
 ```

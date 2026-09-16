@@ -1,0 +1,147 @@
+---
+# The repo has no runtime tests - nothing here talks to a box. What it does
+# catch is DRIFT: a generated file that no longer matches its generator, a
+# pinned upstream manifest that changed under its checksum, a playbook that
+# stopped parsing, a pinset section the role does not know about. Every one of
+# those has gone unnoticed here before, which is why this exists.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible-lint and the collections the roles use
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core ansible-lint yamllint
+          ansible-galaxy collection install community.general ansible.posix
+
+      # Every playbook, not just site.yml: a role edit can break one of the
+      # others and nothing else would say so.
+      - name: Syntax-check every playbook
+        run: |
+          for playbook in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml; do
+            echo "== $playbook"
+            ansible-playbook --syntax-check "$playbook"
+          done
+
+      - name: yamllint
+        run: yamllint .
+
+      - name: ansible-lint
+        run: ansible-lint
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Some manifests are .j2, rendered on the node by roles/kustomize_apply.
+      # Rendering them here through the same playbook a person would use means
+      # CI checks what will actually be applied, not a source file that never
+      # reaches a box.
+      - name: Render the manifest templates
+        run: |
+          pip install ansible-core
+          ansible-playbook scripts/render-manifests.yml -e dest=rendered
+
+      # kustomize build resolves every patch and digest pin, so a manifest that
+      # no longer applies fails here rather than half-way through a deploy.
+      - name: kustomize build every overlay
+        run: |
+          for dir in rendered/*/; do
+            [ -f "$dir/kustomization.yaml" ] || continue
+            echo "== $dir"
+            kubectl kustomize "$dir" > /dev/null
+          done
+
+      # The instance count is a knob (someguy_instances). It is only a real one
+      # if the Deployments and Envoy's endpoint list move together, which is the
+      # whole point of rendering them from one table.
+      - name: someguy instance count drives both manifests
+        run: |
+          for count in 1 2 4; do
+            ansible-playbook scripts/render-manifests.yml \
+              -e dest="rendered-$count" -e "someguy_instances=$count" > /dev/null
+            deployments=$(kubectl kustomize "rendered-$count/someguy" | grep -c '^kind: Deployment')
+            endpoints=$(kubectl kustomize "rendered-$count/route-origin" \
+                        | grep -c 'port_value: 819')
+            echo "someguy_instances=$count -> $deployments Deployments, $endpoints endpoints"
+            if [ "$deployments" -ne "$count" ] || [ "$endpoints" -ne "$count" ]; then
+              echo "::error::someguy_instances=$count produced $deployments Deployments and $endpoints Envoy endpoints"
+              exit 1
+            fi
+          done
+
+      # The cert-manager release manifest is vendored, so its checksum is the
+      # only thing standing between us and a silently edited copy. The expected
+      # value is read out of the kustomization's own comment, so the pin and
+      # the check can never disagree.
+      - name: cert-manager manifest matches its pinned checksum
+        run: |
+          pinned=$(awk '/^#[[:space:]]*sha256 /{print $3}' k8s/cert-manager/kustomization.yaml)
+          test -n "$pinned" || { echo "no sha256 pinned in kustomization.yaml"; exit 1; }
+          echo "$pinned  k8s/cert-manager/cert-manager.yaml" | sha256sum -c -
+
+  generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # dns.txt is generated but committed, and README calls it the source of
+      # truth for the live records. It has drifted from its generator before.
+      - name: dns.txt matches its generator
+        run: |
+          python3 scripts/bootstrap-dns.py > /tmp/dns.generated
+          diff -u /tmp/dns.generated dns.txt
+
+      # The role ignores - and reports - any pinset.yml section it does not
+      # know, which is how a whole section once went unread for a week.
+      - name: every pinset.yml section is known to the content role
+        run: |
+          python3 - <<'PY'
+          import re, sys, yaml
+
+          known = re.search(
+              r"known_sections:\s*\[([^\]]*)\]",
+              open("roles/content/tasks/main.yml").read(),
+          )
+          if not known:
+              sys.exit("could not find known_sections in roles/content/tasks/main.yml")
+          known = {s.strip() for s in known.group(1).split(",")}
+          present = set(yaml.safe_load(open("roles/content/vars/pinset.yml")))
+          unknown = sorted(present - known)
+          if unknown:
+              sys.exit(f"pinset.yml sections the content role ignores: {unknown}")
+          print(f"{len(present)} sections, all known: {sorted(present)}")
+          PY
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh

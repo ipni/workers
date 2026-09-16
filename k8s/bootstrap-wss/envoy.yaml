@@ -27,8 +27,14 @@ overload_manager:
 static_resources:
   listeners:
     - name: libp2p_wss
+      # Dual stack; see k8s/route-origin/envoy.yaml for why this is two
+      # sockets rather than one v4-mapped one. The per-IP connection cap in
+      # roles/bootstrap covers both families.
       address:
         socket_address: { address: 0.0.0.0, port_value: 4443 }
+      additional_addresses:
+        - address:
+            socket_address: { address: "::", port_value: 4443 }
       filter_chains:
         - transport_socket_connect_timeout: 10s
           transport_socket:

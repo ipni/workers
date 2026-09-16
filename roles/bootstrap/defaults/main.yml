@@ -47,11 +47,19 @@ bootstrap_wss_issuer: letsencrypt-prod
 # Optional contact for the Let's Encrypt account (empty: none).
 bootstrap_acme_email: ""
 
-# Most concurrent WSS connections accepted from one IPv4 address. Kubo sees
+# Most concurrent WSS connections accepted from one client address. Kubo sees
 # every WSS client as 127.0.0.1 and exempts loopback from its own per-IP
 # limits, so this firewall rule is the only per-client cap. Leaves room for
 # many browsers behind one NAT address.
 bootstrap_wss_max_conns_per_ip: 64
+
+# What counts as "one client" per family. /32 is a single IPv4 address, but the
+# IPv6 equivalent is NOT /128: a residential v6 client is handed a /64 or
+# larger and can pick a fresh address per connection, so a /128 cap would be
+# free to walk around. /64 is the smallest prefix that is reliably one
+# subscriber. Raise the mask only if a shared /64 turns out to need it.
+bootstrap_wss_connlimit_mask_v4: 32
+bootstrap_wss_connlimit_mask_v6: 64
 
 # Relay reservations kubo allows per IP. All WSS clients share 127.0.0.1, so
 # kubo's default of 8 would be a limit for every browser combined; this equals

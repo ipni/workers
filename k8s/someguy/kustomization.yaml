@@ -5,12 +5,17 @@ namespace: someguy
 
 resources:
   - namespace.yaml
+  # Both are RENDERED from someguy_all_instances (roles/someguy/defaults) by
+  # roles/kustomize_apply; the repo holds deployment.yaml.j2 and
+  # deployment-extra.yaml.j2. The names below are what lands on the node.
   - deployment.yaml
-  # Instances b, c and d. Four someguy processes per box, each with its own
+  # Instances b onward. Four someguy processes per box, each with its own
   # PeerID, concurrency budget and connection pool; Envoy fans out across them
-  # (k8s/route-origin/envoy.yaml). Measured on sing-1 2026-09-16: one instance
-  # topped out at 355 req/s with p50 5004ms at 400 req/s, four reached 894 req/s
-  # with p50 217ms at 400 - see README, "Capacity".
+  # (k8s/route-origin/envoy.yaml.j2). Measured on sing-1 2026-09-16: one
+  # instance topped out at 355 req/s with p50 5004ms at 400 req/s, four reached
+  # 894 req/s with p50 217ms at 400 - see README, "Capacity". At
+  # someguy_instances: 1 this renders to a comment, which kustomize accepts as
+  # an empty resource.
   - deployment-extra.yaml
 
 labels:
@@ -63,8 +68,8 @@ configMapGenerator:
       # halved p50 (2208ms -> 1180ms) and cut response bytes ~70%. someguy's
       # CPU and p95 did not move, so the gain is in building and shipping the
       # response, NOT in fewer provider-address lookups - the tail is still
-      # bounded by DHT walks (see README, "Capacity, and the accepted sing-1
-      # limitation"). 50 is the compromise: most of a measured gain, half the
+      # bounded by DHT walks (see README, "Capacity: four someguy instances
+      # per box"). 50 is the compromise: most of a measured gain, half the
       # loss in completeness. 25 is what was measured; 50 is interpolation.
       - SOMEGUY_RECORDS_LIMIT=50
 

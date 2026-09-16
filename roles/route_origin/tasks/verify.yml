@@ -9,10 +9,12 @@
 # identity was checked above by fingerprint.
 #
 # When route_origin_aop_enforced is true, requests must present the origin-pull
-# client certificate. Its key goes from the vault into an in-memory file
-# (memfd) that only curl reads: it is never written to disk and never appears
-# in a command line. no_log hides this task's output; the assert below reports
-# failures.
+# client certificate. Its key goes from the vault to this script's STDIN, and
+# from there into an in-memory file (memfd) that only curl reads: it is never
+# written to disk, never appears in a command line, and never enters the
+# environment - where it would otherwise sit in /proc/<pid>/environ for the
+# script and every curl child it spawns. no_log hides this task's output; the
+# assert below reports failures.
 #
 # Every negative case is a regression test: if any returns something else
 # (a redirect from someguy, a 200), the deploy fails.
@@ -48,16 +50,24 @@
     # is refused, so no HTTP status at all (curl reports 000).
     origin_aop_checks:
       - { path: /version, client_cert: false, status: "000" }
+    # Everything the script needs, secrets included, handed over on stdin.
+    origin_checks_stdin:
+      aop_enforced: "{{ route_origin_aop_enforced | bool }}"
+      client_cert: "{{ lookup('file', route_origin_pull_client_cert_file) if route_origin_aop_enforced | bool else '' }}"
+      client_key: "{{ vault_origin_pull_client_key if route_origin_aop_enforced | bool else '' }}"
+      route_hostname: "{{ route_hostname }}"
+      checks: "{{ origin_checks + (origin_aop_checks if route_origin_aop_enforced | bool else []) }}"
   ansible.builtin.command:
     argv:
       - python3
       - -c
       - |
-        import json, os, subprocess
-        aop = os.environ["AOP_ENFORCED"] == "true"
-        cert = os.environ["CLIENT_CERT"].encode()
-        key = os.environ["CLIENT_KEY"].encode()
-        host = os.environ["ROUTE_HOSTNAME"]
+        import json, os, subprocess, sys
+        cfg = json.load(sys.stdin)
+        aop = str(cfg["aop_enforced"]).lower() == "true"
+        cert = cfg["client_cert"].encode()
+        key = cfg["client_key"].encode()
+        host = cfg["route_hostname"]
 
         def memfd(name, data):
             fd = os.memfd_create(name)
@@ -66,7 +76,7 @@
 
         cert_fd, key_fd = memfd("cert", cert), memfd("key", key)
         results = []
-        for c in json.loads(os.environ["CHECKS"]):
+        for c in cfg["checks"]:
             method = c.get("method", "GET")
             argv = ["curl", "-sk", "--path-as-is", "--max-time", "30",
                     "--resolve", host + ":443:127.0.0.1",
@@ -84,16 +94,10 @@
                                    "" if c.get("client_cert", True) else " (no client cert)")
             results.append({"case": label, "want": str(c["status"]), "got": got})
         print(json.dumps(results))
-  environment:
-    AOP_ENFORCED: "{{ route_origin_aop_enforced | bool | lower }}"
-    CLIENT_CERT: "{{ lookup('file', route_origin_pull_client_cert_file) if route_origin_aop_enforced | bool else '' }}"
-    CLIENT_KEY: "{{ vault_origin_pull_client_key if route_origin_aop_enforced | bool else '' }}"
-    ROUTE_HOSTNAME: "{{ route_hostname }}"
-    CHECKS: "{{ (origin_checks + (origin_aop_checks if route_origin_aop_enforced | bool else [])) | to_json }}"
+    stdin: "{{ origin_checks_stdin | to_json }}"
   register: origin_checks_run
   changed_when: false
   no_log: true
-
 
 - name: Report the origin request checks
   vars:
@@ -111,4 +115,3 @@
       {{ origin_check_results | length }} origin checks passed:
       {{ origin_check_results | map(attribute='case') | zip(origin_check_results | map(attribute='got'))
          | map('join', ' -> ') | list }}
-

@@ -11,6 +11,9 @@
 
 - name: Deploy the bootstrapper
   hosts: ipfs_nodes
+  serial: >-
+    {{ rollout_serial | default(1 if (production_rollout | default(false) | bool)
+       else (groups['ipfs_nodes'] | length)) }}
   remote_user: "{{ admin_user }}"
   become: true
   gather_facts: false

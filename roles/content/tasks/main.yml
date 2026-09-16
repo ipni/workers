@@ -340,7 +340,7 @@
     # Entries may be plain names or mappings with a `name`.
     - name: Classify the pinset entries
       vars:
-        known_sections: [resolved_on, pinset, recover_from_upstream, found_upstream_unclassified, retired]
+        known_sections: [resolved_on, pinset, unpinned, recover_from_upstream, found_upstream_unclassified, retired]
       ansible.builtin.set_fact:
         content_pinset_plan: >-
           {%- set p = content_pinset if content_pinset is mapping else {} -%}

@@ -1,0 +1,23 @@
+---
+extends: default
+
+ignore: |
+  .github/
+  facts_cache/
+  kubeconfigs/
+  reviews/
+  tasks/
+  scripts/wss-check/node_modules/
+
+rules:
+  # See .ansible-lint for why these two are off.
+  line-length: disable
+  braces: disable
+  comments:
+    # `#:` prefixes a dated note in pinset.yml; require only one space so those
+    # stay as they are.
+    require-starting-space: false
+  truthy:
+    # `on:` in a workflow, and quoted "no"/"yes" in the sshd settings.
+    allowed-values: ["true", "false"]
+    check-keys: false

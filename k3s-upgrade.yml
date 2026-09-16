@@ -1,31 +1,38 @@
 ---
 # Upgrade k3s on the boxes, one minor version at a time (k3s and Kubernetes do
-# not support skipping minors). Boxes upgrade in parallel; each walks the path
-# in order and skips versions it has already reached, so re-running resumes.
+# not support skipping minors). Each box walks the path in order and skips
+# versions it has already reached, so re-running resumes. production_rollout
+# decides whether the boxes upgrade together or one at a time; with it true,
+# only one control plane is down at any point.
 #
 #   ansible-playbook k3s-upgrade.yml
 #   ansible-playbook k3s-upgrade.yml -l chic-1
 #
 # Every step backs up /var/lib/rancher/k3s/server to /var/lib/rancher/k3s-backups
-# first. After the last step, k3s_version in group_vars must equal the last
-# entry here.
+# first. The path itself lives in group_vars/ipfs_nodes/main.yml beside
+# k3s_version, so one file records both the target and the route to it; the
+# last entry there must equal k3s_version. The assert below enforces that.
 
 - name: Upgrade k3s
   hosts: ipfs_nodes
+  serial: >-
+    {{ rollout_serial | default(1 if (production_rollout | default(false) | bool)
+       else (groups['ipfs_nodes'] | length)) }}
   remote_user: "{{ admin_user }}"
   become: true
   gather_facts: false
-  vars:
-    # Latest patch of each minor, from https://update.k3s.io/v1-release/channels
-    # (checked 2026-09-15). Ends at the stable channel.
-    k3s_upgrade_path:
-      - v1.31.14+k3s1
-      - v1.32.13+k3s1
-      - v1.33.13+k3s2
-      - v1.34.11+k3s1
-      - v1.35.8+k3s1
-      - v1.36.4+k3s1
   tasks:
+    # An upgrade that ends anywhere other than k3s_version would leave the
+    # fleet on a version site.yml then tries to change back on its next run.
+    - name: Fail unless the upgrade path ends at k3s_version
+      ansible.builtin.assert:
+        that: k3s_upgrade_path[-1] == k3s_version
+        fail_msg: >-
+          k3s_upgrade_path ends at {{ k3s_upgrade_path[-1] }} but k3s_version is
+          {{ k3s_version }}; both are in group_vars/ipfs_nodes/main.yml.
+        quiet: true
+      run_once: true
+
     - name: Walk the upgrade path
       ansible.builtin.include_role:
         name: k3s

@@ -1,0 +1,43 @@
+---
+# Kept out of the main checks workflow deliberately: this one reaches
+# api.cloudflare.com, so a Cloudflare outage would otherwise turn every pull
+# request red for a reason that has nothing to do with the change.
+#
+# A range Cloudflare adds that we have not pinned shows up in production as
+# intermittent 522s from those edges only - invisible until someone is on the
+# wrong edge. Fix drift by editing route_origin_cloudflare_ranges and running
+# `ansible-playbook routing.yml --tags origin`.
+name: cloudflare-ranges
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ranges:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # Exit 1 is real drift and should fail. Exit 2 means Cloudflare could not
+      # be reached, which says nothing about this repo, so it is reported and
+      # left alone.
+      - name: Pinned Cloudflare ranges match what Cloudflare publishes
+        run: |
+          set +e
+          ./scripts/check-cloudflare-ranges.sh
+          status=$?
+          set -e
+          if [ "$status" -eq 2 ]; then
+            echo "::warning::could not reach Cloudflare; ranges not checked this run"
+            exit 0
+          fi
+          exit "$status"

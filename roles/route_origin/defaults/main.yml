@@ -35,8 +35,11 @@ route_origin_pull_client_cert_file: "{{ playbook_dir }}/certs/origin-pull-client
 # (cross-checked with https://api.cloudflare.com/client/v4/ips), fetched
 # 2026-09-14. Cloudflare changes these rarely; re-check periodically.
 #
-# Removing a range here does NOT delete its existing ufw rule; delete stale
-# rules by hand (ufw status numbered / ufw delete N).
+# Removing a range here DOES delete its existing ufw rule: the role reads back
+# the rules it created (comment "cloudflare origin") and removes any whose
+# source is no longer on this list, so 443 never stays open to an address
+# Cloudflare has given up. scripts/check-cloudflare-ranges.sh compares this
+# list against Cloudflare's API and exits 1 on drift.
 route_origin_cloudflare_ranges:
   - 173.245.48.0/20
   - 103.21.244.0/22

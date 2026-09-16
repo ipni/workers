@@ -1,0 +1,22 @@
+---
+# ---------------------------------------------------------------------------
+# Package upgrades
+# ---------------------------------------------------------------------------
+# `apt upgrade` on every site.yml run is a SECOND patch policy, competing with
+# the deliberate one this role installs further down: unattended-upgrades,
+# security only, Automatic-Reboot false. That one is considered and predictable.
+# An unconditional upgrade here is neither - it is broader than security-only
+# and it fires whenever an operator runs site.yml for some unrelated reason,
+# which on a live fleet can stage a kernel that then waits on the manual-reboot
+# rule nobody was thinking about.
+#
+# So: upgrade automatically only while the box is still being BUILT, which is
+# exactly when bootstrap_mode is true (site.yml sets it when the admin key does
+# not work yet). On a hardened box it takes an explicit:
+#
+#   ansible-playbook site.yml -l chic-1 -e common_apt_upgrade=true
+#   ansible-playbook site.yml -l chic-1 --tags apt-upgrade -e common_apt_upgrade=true
+#
+# Security updates keep arriving on their own in the meantime; this switch is
+# about when a WHOLE-SYSTEM upgrade happens, not about whether patching happens.
+common_apt_upgrade: "{{ bootstrap_mode | default(false) }}"

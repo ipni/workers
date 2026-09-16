@@ -1,0 +1,108 @@
+{#
+  Rendered by roles/kustomize_apply from someguy_all_instances and
+  someguy_instances (roles/someguy/defaults/main.yml).
+
+  Every instance after the first, identical to k8s/someguy/deployment.yaml
+  (instance a) except for the name and the two ports it owns. Every comment
+  explaining why the pod looks like this lives in that file; this one is
+  deliberately mechanical, so the instances cannot drift apart.
+
+  The instance table used to be written out by hand here, in the role defaults,
+  and in k8s/route-origin/envoy.yaml. Now the defaults hold it and the other
+  two are rendered, so a port is written down in exactly one place.
+#}
+# GENERATED from someguy_all_instances in roles/someguy/defaults/main.yml.
+# Edit that table, not this file. Rendered by roles/kustomize_apply.
+#
+# Instances running on this box:
+#
+#   instance   API (loopback)   libp2p (public)
+{% for instance in someguy_running_instances %}
+#   {{ '%-10s %-16s %s' | format(instance.name, instance.api, instance.libp2p) }}
+{% endfor %}
+{% for instance in someguy_running_instances[1:] %}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ instance.name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ instance.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ instance.name }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 15
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: someguy
+          image: someguy
+          envFrom:
+            - configMapRef:
+                name: someguy-env-vars
+          env:
+            - name: SOMEGUY_LISTEN_ADDRESS
+              value: 127.0.0.1:{{ instance.api }}
+            - name: SOMEGUY_LIBP2P_LISTEN_ADDRS
+              value: /ip4/0.0.0.0/tcp/{{ instance.libp2p }},/ip4/0.0.0.0/udp/{{ instance.libp2p }}/quic-v1,/ip4/0.0.0.0/udp/{{ instance.libp2p }}/webrtc-direct,/ip4/0.0.0.0/udp/{{ instance.libp2p }}/quic-v1/webtransport,/ip6/::/tcp/{{ instance.libp2p }},/ip6/::/udp/{{ instance.libp2p }}/quic-v1,/ip6/::/udp/{{ instance.libp2p }}/webrtc-direct,/ip6/::/udp/{{ instance.libp2p }}/quic-v1/webtransport
+          ports:
+            - name: http
+              containerPort: {{ instance.api }}
+              protocol: TCP
+            - name: libp2p-tcp
+              containerPort: {{ instance.libp2p }}
+              protocol: TCP
+            - name: libp2p-udp
+              containerPort: {{ instance.libp2p }}
+              protocol: UDP
+          resources:
+            requests:
+              cpu: "6"
+              memory: 20Gi
+            limits:
+              memory: 21Gi
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /version
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /version
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data/someguy
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 1Gi
+{% endfor %}

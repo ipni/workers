@@ -19,14 +19,17 @@ _dnsaddr.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dnsaddr/sing-1.bootstrap.ipni.io/
 _dnsaddr.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dnsaddr/lith-1.bootstrap.ipni.io/p2p/12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u" ; cf_tags=cf-proxied:false
 _dnsaddr.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dnsaddr/chic-1.bootstrap.ipni.io/p2p/12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt" ; cf_tags=cf-proxied:false
 
-;; sing-1: its addresses (TCP and QUIC)
+;; sing-1: its addresses (TCP, QUIC, and WSS for browsers)
 _dnsaddr.sing-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/sing-1.bootstrap.ipni.io/tcp/4001/p2p/12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f" ; cf_tags=cf-proxied:false
 _dnsaddr.sing-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/sing-1.bootstrap.ipni.io/udp/4001/quic-v1/p2p/12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f" ; cf_tags=cf-proxied:false
+_dnsaddr.sing-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/sing-1.bootstrap.ipni.io/tcp/4443/wss/p2p/12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f" ; cf_tags=cf-proxied:false
 
-;; lith-1: its addresses (TCP and QUIC)
+;; lith-1: its addresses (TCP, QUIC, and WSS for browsers)
 _dnsaddr.lith-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/lith-1.bootstrap.ipni.io/tcp/4001/p2p/12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u" ; cf_tags=cf-proxied:false
 _dnsaddr.lith-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/lith-1.bootstrap.ipni.io/udp/4001/quic-v1/p2p/12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u" ; cf_tags=cf-proxied:false
+_dnsaddr.lith-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/lith-1.bootstrap.ipni.io/tcp/4443/wss/p2p/12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u" ; cf_tags=cf-proxied:false
 
-;; chic-1: its addresses (TCP and QUIC)
+;; chic-1: its addresses (TCP, QUIC, and WSS for browsers)
 _dnsaddr.chic-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/chic-1.bootstrap.ipni.io/tcp/4001/p2p/12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt" ; cf_tags=cf-proxied:false
 _dnsaddr.chic-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/chic-1.bootstrap.ipni.io/udp/4001/quic-v1/p2p/12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt" ; cf_tags=cf-proxied:false
+_dnsaddr.chic-1.bootstrap.ipni.io.	1	IN	TXT	"dnsaddr=/dns4/chic-1.bootstrap.ipni.io/tcp/4443/wss/p2p/12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt" ; cf_tags=cf-proxied:false

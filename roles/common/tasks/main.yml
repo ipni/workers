@@ -28,6 +28,8 @@
     update_cache: true
     cache_valid_time: 3600
 
+# Gated: see common_apt_upgrade in defaults/main.yml for why this does not run
+# unprompted on a box that is already carrying traffic.
 - name: Upgrade all packages
   ansible.builtin.apt:
     upgrade: safe
@@ -35,6 +37,17 @@
   retries: 3
   delay: 10
   until: apt_upgrade is succeeded
+  when: common_apt_upgrade | bool
+  tags: [apt-upgrade]
+
+- name: Report that the whole-system upgrade was skipped
+  ansible.builtin.debug:
+    msg: >-
+      Skipped `apt upgrade` on {{ inventory_hostname }}: this box is already
+      hardened, and unattended-upgrades handles security updates. Re-run with
+      -e common_apt_upgrade=true to upgrade everything.
+  when: not (common_apt_upgrade | bool)
+  tags: [apt-upgrade]
 
 - name: Install base packages
   ansible.builtin.apt:

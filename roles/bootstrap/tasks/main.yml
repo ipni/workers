@@ -78,6 +78,9 @@
 #
 # 1. Per-IP cap on concurrent WSS connections. Behind the proxy every client
 #    is 127.0.0.1 to kubo, which exempts loopback from its per-IP limits.
+#    Envoy accepts WSS on both families, so this cap exists in before.rules AND
+#    before6.rules - a cap that covered only v4 would be no cap at all to a
+#    client with a v6 address.
 #
 # 2. Kubo may not open new loopback connections, except to its own RPC API
 #    (probes and `ipfs` CLI calls run as the same uid). The WSS proxy needs
@@ -86,25 +89,38 @@
 #    WSS client could otherwise hand kubo 127.0.0.1 addresses (identify accepts
 #    them from loopback peers) and make it probe the k3s API, kubelet, someguy
 #    and Envoy admin ports. Replies to accepted connections are not NEW, so
-#    serving the proxy is unaffected. IPv6 needs no rule: ::1 stays filtered.
-#    Kubo's DNS goes to the provider's resolvers, not loopback.
-- name: Add the WSS firewall rules to ufw
+#    serving the proxy is unaffected. This one stays IPv4-only on purpose:
+#    ::1 is still in Swarm.AddrFilters, so kubo never dials v6 loopback in the
+#    first place. Kubo's DNS goes to the provider's resolvers, not loopback.
+- name: Add the WSS firewall rules to ufw (IPv4)
   ansible.builtin.blockinfile:
     path: /etc/ufw/before.rules
     marker: "# {mark} ANSIBLE MANAGED BLOCK bootstrap"
     insertbefore: '^# allow all on loopback'
     block: |
       # Per-IP cap on concurrent libp2p WSS connections
-      -A ufw-before-input -p tcp --dport {{ bootstrap_wss_port }} --syn -m connlimit --connlimit-above {{ bootstrap_wss_max_conns_per_ip }} --connlimit-mask 32 -j REJECT --reject-with tcp-reset
+      -A ufw-before-input -p tcp --dport {{ bootstrap_wss_port }} --syn -m connlimit --connlimit-above {{ bootstrap_wss_max_conns_per_ip }} --connlimit-mask {{ bootstrap_wss_connlimit_mask_v4 }} -j REJECT --reject-with tcp-reset
       # The bootstrapper (uid {{ bootstrap_kubo_uid }}) may not dial loopback, except its RPC API
       -A ufw-before-output -o lo -p tcp -m owner --uid-owner {{ bootstrap_kubo_uid }} -m conntrack --ctstate NEW ! --dport {{ bootstrap_api | regex_search('[0-9]+$') }} -j REJECT --reject-with tcp-reset
       -A ufw-before-output -o lo -p udp -m owner --uid-owner {{ bootstrap_kubo_uid }} -m conntrack --ctstate NEW -j REJECT
   register: bootstrap_ufw_rules
 
+# Same cap, IPv6 side. Only rule 1: see the note above for why the egress rules
+# have no v6 counterpart.
+- name: Add the WSS firewall rules to ufw (IPv6)
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/before6.rules
+    marker: "# {mark} ANSIBLE MANAGED BLOCK bootstrap"
+    insertbefore: '^# allow all on loopback'
+    block: |
+      # Per-prefix cap on concurrent libp2p WSS connections
+      -A ufw6-before-input -p tcp --dport {{ bootstrap_wss_port }} --syn -m connlimit --connlimit-above {{ bootstrap_wss_max_conns_per_ip }} --connlimit-mask {{ bootstrap_wss_connlimit_mask_v6 }} -j REJECT --reject-with tcp-reset
+  register: bootstrap_ufw6_rules
+
 - name: Reload ufw to load the WSS firewall rules
   ansible.builtin.command:
     argv: [ufw, reload]
-  when: bootstrap_ufw_rules is changed
+  when: (bootstrap_ufw_rules is changed) or (bootstrap_ufw6_rules is changed)
   changed_when: true
 
 # ---------------------------------------------------------------------------

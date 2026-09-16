@@ -251,7 +251,6 @@
       delay: 5
       until: k3s_readyz.rc == 0
 
-
 - name: Read the final secrets encryption status
   ansible.builtin.command:
     argv: [k3s, secrets-encrypt, status]
@@ -271,11 +270,10 @@
     quiet: true
   when: not ansible_check_mode
 
-# A status line is not proof. Read the kine table in the SQLite datastore:
-#   - every Secret's CURRENT row must be encrypted in both value and old_value;
-#   - plaintext left in OLDER revisions is reported, not failed: those rows go
-#     away with kine compaction (newest 1000 revisions kept) plus the VACUUM
-#     k3s runs at startup.
+# A status line is not proof. files/check_secrets_at_rest.py reads the kine
+# table in the SQLite datastore and exits 0 (all current rows ciphertext),
+# 1 (a current row still holds plaintext) or 2 (no Secrets yet, as on a fresh
+# cluster). Only exit 1 is a problem worth acting on.
 #
 # Why old_value matters: kine copies the previous value into old_value on every
 # write, so right after rotate-keys each Secret's current row still carries its
@@ -283,29 +281,7 @@
 # server skips writes of identical objects. A real change (an annotation) is
 # needed to create a revision whose value and old_value are both ciphertext.
 - name: Check Secrets are encrypted in the datastore
-  ansible.builtin.command:
-    argv:
-      - python3
-      - -c
-      - |
-        import sqlite3
-        db = sqlite3.connect("file:/var/lib/rancher/k3s/server/db/state.db?mode=ro", uri=True)
-        enc = lambda b: b is None or len(b) == 0 or bytes(b).startswith(b"k8s:enc:")
-        current = db.execute("""
-            SELECT k.name, k.value, k.old_value FROM kine k
-            JOIN (SELECT name, MAX(id) AS id FROM kine
-                  WHERE name LIKE '/registry/secrets/%' GROUP BY name) latest
-              ON k.id = latest.id
-            WHERE k.deleted = 0""").fetchall()
-        bad = [n for n, v, o in current if not (enc(v) and enc(o))]
-        history = db.execute("""
-            SELECT value, old_value FROM kine WHERE name LIKE '/registry/secrets/%'""").fetchall()
-        old_plain = sum(1 for v, o in history if not (enc(v) and enc(o)))
-        print(f"{len(current)} secrets; current rows with plaintext: {len(bad)}; "
-              f"older revisions still holding plaintext: {old_plain}")
-        for n in bad:
-            print("PLAINTEXT", n)
-        raise SystemExit(1 if bad or not current else 0)
+  ansible.builtin.script: files/check_secrets_at_rest.py
   register: k3s_secrets_at_rest
   changed_when: false
   failed_when: false
@@ -325,41 +301,41 @@
   changed_when: true
   when:
     - not ansible_check_mode
-    - k3s_secrets_at_rest.rc != 0
+    - k3s_secrets_at_rest.rc | default(0) == 1
 
 - name: Re-check Secrets are encrypted in the datastore
-  ansible.builtin.command:
-    argv:
-      - python3
-      - -c
-      - |
-        import sqlite3
-        db = sqlite3.connect("file:/var/lib/rancher/k3s/server/db/state.db?mode=ro", uri=True)
-        enc = lambda b: b is None or len(b) == 0 or bytes(b).startswith(b"k8s:enc:")
-        current = db.execute("""
-            SELECT k.name, k.value, k.old_value FROM kine k
-            JOIN (SELECT name, MAX(id) AS id FROM kine
-                  WHERE name LIKE '/registry/secrets/%' GROUP BY name) latest
-              ON k.id = latest.id
-            WHERE k.deleted = 0""").fetchall()
-        bad = [n for n, v, o in current if not (enc(v) and enc(o))]
-        history = db.execute("""
-            SELECT value, old_value FROM kine WHERE name LIKE '/registry/secrets/%'""").fetchall()
-        old_plain = sum(1 for v, o in history if not (enc(v) and enc(o)))
-        print(f"{len(current)} secrets; current rows with plaintext: {len(bad)}; "
-              f"older revisions still holding plaintext: {old_plain}")
-        for n in bad:
-            print("PLAINTEXT", n)
-        raise SystemExit(1 if bad or not current else 0)
-  register: k3s_secrets_at_rest
+  ansible.builtin.script: files/check_secrets_at_rest.py
+  register: k3s_secrets_recheck
   changed_when: false
+  failed_when: false
   when:
     - not ansible_check_mode
-    - k3s_secrets_at_rest.rc != 0
+    - k3s_secrets_at_rest.rc | default(0) == 1
+
+# The re-check only runs when the first check found plaintext, so take whichever
+# of the two actually ran as the verdict. A skipped task still overwrites its
+# registered variable, so `.rc` has to be read defensively.
+- name: Settle the Secret encryption verdict
+  ansible.builtin.set_fact:
+    k3s_secrets_verdict: "{{ k3s_secrets_recheck if 'rc' in k3s_secrets_recheck else k3s_secrets_at_rest }}"
+  when: not ansible_check_mode
 
 - name: Report Secret encryption at rest
   ansible.builtin.debug:
-    msg: "{{ k3s_secrets_at_rest.stdout }}"
+    msg: "{{ k3s_secrets_verdict.stdout | trim }}"
+  when: not ansible_check_mode
+
+# Exit 1 means a Secret's current row is STILL plaintext after the re-annotate,
+# which the comment above says must not happen. Fail loudly rather than leaving
+# it in a debug line nobody reads. Exit 2 (no Secrets yet) passes.
+- name: Fail unless every current Secret row is encrypted at rest
+  ansible.builtin.assert:
+    that:
+      - k3s_secrets_verdict.rc in [0, 2]
+    fail_msg: >-
+      Secrets are not encrypted at rest after re-annotating:
+      {{ k3s_secrets_verdict.stdout | trim }}
+    quiet: true
   when: not ansible_check_mode
 
 # `kubectl wait` fails immediately with "not found" if the node object has not

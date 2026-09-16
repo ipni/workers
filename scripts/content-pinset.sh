@@ -19,8 +19,16 @@ HOST="${1:-}"
 PORT="${2:-16443}"
 
 if [[ -z "$HOST" ]]; then
+  # Glob loop rather than `ls | xargs`: the shell already has the names, and
+  # parsing ls output breaks on anything unusual in them (shellcheck SC2011).
+  boxes=()
+  for kubeconfig in kubeconfigs/*.yaml; do
+    [[ -e "$kubeconfig" ]] || continue
+    kubeconfig=${kubeconfig##*/}
+    boxes+=("${kubeconfig%.yaml}")
+  done
   echo "usage: $0 <box> [local-port]" >&2
-  echo "boxes: $(ls kubeconfigs/*.yaml 2>/dev/null | xargs -n1 basename | sed 's/\.yaml//' | tr '\n' ' ')" >&2
+  echo "boxes: ${boxes[*]}" >&2
   exit 1
 fi
 

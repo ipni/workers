@@ -1,0 +1,25 @@
+---
+# Style rules that fire across the whole repo without pointing at a real
+# problem. Everything else is left on: the point of running this in CI is to
+# catch the mistakes, not to relitigate the house style.
+exclude_paths:
+  - .github/
+  - facts_cache/
+  - kubeconfigs/
+  - reviews/
+  - tasks/
+  - scripts/wss-check/node_modules/
+
+skip_list:
+  # Long lines are mostly kubectl/ipfs-cluster-ctl argv lists, which are
+  # clearer on one line than folded.
+  - yaml[line-length]
+  # `{{ x }}` spacing inside inline flow mappings, e.g. the pinset fixtures.
+  - yaml[braces]
+  # Role variables here are named for what they configure (admin_user,
+  # ssh_port, data_mount) and are shared across roles by design, so the
+  # role-name prefix rule works against how the group_vars are laid out.
+  - var-naming[no-role-prefix]
+  # Task names are written as sentences ("Fail unless ..."), which reads
+  # better in output than the enforced casing.
+  - name[casing]

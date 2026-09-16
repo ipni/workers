@@ -4,14 +4,21 @@
 # back to restarting the socket unit. Neither drops established sessions.
 # The post-hardening reachability check in tasks/main.yml is the real proof
 # that this worked, so a failure here must not abort the run silently.
-- name: Reload sshd
+#
+# Both handlers listen on the same topic so one notify chains them in order.
+# The reload uses ignore_errors rather than failed_when, because the fallback
+# tests `sshd_reload is failed`: failed_when would mask the failure it needs
+# to see, leaving the socket-activation path unreachable.
+- name: Reload the sshd service
+  listen: Reload sshd
   ansible.builtin.systemd:
     name: ssh
     state: reloaded
   register: sshd_reload
-  failed_when: false
+  ignore_errors: true
 
 - name: Restart ssh.socket when the service reload did not apply
+  listen: Reload sshd
   ansible.builtin.systemd:
     name: ssh.socket
     state: restarted

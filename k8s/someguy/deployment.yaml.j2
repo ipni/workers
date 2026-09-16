@@ -1,7 +1,17 @@
+{#
+  Rendered by roles/kustomize_apply from someguy_all_instances
+  (roles/someguy/defaults/main.yml): instance a, the first entry in that table.
+  Instances b onward are k8s/someguy/deployment-extra.yaml.j2, which is
+  deliberately mechanical and points back here for the reasoning.
+
+  Only the name and the two ports come from the table. Everything else is
+  written out below with its explanation, because it is the same for every
+  instance and this is where it is explained.
+#}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: someguy
+  name: {{ someguy_first_instance.name }}
 spec:
   replicas: 1
   # hostNetwork binds ports 8190 and 4004 on the node itself, so a second pod
@@ -19,11 +29,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: someguy
+      app: {{ someguy_first_instance.name }}
   template:
     metadata:
       labels:
-        app: someguy
+        app: {{ someguy_first_instance.name }}
     spec:
       # libp2p has no announce-address option and advertises the addresses it
       # sees on its interfaces. On the pod network those would be unreachable
@@ -67,20 +77,20 @@ spec:
           # own PeerID at start - the point of running more than one.
           env:
             - name: SOMEGUY_LISTEN_ADDRESS
-              value: 127.0.0.1:8190
+              value: 127.0.0.1:{{ someguy_first_instance.api }}
             - name: SOMEGUY_LIBP2P_LISTEN_ADDRS
-              value: /ip4/0.0.0.0/tcp/4004,/ip4/0.0.0.0/udp/4004/quic-v1,/ip4/0.0.0.0/udp/4004/webrtc-direct,/ip4/0.0.0.0/udp/4004/quic-v1/webtransport,/ip6/::/tcp/4004,/ip6/::/udp/4004/quic-v1,/ip6/::/udp/4004/webrtc-direct,/ip6/::/udp/4004/quic-v1/webtransport
+              value: /ip4/0.0.0.0/tcp/{{ someguy_first_instance.libp2p }},/ip4/0.0.0.0/udp/{{ someguy_first_instance.libp2p }}/quic-v1,/ip4/0.0.0.0/udp/{{ someguy_first_instance.libp2p }}/webrtc-direct,/ip4/0.0.0.0/udp/{{ someguy_first_instance.libp2p }}/quic-v1/webtransport,/ip6/::/tcp/{{ someguy_first_instance.libp2p }},/ip6/::/udp/{{ someguy_first_instance.libp2p }}/quic-v1,/ip6/::/udp/{{ someguy_first_instance.libp2p }}/webrtc-direct,/ip6/::/udp/{{ someguy_first_instance.libp2p }}/quic-v1/webtransport
           ports:
             - name: http
-              containerPort: 8190
+              containerPort: {{ someguy_first_instance.api }}
               protocol: TCP
             # 4004 is someguy's built-in libp2p default; roles/someguy opens the
             # same port in ufw. Change both together.
             - name: libp2p-tcp
-              containerPort: 4004
+              containerPort: {{ someguy_first_instance.libp2p }}
               protocol: TCP
             - name: libp2p-udp
-              containerPort: 4004
+              containerPort: {{ someguy_first_instance.libp2p }}
               protocol: UDP
 
           # One of FOUR instances per box (see kustomization.yaml). Together

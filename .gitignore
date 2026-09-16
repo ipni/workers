@@ -12,8 +12,15 @@ vault.yml
 kubeconfigs/
 *.kubeconfig
 
-# Personal Claude Code settings (and the writer's transient temp files)
+# Personal Claude Code settings (and the writer's transient temp files).
+# settings.json is ignored too: this repository is public, and the allowlist in
+# it is one operator's convenience, not part of the deliverable.
+.claude/settings.json
 .claude/settings.local.json*
+
+# Manifests rendered by scripts/render-manifests.yml for inspection or CI
+/rendered/
+/rendered-*/
 
 # Ansible runtime artifacts
 *.retry

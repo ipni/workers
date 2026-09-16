@@ -201,9 +201,13 @@ if $NO_PIN; then
   exit 0
 fi
 
+# Same metadata the playbook attaches (roles/content/tasks/main.yml, "Pin the
+# missing entries through the cluster"), so a pin carries the same provenance
+# whichever path added it. Both constants are fixed here: this script exists
+# for the upstream-cluster entries, whose snapshot is the recorded one.
 echo "pinning as $NAME"
 pin=$(ansible "$BOX" -u "$ADMIN" -b -m shell -a \
-  "k3s kubectl -n content exec deploy/content -c cluster -- ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 pin add --name '$NAME' --wait --wait-timeout 300s '$CID'" \
+  "k3s kubectl -n content exec deploy/content -c cluster -- ipfs-cluster-ctl --host /ip4/127.0.0.1/tcp/9094 pin add --name '$NAME' --metadata source=upstream-cluster --metadata snapshot=recorded --wait --wait-timeout 300s '$CID'" \
   </dev/null 2>&1) || true
 echo "$pin" | sed -n '/CHANGED\|FAILED\|UNREACHABLE/,$p' | tail -n +2
 if ! grep -q "PINNED" <<<"$pin"; then

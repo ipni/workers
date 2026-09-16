@@ -23,8 +23,20 @@ overload_manager:
 static_resources:
   listeners:
     - name: https
+      # Dual stack, as two sockets rather than one v4-mapped one: a v4-mapped
+      # listener would hand every filter and access log a ::ffff:a.b.c.d peer
+      # address, changing what the v4 path - the one carrying all the traffic
+      # today - reports. additional_addresses keeps v4 byte-for-byte as it was
+      # and adds v6 beside it. The v6 socket is v6-only (Envoy's default for a
+      # :: address), so the two do not collide.
+      #
+      # ufw already allows Cloudflare's v6 ranges on 443. Until then nothing
+      # answered on v6, so the allowlist described a door that was not there.
       address:
         socket_address: { address: 0.0.0.0, port_value: 443 }
+      additional_addresses:
+        - address:
+            socket_address: { address: "::", port_value: 443 }
       filter_chains:
         - transport_socket:
             name: envoy.transport_sockets.tls
@@ -82,6 +94,12 @@ static_resources:
                           bytes: "%BYTES_SENT%"
                           duration_ms: "%DURATION%"
                           upstream_ms: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+                          # Which someguy instance served it. With four behind
+                          # the round robin, a slow tail is only actionable if
+                          # it can be attributed to one of them - a cold
+                          # instance after a rollout looks exactly like a slow
+                          # box until you can group by this.
+                          upstream: "%UPSTREAM_HOST%"
                 http_filters:
                   # Per-box backstop behind Cloudflare's own rate limiting rule.
                   # No bucket is configured here: it only acts on routes that
@@ -261,19 +279,18 @@ static_resources:
         interval: 5s
         base_ejection_time: 10s
         max_ejection_percent: 50
+      # Rendered from someguy_running_instances (roles/someguy/defaults) by
+      # roles/kustomize_apply, so lowering someguy_instances trims this list
+      # too. It used to be written out by hand, which meant a lowered count
+      # left Envoy health-checking ports that no longer existed and logging
+      # the failures forever.
       load_assignment:
         cluster_name: someguy
         endpoints:
           - lb_endpoints:
+{% for instance in someguy_running_instances %}
+              # {{ instance.name }}
               - endpoint:
                   address:
-                    socket_address: { address: 127.0.0.1, port_value: 8190 }
-              - endpoint:
-                  address:
-                    socket_address: { address: 127.0.0.1, port_value: 8191 }
-              - endpoint:
-                  address:
-                    socket_address: { address: 127.0.0.1, port_value: 8192 }
-              - endpoint:
-                  address:
-                    socket_address: { address: 127.0.0.1, port_value: 8193 }
+                    socket_address: { address: 127.0.0.1, port_value: {{ instance.api }} }
+{% endfor %}

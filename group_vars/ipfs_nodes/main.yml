@@ -5,6 +5,14 @@
 # The non-root account that replaces root SSH access. Its authorized_keys is
 # the ONLY way in over the network once hardening completes; the provider
 # KVM/web console is the designated out-of-band fallback.
+#
+# One path, or a list of them when more than one operator needs in. The role
+# installs them exclusively, so a key that is not listed here does not survive
+# the next run - add the second operator BEFORE the run that would lock them
+# out, not after:
+#   admin_pubkey_file:
+#     - ~/.ssh/id_ed25519.pub
+#     - ~/.ssh/operators/molly.pub
 admin_user: ipni
 admin_pubkey_file: ~/.ssh/id_ed25519.pub
 
@@ -38,6 +46,12 @@ firewall_allowed_udp: []
 # true (production): one box at a time, and someguy's rollout waits for each box
 # to rebuild the state a restart throws away before the next one is touched.
 #
+# This governs routing.yml, bootstrap.yml, content.yml and k3s-upgrade.yml, via
+# the `serial:` expression each of them carries. site.yml is deliberately left
+# out: it is the build-the-box playbook, and re-running it against a live fleet
+# is an -l-one-box-at-a-time job whatever this is set to. `rollout_serial`
+# overrides the batch size on its own if needed.
+#
 # Every box is a whole site behind its own hostname with no failover between
 # them, so once these are the only boxes serving traffic, a simultaneous
 # rollout is a full outage - and someguy stays degraded for tens of minutes
@@ -61,6 +75,19 @@ data_mount: /data
 # k3s
 # ---------------------------------------------------------------------------
 k3s_version: v1.36.4+k3s1   # stable channel, checked 2026-09-15; upgrade with k3s-upgrade.yml
+
+# The route k3s-upgrade.yml walks to reach k3s_version, one minor at a time:
+# k3s and Kubernetes do not support skipping minors. Latest patch of each minor
+# from https://update.k3s.io/v1-release/channels (checked 2026-09-15), ending
+# at the stable channel. Kept here beside k3s_version so one file records both
+# the target and the route to it; the last entry MUST equal k3s_version.
+k3s_upgrade_path:
+  - v1.31.14+k3s1
+  - v1.32.13+k3s1
+  - v1.33.13+k3s2
+  - v1.34.11+k3s1
+  - v1.35.8+k3s1
+  - v1.36.4+k3s1
 
 # Traefik is disabled: we will choose an ingress deliberately when the services
 # land, rather than inheriting k3s's default. servicelb/local-path are kept.

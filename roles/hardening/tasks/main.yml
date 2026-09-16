@@ -28,13 +28,20 @@
     create_home: true
     state: present
 
-# exclusive: the key file is the single source of truth. Any extra key added to
-# this account by hand is REMOVED on the next run. To give a second operator
-# access, turn admin_pubkey_file into a list rather than editing the host.
-- name: Install the admin SSH public key
+# exclusive: the key files are the single source of truth. Any extra key added
+# to this account by hand is REMOVED on the next run, so every operator who
+# needs access must be listed in admin_pubkey_file - which takes either one
+# path or a list of them. All of them are installed in a single call, because
+# exclusive with a loop would leave only the last key standing.
+- name: Install the admin SSH public keys
+  vars:
+    admin_pubkey_files: "{{ [admin_pubkey_file] if admin_pubkey_file is string else admin_pubkey_file }}"
   ansible.posix.authorized_key:
     user: "{{ admin_user }}"
-    key: "{{ lookup('file', admin_pubkey_file) }}"
+    key: |-
+      {% for pubkey_file in admin_pubkey_files %}
+      {{ lookup('ansible.builtin.file', pubkey_file) | trim }}
+      {% endfor %}
     state: present
     exclusive: true
 
@@ -162,10 +169,31 @@
     - 10.42.0.0/16   # k3s default pod CIDR
     - 10.43.0.0/16   # k3s default service CIDR
 
+# Every v6 rule on this fleet depends on this: the Cloudflare v6 ranges allowed
+# on the origins, and the per-prefix WSS connection cap in roles/bootstrap.
+# IPV6=yes is the Ubuntu default, which is precisely what makes it worth
+# pinning - a base image that shipped it as "no" would silently turn every one
+# of those rules into a no-op, with nothing failing to say so. Set before ufw
+# is enabled, so a fresh box comes up with it already right.
+- name: Ensure ufw handles IPv6
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^IPV6='
+    line: IPV6=yes
+  register: ufw_ipv6
+
 - name: Enable ufw with logging
   community.general.ufw:
     state: enabled
     logging: low
+
+# On a box where ufw was already up, the setting above only takes effect on a
+# reload; on a fresh box the enable above has already done it.
+- name: Reload ufw to pick up a changed IPv6 setting
+  ansible.builtin.command:
+    argv: [ufw, reload]
+  when: ufw_ipv6 is changed
+  changed_when: true
 
 # With password authentication disabled below there are few credential
 # guesses left to ban, so this is not a meaningful defence on its own. It is

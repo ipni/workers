@@ -16,24 +16,29 @@
 # One instance also rejected 23,156 background FindPeer lookups per 30s stage;
 # four rejected none. Four used 18.2 of 32 cores and 5.5 of 123 GiB.
 #
-# Lower this to run fewer: instances above the count have their Deployment
-# deleted and their firewall ports closed at the end of every run. It is a
-# knob, not a complete revert, and two things about it are worth knowing:
+# Lower this to run fewer, and that is the whole change: the Deployments and
+# Envoy's endpoint list are both rendered from the table below, so a lowered
+# count stops the extra pods being created AND stops Envoy health-checking
+# ports that are not there. Instances above the count also have any Deployment
+# left over from a previous, higher count deleted and their firewall ports
+# closed at the end of every run.
 #
-#   - k8s/someguy/kustomization.yaml always lists deployment-extra.yaml, so
-#     the apply creates the extras and this role deletes them again moments
-#     later. Harmless, but a lowered count does not stop them being made.
-#   - k8s/route-origin/envoy.yaml hardcodes all four endpoints. Envoy
-#     health-checks them, so it correctly stops sending traffic to the ports
-#     that went away and the box keeps serving - but it keeps probing them and
-#     logging the failures until that file is trimmed to match.
-#
-# To go back to one instance for real: set this to 1 AND cut 8191-8193 from
-# the someguy cluster's load_assignment in k8s/route-origin/envoy.yaml.
+# It used to be a half-knob: the extras were created and then deleted moments
+# later, and Envoy went on probing the dead ports and logging the failures
+# until someone hand-edited k8s/route-origin/envoy.yaml to match. Both of those
+# came from the same cause - this table was written out by hand in two other
+# files - which is why it is now rendered instead.
 someguy_instances: 4
 
 # Name, API port (loopback) and libp2p port (public) of each instance, in
-# rollout order. Must match k8s/someguy/deployment*.yaml.
+# rollout order.
+#
+# THE source of truth for the instance layout. roles/kustomize_apply renders
+# all three consumers from it:
+#   k8s/someguy/deployment.yaml.j2        instance a
+#   k8s/someguy/deployment-extra.yaml.j2  instances b onward
+#   k8s/route-origin/envoy.yaml.j2        the load-balancer endpoint list
+# so a port is written down exactly once. Adding an instance is a line here.
 someguy_all_instances:
   - { name: someguy, api: 8190, libp2p: 4004 }
   - { name: someguy-b, api: 8191, libp2p: 4005 }
@@ -42,6 +47,11 @@ someguy_all_instances:
 
 someguy_running_instances: "{{ someguy_all_instances[:someguy_instances | int] }}"
 someguy_retired_instances: "{{ someguy_all_instances[someguy_instances | int:] }}"
+
+# Instance a, the one k8s/someguy/deployment.yaml.j2 renders. Named rather than
+# indexed inline so the template reads as "the first instance" instead of
+# "[0]".
+someguy_first_instance: "{{ someguy_all_instances[0] }}"
 
 # First start pulls the image; later rollouts wait for the old pod to stop.
 someguy_rollout_timeout: 600s
