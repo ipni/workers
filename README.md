@@ -571,9 +571,11 @@ stand on their own merits:
 
 1. **More instances per box** - done, four each; see the table above. The
    constraint was lookups in flight per process, not the hardware.
-2. **Raise the Envoy lookup rate limit.** chic-1 is now capped by it rather
-   than by anything real. It should be set per box from these measurements and
-   a latency target, since past ~900 req/s p50 climbs towards the 5s wall.
+2. **Not the Envoy lookup rate limit.** chic-1 is capped by it (1111 req/s
+   with it raised), but 1000/s is where latency stops being acceptable anyway:
+   p50 is 2432-4078ms across the fleet at that rate, p95 pinned at 5s. It sits
+   at ~2.4x the whole fleet's average load on a single box and survives losing
+   a box, so it stays. Re-measure if geo-routing concentrates a region.
 3. **Add boxes.** Throughput scales with boxes. A second Asia-Pacific box, or
    steering that region to a faster box, both work.
 2. **Upstream asks.** Exposing `fullrt`'s `timeoutPerOp`, and persisting the

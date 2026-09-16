@@ -147,9 +147,23 @@ static_resources:
                         # Lookups. A miss can hold a request for up to 25s while
                         # someguy queries the DHT and cid.contact. The bucket is a
                         # per-box ceiling, not a per-client limit (that is
-                        # Cloudflare's job). STARTING VALUE, not measured
-                        # capacity: tune against the route_origin_ratelimit and
-                        # someguy metrics before real traffic arrives.
+                        # Cloudflare's job).
+                        #
+                        # 1000/s is now a MEASURED value, chosen where quality
+                        # stops being acceptable rather than where the box stops
+                        # answering (2026-09-16, four instances per box): at
+                        # 1000 req/s p50 is already 2432ms on chic-1, 3044ms on
+                        # sing-1 and 4078ms on lith-1, with p95 pinned at the
+                        # DHT client's 5s timeoutPerOp. chic-1 will serve 1111
+                        # req/s if allowed, but no faster and no better.
+                        #
+                        # For scale: 1.1B requests/month is ~424 req/s across
+                        # the fleet, so one box at this limit absorbs ~2.4x the
+                        # WHOLE fleet's average, or ~2.4-3.5x a single box's
+                        # projected peak. It also survives losing a box: the two
+                        # survivors would see ~630 req/s at peak, still under.
+                        # Re-measure if geo-routing concentrates a region on one
+                        # box (see README, "Capacity").
                         - match: { prefix: "/routing/v1/" }
                           route:
                             cluster: someguy
