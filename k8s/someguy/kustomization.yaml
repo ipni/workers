@@ -42,6 +42,26 @@ configMapGenerator:
       # Only the autoconf cache lives here; there is no identity or datastore.
       - SOMEGUY_DATADIR=/data/someguy
 
+      # Providers or peers per `Accept: application/json` response. The HTTP
+      # Routing v1 spec recommends 100 (someguy's default); 50 still gives a
+      # client plenty of providers to try.
+      #
+      # Measured on sing-1 at 200 req/s, warm, 2026-09-16: dropping this to 25
+      # halved p50 (2208ms -> 1180ms) and cut response bytes ~70%. someguy's
+      # CPU and p95 did not move, so the gain is in building and shipping the
+      # response, NOT in fewer provider-address lookups - the tail is still
+      # bounded by DHT walks (see README, "Capacity, and the accepted sing-1
+      # limitation"). 50 is the compromise: most of a measured gain, half the
+      # loss in completeness. 25 is what was measured; 50 is interpolation.
+      - SOMEGUY_RECORDS_LIMIT=50
+
+      # Background FindPeer lookups for provider records that arrive without
+      # addresses. The default (512) is reached under load: a rate test at
+      # 200 req/s on sing-1 rejected 7809 of them while someguy used only 5.5
+      # of 32 cores, so the cap - not CPU - was the limit. Rejected lookups
+      # mean provider records returned without addresses.
+      - SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS=2048
+
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 86Gi and get
       # OOM-killed. 64 GiB, in bytes.
