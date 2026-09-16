@@ -540,8 +540,8 @@ Four instances cost 18.2 of 32 cores and 5.5 of 123 GiB at 894 req/s. The
 reservation is unchanged: 6 CPU and 20 GiB requested each, 24 CPU and 80 GiB
 per box, exactly what the single instance reserved.
 
-**The other two boxes, re-measured 2026-09-16 with enough client workers** (one
-instance each, before the rollout):
+**The other two boxes, one instance each, re-measured 2026-09-16 with enough
+client workers** - the state they were in before the rollout:
 
 | Target | lith-1 | chic-1 |
 |--------|--------|--------|
@@ -553,8 +553,44 @@ Both reject zero lookups at every rate, so the FindPeer cap that bound sing-1
 never binds here. chic-1's limit is **our own rate limiter** - the 429s are
 Envoy's 1000 req/s lookup bucket, which these runs are what turned from a
 starting guess into a measured setting (see `envoy.yaml.j2`, and item 2 below).
-lith-1's is latency: p50 4078ms at 890/s, heading for the 5s wall. Both boxes were rolled to four instances on the strength of the
-sing-1 latency result; the throughput gain there is expected to be smaller.
+lith-1's is latency: p50 4078ms at 890/s, heading for the 5s wall.
+
+### The fleet, four instances everywhere
+
+All three boxes driven **at the same time**, 2026-09-16, each from its own box
+against its own hostname through Cloudflare, after 75 minutes of warm-up at
+60 req/s; 30s stages, `--workers 12288`, fixture mix:
+
+| Target/box | sing-1 | lith-1 | chic-1 | fleet |
+|-----------|--------|--------|--------|-------|
+| 200/s | 198.8/s, p50 192ms | 199.3/s, p50 125ms | 199.0/s, p50 155ms | 597/s |
+| 400/s | 389.6/s, p50 218ms | 398.5/s, p50 123ms | 397.9/s, p50 132ms | 1186/s |
+| 600/s | 574.9/s, p50 464ms | 597.2/s, p50 118ms | 597.7/s, p50 124ms | 1770/s |
+| 850/s | 770.7/s, p50 2044ms | 847.1/s, p50 116ms | 842.0/s, p50 138ms | 2460/s |
+| 1000/s | 895.5/s, p50 3180ms | 995.1/s, p50 120ms | 982.5/s, p50 160ms | **2873/s** |
+
+Zero HTTP errors anywhere, zero rejected lookups on all twelve instances, no
+pod restarts. **2873 req/s is 6.8x the 424 req/s that 1.1B requests/month
+implies**, and every box was still inside the 1000 req/s rate limit.
+
+**Four instances helped the two "healthy" boxes most of all.** Compare the
+single-instance table above at the same rate: lith-1 went from p50 4078ms to
+**120ms** at ~1000 req/s, chic-1 from 2432ms to **160ms** - a 20-30x latency
+drop on boxes whose FindPeer counters never showed saturation. Rejected-lookup
+counters catch only one kind of contention; requests also queue behind slow DHT
+rounds per process, and that does not show up in any counter until you spread
+the load across processes. Anyone reasoning from "nothing is rejected, so there
+is nothing to gain" (as the first pass here did) will get this wrong.
+
+**sing-1 is still the outlier, in latency only.** It meets 895/s but at p50
+3180ms where the others are at ~120-160ms, and its instances hold a 61-67%
+address-book hit rate against 66-72% and 67-72%. That is the DHT-distance
+penalty: it costs tail latency at high rates, not capacity.
+
+**Watch chic-1's tail.** Its p95 degrades at the top of the ladder (1427ms at
+850/s, 2739ms at 1000/s, p99 at the 5s wall) while lith-1 holds p95 at 283ms,
+and its someguy CPU was the highest of the three (~190s per 30s stage). Nothing
+failed, but it is the first box that would.
 
 For scale, 1.1B requests/month is ~424 req/s across the fleet, or ~141 req/s
 per box at average load and roughly 280-420 at peak - comfortably inside what
@@ -585,13 +621,15 @@ few providers to begin with. This is the strongest argument for exposing
 of that completeness without the 25s latency cliff that made `standard`
 unusable.
 
-**Superseded (2026-09-16): sing-1 no longer runs at half the throughput.**
-With four instances it reaches 894 req/s against lith-1's 890 and chic-1's
-1111, and its p50 under load is better than either box's at 400-850 req/s. Its
-DHT-distance penalty is real but bounded: it shows in p50 at the very top of
-the range (3044ms at 1000/s against chic-1's 2432ms) and in a lower address-book
-hit rate (71% against 81%), not in capacity. The geo-routing notes below still
-stand on their own merits:
+**Superseded (2026-09-16): sing-1 no longer runs at half the throughput.** With
+four instances everywhere it reaches 895 req/s against lith-1's 995 and chic-1's
+982 - within 10% of both, where it used to be at half. What remains is a
+**latency** gap, and four instances made it more visible rather than less: in
+the fleet run sing-1 held p50 218ms at 400 req/s and 3180ms at 1000 req/s, while
+the other two stayed at 116-160ms across the whole ladder. Its address-book hit
+rate is 61-67% against their 66-72%. So the DHT-distance penalty is real,
+bounded, and now the only thing separating the boxes. The geo-routing notes
+below still stand on their own merits:
 
 - **Geo-routing does not exist yet.** There are three separate hostnames, each
   a proxied A record to one box, and nothing steers a client to the nearest.
