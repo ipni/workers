@@ -228,12 +228,32 @@ static_resources:
       # An ACTIVE health check is what does that here - passive outlier
       # detection alone cannot, because with four endpoints the default
       # max_ejection_percent of 10% never reaches one whole endpoint.
+      #
+      # During a rollout the instance being restarted refuses connections
+      # outright, so the check fails immediately rather than by timeout, and it
+      # is out of rotation within unhealthy_threshold x interval = 10s.
+      #
+      # The 2s timeout is safe because /version is a trivial handler that
+      # touches neither the DHT nor the address book: lookup p50 runs to
+      # seconds under load, but /version does not. WATCH THIS if someguy ever
+      # grows a real health endpoint that does work, or if health-check
+      # failures start appearing in the Envoy logs at peak - an instance that
+      # flaps out for 5-10s sheds its share onto the other three and makes the
+      # peak worse, which is the opposite of what this is for.
       health_checks:
         - timeout: 2s
           interval: 5s
           unhealthy_threshold: 2
           healthy_threshold: 1
           http_health_check: { path: /version }
+
+      # Belt and braces behind the active check, for an instance that answers
+      # /version while failing real requests. Bounded on purpose: all four
+      # instances face the same upstreams, so a cid.contact outage would make
+      # them fail together, and max_ejection_percent caps that at two. Envoy's
+      # panic threshold (50% healthy by default) then routes to every endpoint
+      # anyway rather than piling the whole box onto two, which is the right
+      # answer when the failure is upstream rather than local.
       outlier_detection:
         consecutive_5xx: 3
         consecutive_gateway_failure: 3

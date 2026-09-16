@@ -1,6 +1,7 @@
 ---
 # Deploy the routing service to the prepared boxes:
-#   someguy        Delegated Routing V1 server (hostNetwork, libp2p on 4004)
+#   someguy        Delegated Routing V1 server (hostNetwork, four instances,
+#                  libp2p on 4004-4007, HTTP API on 127.0.0.1:8190-8193)
 #   route_origin   Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io
 #
 #   ansible-playbook routing.yml                     # all three boxes at once (dev)

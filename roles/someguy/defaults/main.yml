@@ -16,9 +16,20 @@
 # One instance also rejected 23,156 background FindPeer lookups per 30s stage;
 # four rejected none. Four used 18.2 of 32 cores and 5.5 of 123 GiB.
 #
-# Lower this to run fewer: instances above the count are deleted and their
-# firewall ports closed, so 1 restores the original single-instance box.
-# The manifests define four; this decides how many survive a run.
+# Lower this to run fewer: instances above the count have their Deployment
+# deleted and their firewall ports closed at the end of every run. It is a
+# knob, not a complete revert, and two things about it are worth knowing:
+#
+#   - k8s/someguy/kustomization.yaml always lists deployment-extra.yaml, so
+#     the apply creates the extras and this role deletes them again moments
+#     later. Harmless, but a lowered count does not stop them being made.
+#   - k8s/route-origin/envoy.yaml hardcodes all four endpoints. Envoy
+#     health-checks them, so it correctly stops sending traffic to the ports
+#     that went away and the box keeps serving - but it keeps probing them and
+#     logging the failures until that file is trimmed to match.
+#
+# To go back to one instance for real: set this to 1 AND cut 8191-8193 from
+# the someguy cluster's load_assignment in k8s/route-origin/envoy.yaml.
 someguy_instances: 4
 
 # Name, API port (loopback) and libp2p port (public) of each instance, in

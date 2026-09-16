@@ -35,6 +35,13 @@ configMapGenerator:
       # hostNetwork). The API is therefore unreachable from any interface even
       # if ufw were disabled or misconfigured - it does not rely on the
       # firewall. The public path is Cloudflare -> Envoy :443 -> here.
+      #
+      # The PORT here is a fallback that nothing uses: every Deployment sets
+      # SOMEGUY_LISTEN_ADDRESS in its own `env:` (container `env` wins over
+      # `envFrom`), because the four instances need four different ports. The
+      # address is kept here so the loopback-only decision stays documented in
+      # one place, and so a new instance that forgot its override would still
+      # not be able to listen on a public interface.
       - SOMEGUY_LISTEN_ADDRESS=127.0.0.1:8190
 
       # Accelerated DHT plus the autoconf `auto` endpoints (cid.contact for

@@ -177,11 +177,11 @@ To upgrade, change the digest.
   libp2p advertises the addresses it sees on its interfaces. On the pod network
   those are unreachable `10.42.x` addresses. With the host network each box
   advertises its public IP on TCP, QUIC, WebTransport and WebRTC.
-- **Ports.** libp2p on **4004 tcp+udp is open** to the internet. The HTTP API
-  listens on **127.0.0.1:8190 only**, the host's loopback, where its single
-  client (the Envoy origin, also `hostNetwork`) lives. It is unreachable from
-  any interface even without the firewall. There is deliberately no Service for
-  it.
+- **Ports.** libp2p on **4004-4007 tcp+udp is open** to the internet, one pair
+  per instance. The HTTP APIs listen on **127.0.0.1:8190-8193 only**, the host's
+  loopback, where their single client (the Envoy origin, also `hostNetwork`)
+  lives. They are unreachable from any interface even without the firewall.
+  There is deliberately no Service for them.
 - **Four instances per box, so a restart is no longer an outage.** `someguy`,
   `someguy-b`, `someguy-c` and `someguy-d` own 8190-8193 (API, loopback) and
   4004-4007 (libp2p). Envoy round-robins across them, health-checks each on
@@ -217,22 +217,41 @@ bootstrapper, the content cluster node and the OS. Memory is a reservation, not
 measured need - four instances serving 894 req/s held 1.2-1.5 GiB each. The CPU
 floor is measured: the same run used 4.4-4.9 cores each, 18.2 of 32.
 
-**Rolling someguy.** In dev all four instances roll together: a short outage per
-box, and the playbook is done in a couple of minutes. With
-`production_rollout: true` they roll **one at a time**, each gated on its
-address book reaching `someguy_warm_min_peers` before the next is touched, so
-the box never drops below three quarters of capacity - but that takes hours per
-box. Two break-glass paths for an urgent fix:
+**Rolling someguy.** Both the one-at-a-time order and the warm-up gate hang off
+`production_rollout`, which is **`false` today** in
+`group_vars/ipfs_nodes/main.yml`. So the default run - the one you get with no
+`-e` at all - rolls all four instances on all three boxes simultaneously. That
+is right while the boxes carry no traffic and wrong the moment they do; flip it
+in `group_vars` when they go live.
+
+| | boxes | instances per box | warm-up gate | cost |
+|---|---|---|---|---|
+| `production_rollout=false` (today) | all at once | all four at once | no | ~5 min, fleet-wide outage |
+| `-e production_rollout=true -e someguy_rollout_wait_warm=false` | one at a time | one at a time | no | ~6 min/box, no outage |
+| `production_rollout=true` | one at a time | one at a time | yes | hours/box, no outage |
+
+With the gate on, each instance waits for its address book to reach
+`someguy_warm_min_peers` before the next instance - or the next box - is
+touched, so the box never drops below three quarters of *warm* capacity. The
+middle row is the break-glass path for an urgent fix. It still avoids an
+outage - Envoy ejects whichever instance is down and serves from the other
+three - but it does not avoid the degradation: by the time the last instance
+rolls, all three still up were themselves restarted within the previous few
+minutes, so the box answers everything and answers it slowly for about an hour.
 
 ```bash
-# safe and quick: one instance at a time, no warm-up wait (~6 min/box)
-ansible-playbook routing.yml -e someguy_rollout_wait_warm=false
-# fastest, accepts a ~1 min outage per box (~5 min for the fleet)
-ansible-playbook routing.yml -e production_rollout=false
+# break glass: one instance at a time, no warm-up wait (~6 min/box)
+ansible-playbook routing.yml -e production_rollout=true -e someguy_rollout_wait_warm=false
 ```
 
-`someguy_instances` (default 4) is the revert: lower it and the extra
-Deployments are deleted and their firewall ports closed.
+Note that `routing.yml` runs the `someguy` role before `route_origin`, so the
+**first** run that introduces a new instance is still a full outage for the box:
+Envoy only learns the new endpoints when the origin role applies, one role
+later. The no-outage property holds from the second run onward.
+
+`someguy_instances` (default 4) lowers the count: the extra Deployments are
+deleted and their firewall ports closed. It is not a full revert on its own -
+see `roles/someguy/defaults/main.yml` for what else has to change.
 
 ## Public endpoint: route-<box>.ipni.io
 
@@ -497,7 +516,9 @@ was full - and its p50 sat at the 5s `timeoutPerOp` wall. Four instances reject
 none. Requests also queue behind slow DHT rounds *per process*, so spreading
 them across four processes cuts latency even where no counter shows saturation:
 sing-1 x4 answers at p50 217ms at 400 req/s where single-instance chic-1, a box
-much closer to the DHT's centre of mass, takes 1093ms.
+much closer to the DHT's centre of mass, takes 1093ms at the same rate and the
+same worker count. (chic-1's 64ms at 400 req/s in the superseded table was a
+client-bound run: too few workers, so the box was never offered that load.)
 
 Four instances cost 18.2 of 32 cores and 5.5 of 123 GiB at 894 req/s. The
 reservation is unchanged: 6 CPU and 20 GiB requested each, 24 CPU and 80 GiB
@@ -514,18 +535,19 @@ instance each, before the rollout):
 
 Both reject zero lookups at every rate, so the FindPeer cap that bound sing-1
 never binds here. chic-1's limit is **our own rate limiter** - the 429s are
-Envoy's 1000 req/s lookup bucket, a value `envoy.yaml` labels "STARTING VALUE,
-not measured capacity". lith-1's is latency: p50 4078ms at 890/s, heading for
-the 5s wall. Both boxes were rolled to four instances on the strength of the
+Envoy's 1000 req/s lookup bucket, which these runs are what turned from a
+starting guess into a measured setting (see `envoy.yaml`, and item 2 below).
+lith-1's is latency: p50 4078ms at 890/s, heading for the 5s wall. Both boxes were rolled to four instances on the strength of the
 sing-1 latency result; the throughput gain there is expected to be smaller.
 
 For scale, 1.1B requests/month is ~424 req/s across the fleet, or ~141 req/s
 per box at average load and roughly 280-420 at peak - comfortably inside what
 every box now does.
 
-**What limits a box.** Not CPU: someguy used 3.4 of 32 cores at 200 req/s and
-6.6 at 400. Not errors, not the FindPeer cap (no rejections since it was
-raised, below). It is **DHT round-trip distance**. A lookup whose provider
+**What limits a box.** Not CPU: a single instance used 3.4 of 32 cores at
+200 req/s and 6.6 at 400, and four together use 18.2 of 32 at 894 req/s - the
+ceiling arrived nowhere near either. Not errors, and since the move to four
+instances not the FindPeer cap either. It is **DHT round-trip distance**. A lookup whose provider
 records arrive without addresses needs a FindPeer walk, several sequential hops
 each costing a round trip, and every operation inside the accelerated client is
 capped at 5s (`timeoutPerOp` in go-libp2p-kad-dht `fullrt/dht.go`, not exposed
@@ -559,13 +581,17 @@ stand on their own merits:
   a proxied A record to one box, and nothing steers a client to the nearest.
   It needs a shared name behind a Cloudflare Load Balancer (which would also
   give the failover these single-origin hostnames lack).
-- **The margin is not large.** If Asia-Pacific is ~20% of 1.1B/month, that is
-  ~85 req/s average and perhaps 130-210 at a regional peak - the range where
-  sing-1 was measured at p50 2208ms. Re-measure when geo-routing lands.
-- **Nearest may not be fastest.** chic-1 answers at p50 109ms. Even adding a
-  trans-Pacific round trip, it may serve an Asian client faster than sing-1
-  does locally. Latency-based steering is worth measuring against pure geo
-  steering before the policy is fixed.
+- **Capacity is no longer the argument for it.** If Asia-Pacific is ~20% of
+  1.1B/month, that is ~85 req/s average and perhaps 130-210 at a regional peak.
+  Single-instance sing-1 was at p50 2208ms in that range; with four instances
+  it is at p50 190ms at 200 req/s. Geo-routing is now worth doing for
+  client-side round-trip time and for failover, not to keep sing-1 standing up.
+- **Nearest may not be fastest.** sing-1's distance from the DHT still costs it
+  on the server side - cold lookups take 594ms against chic-1's 303ms, and its
+  address-book hit rate settles lower (71% against 81% under load). A
+  trans-Pacific round trip to chic-1 may still beat that for an Asian client.
+  Latency-based steering is worth measuring against pure geo steering before
+  the policy is fixed.
 
 **Expanding a box's capacity**, in order of leverage:
 
@@ -578,7 +604,7 @@ stand on their own merits:
    a box, so it stays. Re-measure if geo-routing concentrates a region.
 3. **Add boxes.** Throughput scales with boxes. A second Asia-Pacific box, or
    steering that region to a faster box, both work.
-2. **Upstream asks.** Exposing `fullrt`'s `timeoutPerOp`, and persisting the
+4. **Upstream asks.** Exposing `fullrt`'s `timeoutPerOp`, and persisting the
    address book across restarts, would respectively bound the tail and remove
    the hour of warm-up a restart now costs.
 
