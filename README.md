@@ -1138,10 +1138,11 @@ the vault. SSH has no password fallback by design.
       724 entries recovered from the upstream cluster (conference sites,
       badbits builds, dated snapshots). Nothing pins them until someone moves
       what is in scope into `pinset`.
-- [ ] **Two hand-added pins are not in the pinset:** `ipfs.io-legacy` and
-      `ipfs.io-legacy-2`. They are stuck in `PIN_ERROR`/`PINNING` (some blocks
-      have no reachable provider) and the cluster keeps retrying. Add them to
-      `pinset.yml` if they should be kept, or unpin them to stop the retries.
+- [x] ~~Two hand-added pins are not in the pinset~~ — `ipfs.io-legacy` and
+      `ipfs.io-legacy-2` were unpinned on 2026-09-16. Both had been retrying
+      for 60+ attempts per peer and sat in `PIN_ERROR` on all three; the
+      cluster now holds 23 pins with no `PIN_ERROR` anywhere. Their CIDs are
+      recorded in `pinset.yml` under `unpinned` should either be wanted back.
 - [ ] **`cluster.ipfs.io` is pinned, but not at its live DNSLink root.** The
       site is PINNED 3/3 from an upstream snapshot. Its live DNSLink root is a
       different, older CID whose DAG cannot be completed: 36 of its 46 links

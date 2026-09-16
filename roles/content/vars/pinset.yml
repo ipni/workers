@@ -306,6 +306,22 @@ pinset:
 #: their maintainers to republish DNSLink, or mirroring the live site under a
 #: new CID - which would be a new copy, not the original, and needs its own
 #: `source`.
+# Hand-added pins that were never in `pinset` and have been removed from the
+# cluster. Kept here so the decision is reversible and nothing is lost by
+# omission.
+#: 2026-09-16: both were added by hand during the recovery, retried 60+ times
+#: per peer and stayed in PIN_ERROR on all three - blocks of their DAGs have no
+#: reachable provider. They are legacy ipfs.io snapshots, already represented
+#: by the ipfs.io entries in `pinset`, so they were unpinned rather than
+#: adopted. `ipfs-cluster-ctl pin add <cid>` restores either one.
+unpinned:
+  - name: ipfs.io-legacy
+    cid: bafybeih42hd2kjcr7o2f72jinvwotlfn24hppwnfl34lku3665cyp4gipe
+    unpinned_on: "2026-09-16"
+  - name: ipfs.io-legacy-2
+    cid: bafybeidhycjoffkqxrzx3gutcf5quq3tczkikxfsocdayt6o3lzqiqqj4q
+    unpinned_on: "2026-09-16"
+
 recover_from_upstream:
   - docs.libp2p.io
   - ipld.io
