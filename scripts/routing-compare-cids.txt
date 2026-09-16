@@ -1,0 +1,51 @@
+# Fixtures for scripts/routing-compare.sh: one per line, `type id # comment`,
+# type is providers, peers or ipns. Blank lines and lines starting with # are
+# ignored.
+#
+# Provider counts noted below were observed on delegated-ipfs.dev in 2026-09
+# (NDJSON, uncapped; the script's JSON requests are capped at 100 results).
+# "IPNI" = results from cid.contact (they carry Protocols), "DHT" = the rest.
+# Content comes and goes, so re-check a fixture that drifts to 0 everywhere
+# before treating it as a regression.
+
+# --- well provided: JSON result hits the 100 cap on a healthy endpoint --------
+providers QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn # empty UnixFS directory: ~1000 DHT + 2 IPNI, the largest DHT result set
+providers bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku # empty raw block: ~500 DHT + 2 IPNI
+providers bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi # spec example CID: ~124 DHT + 16 IPNI, both upstreams in one answer
+providers QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG # kubo quick-start readme directory: ~220 DHT + 10 IPNI
+providers QmdmQXB2mzChmMeKY47C43LxUdg1NDJ5MWcKMKxDu7RgQm # XKCD archive root: ~143 DHT + 7 IPNI
+providers bafybeiaysi4s6lnjev27ln5icwm6tueaw2vdykrtjkwiphwekaywqhcjze # en.wikipedia-on-ipfs.org DNSLink root: ~139 DHT + 2 IPNI
+
+# --- moderately provided: below the cap, so a shortfall shows in the count ----
+providers Qmd1sbtibEimhQbp9qS8cfhejvkFxoFAHrRLrK3FUk71R5 # XKCD archive child directory: ~33 DHT + 6 IPNI
+providers bafybeiemxf5abjwjbikoz4mc3a3dla6ual3jsgpdr4cjr3oz3evfyavhwq # English Wikipedia snapshot (2021): ~71 DHT + 2 IPNI
+providers QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX # older Wikipedia snapshot: ~16 DHT only
+
+# --- sparsely provided, DHT only: a short DHT walk misses these first ---------
+providers bafybeiejegeowlh5warqnrjjmhbkf7hdjaiuhnpqajbktx6ta77urqmljy # ipfs.tech DNSLink root: ~12 DHT
+providers bafybeier6ud42ptljtfaxrdlknktw54b7ohfpg5h33mosxpxjndxs7xzvm # docs.ipfs.tech DNSLink root: ~7 DHT
+providers QmcQFiYTDih9UiF4swN797eCZYNL4em74XPmLvYu7WvsdH # dist.ipfs.tech DNSLink root: ~5 DHT
+providers bafybeiaxhcueeks4ykyc3pha6qzorsger7b4mnmfe445shbnj7d5guuvni # probelab.io DNSLink root: ~5 DHT
+providers bafybeidrs7wuvil5n2q2izkmh2mzbeakjkasxwpgttu7v5lgf2j4rmlgym # cluster.ipfs.io DNSLink root: ~3 DHT
+providers bafybeied45v5pm44zfpcoh2ytqf7scpnm2qcsqinge5lwcgqq7pux3fxqq # target of the distributed.press IPNS name: ~2 DHT
+
+# --- sparsely provided, IPNI only: 0 here means the cid.contact upstream is broken
+providers bafkreihxthrlcx23sn4cpxasn3ctsr2kg5zyx7hsqweso3dsjxxxcmgjwi # Filecoin block from an aur.lu advertisement: 3 IPNI, 0 DHT
+providers bafkreih4ouwl3cckh3glw3w2mlwyaprte5py2rdkqzr64i4mjuinlbmcxe # Filecoin block from a twinquasar (f010479) advertisement: 4 IPNI, 0 DHT
+
+# --- no providers: sha256 of a fixed label, so nobody holds it -----------------
+providers bafkreib22ez2dyymmqz2yq3hqjbpekqs6tv3lgq72qnfwcltoxdpc2aamq # raw CID of sha256("ipni-workers/routing-compare/no-providers/raw"): full negative DHT walk plus IPNI miss
+providers bafybeifydevswkwo6aueei5qhkbfsytlqstqsa5cxbse2goypggcjzwdgq # dag-pb CID of sha256("ipni-workers/routing-compare/no-providers/dag-pb"): same miss, different codec
+
+# --- peers ---------------------------------------------------------------------
+peers 12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f # sing-1 bootstrapper (dns.txt): our own always-on node, must resolve
+peers 12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u # lith-1 bootstrapper (dns.txt): our own always-on node, must resolve
+peers 12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt # chic-1 bootstrapper (dns.txt): our own always-on node, must resolve
+peers QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN # libp2p.io bootstrapper: third-party, RSA (Qm) peer ID
+peers 12D3KooWMbhqJQNaHYyWnRkFKvJMgsoT7RCTG9bXAGcAnC54TqPv # ed25519 key from sha256("ipni-workers/routing-compare/no-such-peer"): negative peer lookup
+
+# --- ipns ----------------------------------------------------------------------
+ipns k51qzi5uqu5dm6mhq6aadk8911crh4z0e58o5ptdzp0enpqp7sn71nzkqcy549 # distributed.press DNSLink target: live record
+ipns k51qzi5uqu5dhmbrowt498wx1gairepkzf3dz2d9heehgz2dmaqizp1xhm473k # hypha.coop DNSLink target: live record
+ipns k51qzi5uqu5dlg5a12s8v1nnvcyb1ivlduo0d9xxou0vgm0up9uk0rbwnez3gb # sutty.nl DNSLink target: live record
+ipns k51qzi5uqu5dis0wo2d7asrk415hvku2f7zrum10pbcvgpcn66bj6cgupv6ttz # ed25519 key from sha256("ipni-workers/routing-compare/no-such-ipns"): negative IPNS lookup
