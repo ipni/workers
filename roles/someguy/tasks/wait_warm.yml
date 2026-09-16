@@ -1,0 +1,38 @@
+---
+# Wait until one instance's cached address book holds someguy_warm_min_peers.
+# Included with someguy_warm_instance set. See roles/someguy/defaults/main.yml
+# for the measurements behind the threshold.
+#
+# A restarted instance answers within a minute but serves badly for about an
+# hour: with four instances the other three cover it, so this gate is about not
+# rolling the NEXT instance (or the next box) into the same state.
+
+- name: "Poll {{ someguy_warm_instance.name }} until it holds {{ someguy_warm_min_peers }} peers"
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      curl -sf --max-time 10 http://127.0.0.1:{{ someguy_warm_instance.api }}/debug/metrics/prometheus
+      | awk '/^someguy_cached_addr_book_peer_state_size/ {print int($2); found = 1}
+             END {if (!found) print 0}'
+    executable: /bin/bash
+  register: someguy_warm
+  changed_when: false
+  failed_when: false
+  retries: "{{ (someguy_warm_timeout_seconds | int // (someguy_warm_poll_seconds | int)) | int }}"
+  delay: "{{ someguy_warm_poll_seconds | int }}"
+  until: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+
+- name: "Report whether {{ someguy_warm_instance.name }} warmed up in time"
+  ansible.builtin.assert:
+    that: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+    fail_msg: >-
+      {{ inventory_hostname }} {{ someguy_warm_instance.name }} still holds only
+      {{ someguy_warm.stdout | trim | default('0', true) }} cached peers after
+      {{ someguy_warm_timeout_seconds }}s (wanted {{ someguy_warm_min_peers }}).
+      Not rolling the next instance or box on the assumption that this one
+      recovered. Re-run with -e someguy_rollout_wait_warm=false to skip this gate.
+    success_msg: >-
+      {{ inventory_hostname }} {{ someguy_warm_instance.name }}: address book holds
+      {{ someguy_warm.stdout | trim }} peers; safe to roll the next.
+    quiet: true
+  when: someguy_warm_fail_on_timeout | bool

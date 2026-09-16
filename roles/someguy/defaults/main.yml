@@ -1,4 +1,37 @@
 ---
+# ---------------------------------------------------------------------------
+# Instances per box
+# ---------------------------------------------------------------------------
+# Four someguy processes per box, each with its own PeerID, concurrency budget
+# and connection pool, behind Envoy's round-robin fan-out.
+#
+# Measured on sing-1 (2026-09-16, warm, through Cloudflare), achieved rate and
+# p50 at each target:
+#      target   1 instance          2 instances      4 instances
+#      200/s    182/s, 2208ms       194/s, 317ms     198/s,  190ms
+#      400/s    352/s, 5014ms       361/s, 2154ms    389/s,  217ms
+#      600/s    not reached         530/s, 4489ms    574/s,  467ms
+#      850/s    not reached         not reached      775/s, 1964ms
+#     1000/s    -                   -                894/s, 3044ms
+# One instance also rejected 23,156 background FindPeer lookups per 30s stage;
+# four rejected none. Four used 18.2 of 32 cores and 5.5 of 123 GiB.
+#
+# Lower this to run fewer: instances above the count are deleted and their
+# firewall ports closed, so 1 restores the original single-instance box.
+# The manifests define four; this decides how many survive a run.
+someguy_instances: 4
+
+# Name, API port (loopback) and libp2p port (public) of each instance, in
+# rollout order. Must match k8s/someguy/deployment*.yaml.
+someguy_all_instances:
+  - { name: someguy, api: 8190, libp2p: 4004 }
+  - { name: someguy-b, api: 8191, libp2p: 4005 }
+  - { name: someguy-c, api: 8192, libp2p: 4006 }
+  - { name: someguy-d, api: 8193, libp2p: 4007 }
+
+someguy_running_instances: "{{ someguy_all_instances[:someguy_instances | int] }}"
+someguy_retired_instances: "{{ someguy_all_instances[someguy_instances | int:] }}"
+
 # First start pulls the image; later rollouts wait for the old pod to stop.
 someguy_rollout_timeout: 600s
 
@@ -7,7 +40,10 @@ someguy_rollout_timeout: 600s
 # ---------------------------------------------------------------------------
 # someguy keeps NO state on disk: a restart throws away the cached address book
 # and the accelerated DHT client's routing table, and both are rebuilt only by
-# serving traffic. Measured on these boxes at 200 req/s:
+# serving traffic. With four instances only the one being rolled is cold, and
+# Envoy keeps traffic on the other three, so a rollout costs a quarter of the
+# box's capacity instead of all of it - but that quarter still takes an hour to
+# come back. Measured on these boxes at 200 req/s:
 #
 #   11 minutes after a restart:  p95 2904ms, 2937 rejected FindPeer lookups,
 #                                3x the CPU of a warm box
@@ -23,6 +59,14 @@ someguy_rollout_timeout: 600s
 # production_rollout: true - or pass -e production_rollout=true - once they are
 # the only boxes serving traffic.
 someguy_rollout_wait_warm: "{{ production_rollout | default(false) }}"
+
+# Roll the instances ONE AT A TIME rather than all at once. With four instances
+# behind Envoy's health checks, a serial rollout keeps the box serving from the
+# other three throughout - but each step waits for the warm gate above, so a box
+# takes hours instead of minutes. That is the right trade only once these boxes
+# carry traffic, so it rides the same production switch: in dev all four roll
+# together and a rollout is over in a couple of minutes.
+someguy_rollout_serial: "{{ production_rollout | default(false) }}"
 
 # Peers in the cached address book that count as warm. A settled box on this
 # fleet holds 23k-26k; 15k is comfortably past the painful phase without

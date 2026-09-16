@@ -8,11 +8,13 @@ spec:
   # cannot start while the old one holds them. A rolling update would deadlock;
   # Recreate stops the old pod first.
   #
-  # So every rollout, OOM kill or reboot is a short outage for THIS box.
-  # Cloudflare does not cover it: responses are not cached (cf-cache-status:
-  # DYNAMIC), so someguy's stale-if-error header has no effect. Redundancy
-  # comes from the Cloudflare router these boxes sit behind, which health-checks
-  # them and routes around a box that is down.
+  # A restart of THIS instance is no longer an outage for the box: Envoy fans
+  # out across all four, health-checks them, and ejects one that stops
+  # answering (verified: with an instance scaled to zero, 40/40 requests still
+  # returned 200). roles/someguy rolls them one at a time, so a rollout costs
+  # a quarter of the box's capacity rather than all of it. That matters
+  # because responses are not cached (cf-cache-status: DYNAMIC), so someguy's
+  # stale-if-error header has no effect.
   strategy:
     type: Recreate
   selector:
@@ -58,6 +60,16 @@ spec:
           envFrom:
             - configMapRef:
                 name: someguy-env-vars
+          # The only per-instance settings: which ports this one owns. Set here
+          # rather than in a per-instance ConfigMap so the generated-ConfigMap
+          # prune in roles/kustomize_apply still sees every ConfigMap in use.
+          # someguy keeps no identity on disk, so each instance also gets its
+          # own PeerID at start - the point of running more than one.
+          env:
+            - name: SOMEGUY_LISTEN_ADDRESS
+              value: 127.0.0.1:8190
+            - name: SOMEGUY_LIBP2P_LISTEN_ADDRS
+              value: /ip4/0.0.0.0/tcp/4004,/ip4/0.0.0.0/udp/4004/quic-v1,/ip4/0.0.0.0/udp/4004/webrtc-direct,/ip4/0.0.0.0/udp/4004/quic-v1/webtransport,/ip6/::/tcp/4004,/ip6/::/udp/4004/quic-v1,/ip6/::/udp/4004/webrtc-direct,/ip6/::/udp/4004/quic-v1/webtransport
           ports:
             - name: http
               containerPort: 8190
@@ -71,22 +83,25 @@ spec:
               containerPort: 4004
               protocol: UDP
 
-          # ~70% of a 32-core / 123 GiB box. The rest is held for the
-          # bootstrapper, the content cluster node and the OS.
+          # One of FOUR instances per box (see kustomization.yaml). Together
+          # they request 24 CPU and 80 GiB - the same ~70% of a 32-core /
+          # 123 GiB box the single instance reserved, split four ways. The rest
+          # is held for the bootstrapper, the content cluster node and the OS.
           #
-          # These are a starting point, not measured need: a short local run
-          # peaked near 1 core and 0.5 GiB during the DHT crawl, with no query
-          # traffic. Tune against /debug/metrics/prometheus under real load.
+          # 6 CPU is a floor, not a cap: measured 2026-09-16, four instances
+          # serving 894 req/s used 4.4-4.9 cores each (18.2 of 32) and
+          # 1.2-1.5 GiB each (5.5 GiB of 123). Memory stays hugely
+          # over-reserved; the CPU floor covers the measured peak.
           #
           # No CPU limit on purpose: CFS throttling adds latency on a
           # latency-sensitive routing API, and the CPU request already
           # guarantees this pod its share.
           resources:
             requests:
-              cpu: "20"
-              memory: 80Gi
+              cpu: "6"
+              memory: 20Gi
             limits:
-              memory: 86Gi
+              memory: 21Gi
 
           # someguy has no health endpoint. /version answers as soon as the
           # HTTP server is up, and the server keeps answering while the

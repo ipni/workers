@@ -6,6 +6,12 @@ namespace: someguy
 resources:
   - namespace.yaml
   - deployment.yaml
+  # Instances b, c and d. Four someguy processes per box, each with its own
+  # PeerID, concurrency budget and connection pool; Envoy fans out across them
+  # (k8s/route-origin/envoy.yaml). Measured on sing-1 2026-09-16: one instance
+  # topped out at 355 req/s with p50 5004ms at 400 req/s, four reached 894 req/s
+  # with p50 217ms at 400 - see README, "Capacity".
+  - deployment-extra.yaml
 
 labels:
   - pairs:
@@ -63,13 +69,15 @@ configMapGenerator:
       - SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS=2048
 
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
-      # cgroup limit, which would let it plan past the pod's 86Gi and get
-      # OOM-killed. 64 GiB, in bytes.
-      - SOMEGUY_LIBP2P_MAX_MEMORY=68719476736
+      # cgroup limit, which would let it plan past the pod's 21Gi and get
+      # OOM-killed. 16 GiB, in bytes: a quarter of the 64 GiB the single
+      # instance was given, as there are now four of them.
+      - SOMEGUY_LIBP2P_MAX_MEMORY=17179869184
 
-      # Soft Go heap target below the 86Gi container limit, so the GC works
-      # harder before the kernel OOM-kills the pod.
-      - GOMEMLIMIT=80GiB
+      # Soft Go heap target below the 21Gi container limit, so the GC works
+      # harder before the kernel OOM-kills the pod. Each instance actually
+      # holds about 1.5 GiB under load; this is headroom, not a forecast.
+      - GOMEMLIMIT=20GiB
 
       - GOLOG_LOG_LEVEL=error,someguy=info
       - GOLOG_LOG_FMT=json

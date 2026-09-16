@@ -203,6 +203,30 @@ static_resources:
             max_connections: 20000
             max_pending_requests: 20000
             max_requests: 20000
+      # Four someguy instances per box (k8s/someguy). Round robin across them:
+      # each is a separate process with its own PeerID and concurrency budget,
+      # and requests queue behind slow DHT rounds per process, so spreading
+      # them is what raised sing-1 from 355 to 894 req/s (README, "Capacity").
+      lb_policy: ROUND_ROBIN
+
+      # An instance that stops answering must be taken out of rotation, not
+      # sent traffic that then fails: roles/someguy restarts them one at a time.
+      # An ACTIVE health check is what does that here - passive outlier
+      # detection alone cannot, because with four endpoints the default
+      # max_ejection_percent of 10% never reaches one whole endpoint.
+      health_checks:
+        - timeout: 2s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          http_health_check: { path: /version }
+      outlier_detection:
+        consecutive_5xx: 3
+        consecutive_gateway_failure: 3
+        enforcing_consecutive_gateway_failure: 100
+        interval: 5s
+        base_ejection_time: 10s
+        max_ejection_percent: 50
       load_assignment:
         cluster_name: someguy
         endpoints:
@@ -210,3 +234,12 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: 127.0.0.1, port_value: 8190 }
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 8191 }
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 8192 }
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 8193 }

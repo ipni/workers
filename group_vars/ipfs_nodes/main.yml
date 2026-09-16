@@ -89,16 +89,17 @@ sysctl_tuning:
   # explicit binds still work. Update when a host-network port is added:
   #   443 Envoy (outside the range today, kept for safety)
   #   4001 bootstrapper libp2p  4002 bootstrapper /ws (loopback)
-  #   4004 someguy libp2p  4101 content kubo libp2p
+  #   4004-4007 someguy libp2p (four instances)  4101 content kubo libp2p
   #   4443 bootstrapper WSS (Envoy)  5011 bootstrapper API
   #   5021 content kubo RPC API (loopback)
-  #   6443-6444 k3s API  8190 someguy API  8472/udp flannel VXLAN
+  #   6443-6444 k3s API  8190-8193 someguy APIs (loopback, four instances)
+  #   8472/udp flannel VXLAN
   #   9094 content ipfs-cluster REST API (loopback)
   #   9095 content ipfs-cluster IPFS proxy (loopback)
   #   9096 content ipfs-cluster swarm
   #   9901 route-origin Envoy admin  9902 bootstrap-wss Envoy admin
   #   10010 containerd  10248-10259 kubelet/kube-proxy/k3s
-  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004,4101,4443,5011,5021,6443-6444,8190,8472,9094-9096,9901-9902,10010,10248-10259"
+  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4101,4443,5011,5021,6443-6444,8190-8193,8472,9094-9096,9901-9902,10010,10248-10259"
   net.ipv4.tcp_fin_timeout: 15
   # Must equal what k3s's kube-proxy sets on every start: max(32768 * CPUs,
   # 131072), i.e. 1048576 on these 32-core boxes. A fixed lower value both

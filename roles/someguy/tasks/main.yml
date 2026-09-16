@@ -1,28 +1,50 @@
 ---
 # someguy: Delegated Routing V1 HTTP server, the primary workload on each box.
 # Manifests live in k8s/someguy (kustomize). This role owns someguy's firewall
-# ports; shipping, applying and waiting are shared via roles/kustomize_apply.
+# ports and the rollout order; shipping and applying are shared via
+# roles/kustomize_apply.
+#
+# FOUR instances per box (someguy_instances), each a separate process with its
+# own PeerID, concurrency budget and connection pool, behind Envoy's round-robin
+# fan-out. See roles/someguy/defaults/main.yml for what that is worth.
 
 # ---------------------------------------------------------------------------
-# Firewall. Only libp2p is opened; the HTTP API listens on loopback only.
+# Firewall. Only libp2p is opened; every instance's HTTP API is loopback only.
 #
-# 4004 is hardcoded on purpose: it is someguy's built-in libp2p default, and
-# the containerPorts in k8s/someguy/deployment.yaml use it too. A variable here
-# would only move the firewall hole, not the port someguy listens on.
+# The ports are fixed in someguy_all_instances and in
+# k8s/someguy/deployment*.yaml, and must be changed in both together.
 # ---------------------------------------------------------------------------
 - name: Allow someguy libp2p traffic (TCP)
   community.general.ufw:
     rule: allow
-    port: "4004"
+    port: "{{ item.libp2p }}"
     proto: tcp
-    comment: someguy libp2p
+    comment: "{{ item.name }} libp2p"
+  loop: "{{ someguy_running_instances }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.libp2p }}/tcp"
 
 - name: Allow someguy libp2p traffic (UDP - QUIC, WebTransport, WebRTC)
   community.general.ufw:
     rule: allow
-    port: "4004"
+    port: "{{ item.libp2p }}"
     proto: udp
-    comment: someguy libp2p
+    comment: "{{ item.name }} libp2p"
+  loop: "{{ someguy_running_instances }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.libp2p }}/udp"
+
+# Lowering someguy_instances has to close the ports it opened, or a box keeps
+# holes for instances that no longer exist.
+- name: Close the libp2p ports of instances that are not running
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.0.libp2p }}"
+    proto: "{{ item.1 }}"
+    delete: true
+  loop: "{{ someguy_retired_instances | product(['tcp', 'udp']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }} {{ item.0.libp2p }}/{{ item.1 }}"
 
 # someguy used to have a ClusterIP Service. It was removed when the API moved
 # to loopback-only: its endpoint (node IP :8190) no longer answers. Removing a
@@ -37,19 +59,76 @@
     namespace: someguy
     state: absent
 
+# ---------------------------------------------------------------------------
+# Rollout. Every instance's pod template changes together (they share the
+# generated env ConfigMap), and each Deployment is `Recreate`, so applying
+# without care stops all four at once - the outage this design exists to avoid.
+# With someguy_rollout_serial (production only) each instance is paused before
+# the apply and resumed in turn, so only one is ever down; in dev they all roll
+# together, which is a short outage but keeps the edit-deploy loop fast.
+#
+# Envoy health-checks each instance and ejects one that stops answering, so
+# the box keeps serving from the others throughout (verified: with an instance
+# scaled to zero, 40/40 requests still returned 200).
+# ---------------------------------------------------------------------------
+- name: Check which someguy deployments exist
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=someguy, get, deployments, -o, "jsonpath={.items[*].metadata.name}"]
+  register: someguy_deployments
+  changed_when: false
+  check_mode: false
+
+- name: Pause every instance but the first, so they do not all roll at once
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=someguy, rollout, pause, "deployment/{{ item.name }}"]
+  loop: "{{ someguy_running_instances[1:] }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - someguy_rollout_serial | bool
+    - not ansible_check_mode
+    - item.name in someguy_deployments.stdout.split()
+  changed_when: false   # a rollout control, not a change to the box
+
 - name: Deploy the someguy manifests
   ansible.builtin.include_role:
     name: kustomize_apply
   vars:
     kustomize_app: someguy
     kustomize_namespace: someguy
-    kustomize_deployment: someguy
+    # The rollout this waits for is the first instance's; the rest are paused
+    # and are rolled one at a time below.
+    kustomize_deployment: "{{ someguy_running_instances[0].name }}"
     kustomize_rollout_timeout: "{{ someguy_rollout_timeout }}"
 
-# Proves the API answers on the node, not just that the pod is Ready.
-- name: Confirm the someguy API answers locally
+- name: Delete instances above someguy_instances
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ item.name }}"
+    namespace: someguy
+    state: absent
+  loop: "{{ someguy_retired_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---------------------------------------------------------------------------
+# One instance at a time: resume it, wait for its pod, prove its API answers,
+# and (in production) wait for its address book before touching the next.
+# ---------------------------------------------------------------------------
+- name: Roll the remaining instances one at a time
+  ansible.builtin.include_tasks: roll_instance.yml
+  loop: "{{ someguy_running_instances[1:] }}"
+  loop_control:
+    loop_var: someguy_instance
+    label: "{{ someguy_instance.name }}"
+  when: not ansible_check_mode
+
+# The first instance was rolled by the apply above; check it the same way.
+- name: Confirm the first instance's API answers locally
   ansible.builtin.uri:
-    url: http://127.0.0.1:8190/version
+    url: "http://127.0.0.1:{{ someguy_running_instances[0].api }}/version"
     return_content: true
   register: someguy_version
   retries: 6
@@ -59,49 +138,26 @@
 
 - name: Report the running version
   ansible.builtin.debug:
-    msg: "someguy on {{ inventory_hostname }}: {{ someguy_version.content | trim }}"
+    msg: >-
+      someguy on {{ inventory_hostname }}: {{ someguy_version.content | trim }}
+      ({{ someguy_running_instances | length }} instance(s):
+      {{ someguy_running_instances | map(attribute='api') | join(', ') }})
   when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
-# Warm-up gate. With `serial`, this is what keeps a rollout from degrading the
-# whole fleet at once: the next box is not touched until this one has rebuilt
-# its address book. See roles/someguy/defaults/main.yml for the measurements.
+# Warm-up gate for the FIRST instance (the others are gated in
+# roll_instance.yml as they are rolled). With `serial`, this is what keeps a
+# rollout from degrading the whole fleet at once: the next box is not touched
+# until this one has rebuilt its address book. See defaults/main.yml.
 #
 # Only runs when this box's pod actually restarted, so re-running the playbook
 # against a settled fleet stays fast.
 # ---------------------------------------------------------------------------
-- name: Wait for someguy's address book to warm up
+- name: Wait for the first instance's address book to warm up
   when:
     - someguy_rollout_wait_warm | bool
     - not ansible_check_mode
     - kustomize_deployment_rolled | default(false) | bool
-  block:
-    - name: "Poll the cached address book until it holds {{ someguy_warm_min_peers }} peers"
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail;
-          curl -sf --max-time 10 http://127.0.0.1:8190/debug/metrics/prometheus
-          | awk '/^someguy_cached_addr_book_peer_state_size/ {print int($2); found = 1}
-                 END {if (!found) print 0}'
-        executable: /bin/bash
-      register: someguy_warm
-      changed_when: false
-      failed_when: false
-      retries: "{{ (someguy_warm_timeout_seconds | int // (someguy_warm_poll_seconds | int)) | int }}"
-      delay: "{{ someguy_warm_poll_seconds | int }}"
-      until: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
-
-    - name: Report whether the box warmed up in time
-      ansible.builtin.assert:
-        that: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
-        fail_msg: >-
-          {{ inventory_hostname }} still holds only
-          {{ someguy_warm.stdout | trim | default('0', true) }} cached peers after
-          {{ someguy_warm_timeout_seconds }}s (wanted {{ someguy_warm_min_peers }}).
-          Not rolling the next box on the assumption that this one recovered.
-          Re-run with -e someguy_rollout_wait_warm=false to skip this gate.
-        success_msg: >-
-          {{ inventory_hostname }}: address book holds
-          {{ someguy_warm.stdout | trim }} peers; safe to roll the next box.
-        quiet: true
-      when: someguy_warm_fail_on_timeout | bool
+  ansible.builtin.include_tasks: wait_warm.yml
+  vars:
+    someguy_warm_instance: "{{ someguy_running_instances[0] }}"

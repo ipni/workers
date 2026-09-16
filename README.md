@@ -182,36 +182,57 @@ To upgrade, change the digest.
   client (the Envoy origin, also `hostNetwork`) lives. It is unreachable from
   any interface even without the firewall. There is deliberately no Service for
   it.
-- **`strategy: Recreate`, and restarts are per-box outages.** With
-  `hostNetwork` a second pod cannot bind the same ports, so a rolling update
-  would deadlock. Every rollout, OOM kill or reboot takes that box's hostname
-  down until the new process binds. Cloudflare does **not** cover the gap:
-  responses are not cached (`cf-cache-status: DYNAMIC`), so someguy's
-  `stale-if-error` header has no effect. Redundancy comes from the **live
-  Cloudflare router** these boxes are meant to sit behind, which health-checks
-  them and routes around a box that is down. There is no preStop pause: with
-  no Service in front, it would only lengthen rollouts.
+- **Four instances per box, so a restart is no longer an outage.** `someguy`,
+  `someguy-b`, `someguy-c` and `someguy-d` own 8190-8193 (API, loopback) and
+  4004-4007 (libp2p). Envoy round-robins across them, health-checks each on
+  `/version`, and ejects one that stops answering (verified: with an instance
+  scaled to zero, 40/40 requests still returned 200). Each Deployment is still
+  `Recreate` - with `hostNetwork` a second pod cannot bind the same ports - but
+  only one instance is down at a time, so a rollout costs a quarter of the
+  box's capacity rather than all of it. That matters because Cloudflare does
+  **not** cover a gap: responses are not cached (`cf-cache-status: DYNAMIC`),
+  so someguy's `stale-if-error` header has no effect. There is no preStop
+  pause: with no Service in front, it would only lengthen rollouts.
 - **Upstreams.** The DHT plus the autoconf default endpoints, which means
   cid.contact for providers. **These boxes must never be configured as an
   upstream of cid.contact**, or provider lookups would loop.
-- **No persistent state.** someguy keeps no identity or datastore on disk. Each
-  restart gets a new PeerID and re-crawls the DHT, about 1–2 minutes before the
-  accelerated client is ready. Requests are still served during the crawl,
-  through the standard DHT client.
+- **No persistent state.** someguy keeps no identity or datastore on disk
+  (`--datadir` holds only the autoconf cache, and the address book is purely
+  in-memory with a 48h TTL). Each restart gets a new PeerID - which is why four
+  instances get four separate DHT identities - and re-crawls, about 1-2 minutes
+  before the accelerated client is ready. Requests are served during the crawl
+  through the standard client, but the *address book* takes about an hour of
+  real traffic to refill, and idle time refills nothing.
 - **Memory.** The libp2p resource manager defaults to 85% of *host* RAM,
-  ignoring the pod limit. It is capped explicitly at 64 GiB, below the 86 GiB
-  container limit, with `GOMEMLIMIT=80GiB`.
+  ignoring the pod limit. It is capped explicitly at 16 GiB per instance, below
+  the 21 GiB container limit, with `GOMEMLIMIT=20GiB`.
 - **Health checks.** someguy has no health endpoint, so the probes use `/version`.
 - **Runs as uid 10001,** a uid with no account on the host, rather than the
   image's default 1000.
 
-**Resources.** About 70% of each box is reserved: 20 CPU and 80 GiB requested,
-86 GiB memory limit, no CPU limit (to avoid throttling). The remaining ~30% is
-for the bootstrapper, the content cluster node and the OS. This is a
-reservation, not measured need. Soon after deploy each box used about
-0.5 GiB and a fraction of a core. Peaks come during the hourly DHT crawl (about
-1,600 FDs and 800 sockets). Tune against `/debug/metrics/prometheus` once real
-traffic arrives.
+**Resources.** About 70% of each box is reserved, split four ways: 6 CPU and
+20 GiB requested per instance, 24 CPU and 80 GiB per box, 21 GiB memory limit
+each, no CPU limit (to avoid throttling). The remaining ~30% is for the
+bootstrapper, the content cluster node and the OS. Memory is a reservation, not
+measured need - four instances serving 894 req/s held 1.2-1.5 GiB each. The CPU
+floor is measured: the same run used 4.4-4.9 cores each, 18.2 of 32.
+
+**Rolling someguy.** In dev all four instances roll together: a short outage per
+box, and the playbook is done in a couple of minutes. With
+`production_rollout: true` they roll **one at a time**, each gated on its
+address book reaching `someguy_warm_min_peers` before the next is touched, so
+the box never drops below three quarters of capacity - but that takes hours per
+box. Two break-glass paths for an urgent fix:
+
+```bash
+# safe and quick: one instance at a time, no warm-up wait (~6 min/box)
+ansible-playbook routing.yml -e someguy_rollout_wait_warm=false
+# fastest, accepts a ~1 min outage per box (~5 min for the fleet)
+ansible-playbook routing.yml -e production_rollout=false
+```
+
+`someguy_instances` (default 4) is the revert: lower it and the extra
+Deployments are deleted and their firewall ports closed.
 
 ## Public endpoint: route-<box>.ipni.io
 
@@ -432,7 +453,7 @@ no rejected lookups, warm CPU). Check the pod's age first
 (`kubectl -n someguy get pods`), and use `--out` to track how results change
 as the table warms.
 
-### Capacity, and the accepted sing-1 limitation
+### Capacity: four someguy instances per box
 
 `routing-compare.sh` shows the boxes answer correctly; it says nothing about
 load. Two scripts measure that:
@@ -450,21 +471,57 @@ growing latency rather than quietly lower throughput, and it samples someguy's
 own counters (CPU, address-book hit rate, rejected lookups, open FDs) around
 every stage. **Run it on the box** (`ansible <box> -m script -a ...`): from a
 workstation, the round trip and the client's own thread pool become the limit
-long before the box does.
+long before the box does. **And give it enough `--workers`**: the default
+(rate x 4, capped at 2048) cannot hold 850+ req/s in flight when each request
+takes seconds, so the client silently becomes the ceiling. The 2026-09-16
+numbers below marked "client-bound" were measured that way and are too low;
+re-measured with `--workers 12288` the same boxes went 50% higher.
 
-Measured 2026-09-16, warm boxes, fixture mix through Cloudflare, zero HTTP
-errors at every rate on every box:
+**Each box runs FOUR someguy instances** (`someguy`, `someguy-b`, `someguy-c`,
+`someguy-d`) on 8190-8193 (API, loopback) and 4004-4007 (libp2p), with Envoy
+round-robining across them. Each is a separate process with its own PeerID,
+concurrency budget and connection pool. Measured on sing-1, 2026-09-16, warm,
+fixture mix through Cloudflare, zero HTTP errors at every stage:
 
-| Target | sing-1 | lith-1 | chic-1 |
-|--------|--------|--------|--------|
-| 200/s | 182/s, p50 2208ms | 199/s, p50 133ms | 199/s, p50 109ms |
-| 400/s | 352/s, p50 5014ms | 389/s, p50 120ms | 379/s, p50 64ms |
-| 600/s | not reached | 573/s, p50 131ms | 557/s, p50 959ms |
-| 850/s | not reached | **773/s**, p50 1698ms | 729/s, p50 2064ms |
+| Target | 1 instance | 2 instances | 4 instances |
+|--------|-----------|-------------|-------------|
+| 200/s | 182/s, p50 2208ms | 194/s, p50 317ms | 198/s, p50 190ms |
+| 400/s | 352/s, p50 5014ms | 361/s, p50 2154ms | 389/s, p50 217ms |
+| 600/s | not reached | 530/s, p50 4489ms | 574/s, p50 467ms |
+| 850/s | not reached | not reached | 775/s, p50 1964ms |
+| 1000/s | - | - | **894/s**, p50 3044ms |
+
+**Why it works.** A single instance was throwing away 23,156 background
+FindPeer lookups per 30s stage at 400 req/s - its in-process concurrency budget
+was full - and its p50 sat at the 5s `timeoutPerOp` wall. Four instances reject
+none. Requests also queue behind slow DHT rounds *per process*, so spreading
+them across four processes cuts latency even where no counter shows saturation:
+sing-1 x4 answers at p50 217ms at 400 req/s where single-instance chic-1, a box
+much closer to the DHT's centre of mass, takes 1093ms.
+
+Four instances cost 18.2 of 32 cores and 5.5 of 123 GiB at 894 req/s. The
+reservation is unchanged: 6 CPU and 20 GiB requested each, 24 CPU and 80 GiB
+per box, exactly what the single instance reserved.
+
+**The other two boxes, re-measured 2026-09-16 with enough client workers** (one
+instance each, before the rollout):
+
+| Target | lith-1 | chic-1 |
+|--------|--------|--------|
+| 850/s | 767/s, p50 3174ms | 781/s, p50 2105ms |
+| 1000/s | 890/s, p50 4078ms | 904/s, p50 2432ms |
+| 1200/s | not reached | **1111/s**, p50 2825ms, 11% 429s |
+
+Both reject zero lookups at every rate, so the FindPeer cap that bound sing-1
+never binds here. chic-1's limit is **our own rate limiter** - the 429s are
+Envoy's 1000 req/s lookup bucket, a value `envoy.yaml` labels "STARTING VALUE,
+not measured capacity". lith-1's is latency: p50 4078ms at 890/s, heading for
+the 5s wall. Both boxes were rolled to four instances on the strength of the
+sing-1 latency result; the throughput gain there is expected to be smaller.
 
 For scale, 1.1B requests/month is ~424 req/s across the fleet, or ~141 req/s
-per box at average load and roughly 280-420 at peak. lith-1 and chic-1 cover
-that with room; sing-1 does not.
+per box at average load and roughly 280-420 at peak - comfortably inside what
+every box now does.
 
 **What limits a box.** Not CPU: someguy used 3.4 of 32 cores at 200 req/s and
 6.6 at 400. Not errors, not the FindPeer cap (no rejections since it was
@@ -490,10 +547,13 @@ few providers to begin with. This is the strongest argument for exposing
 of that completeness without the 25s latency cliff that made `standard`
 unusable.
 
-**Decision (2026-09-16): sing-1 runs at roughly half the throughput of the
-other two, and that is accepted.** Traffic is to be geo-routed, so sing-1 will
-serve Asia-Pacific rather than a third of global load. Two things this rests
-on, to re-check rather than assume:
+**Superseded (2026-09-16): sing-1 no longer runs at half the throughput.**
+With four instances it reaches 894 req/s against lith-1's 890 and chic-1's
+1111, and its p50 under load is better than either box's at 400-850 req/s. Its
+DHT-distance penalty is real but bounded: it shows in p50 at the very top of
+the range (3044ms at 1000/s against chic-1's 2432ms) and in a lower address-book
+hit rate (71% against 81%), not in capacity. The geo-routing notes below still
+stand on their own merits:
 
 - **Geo-routing does not exist yet.** There are three separate hostnames, each
   a proxied A record to one box, and nothing steers a client to the nearest.
@@ -509,14 +569,24 @@ on, to re-check rather than assume:
 
 **Expanding a box's capacity**, in order of leverage:
 
-1. **Add boxes.** The constraint is lookups in flight, not CPU, so throughput
-   scales with boxes. A second Asia-Pacific box, or steering that region to a
-   faster box, both work.
+1. **More instances per box** - done, four each; see the table above. The
+   constraint was lookups in flight per process, not the hardware.
+2. **Raise the Envoy lookup rate limit.** chic-1 is now capped by it rather
+   than by anything real. It should be set per box from these measurements and
+   a latency target, since past ~900 req/s p50 climbs towards the 5s wall.
+3. **Add boxes.** Throughput scales with boxes. A second Asia-Pacific box, or
+   steering that region to a faster box, both work.
 2. **Upstream asks.** Exposing `fullrt`'s `timeoutPerOp`, and persisting the
    address book across restarts, would respectively bound the tail and remove
    the hour of warm-up a restart now costs.
 
 **What has already been tried:**
+
+- **Kept: four instances per box** (2026-09-16). See the table above. Rejected
+  along the way: raising `SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS`
+  again. It bounds *background* address-book fills, not the foreground lookup
+  path; the earlier 512 -> 2048 raise cut CPU but never moved the ceiling, and
+  there was no reason to expect a third raise to differ.
 
 - **Kept:** `SOMEGUY_RECORDS_LIMIT` 100 -> 50 (all boxes). Measured on sing-1
   at 25: p50 halved at 200 req/s (2208ms -> 1180ms) and response bytes fell
