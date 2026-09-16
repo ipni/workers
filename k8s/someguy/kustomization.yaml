@@ -17,6 +17,9 @@ resources:
   # someguy_instances: 1 this renders to a comment, which kustomize accepts as
   # an empty resource.
   - deployment-extra.yaml
+  # RENDERED from someguy_running_instances: one per instance, the volume
+  # behind the data mount (see deployment.yaml.j2).
+  - pvc.yaml
 
 labels:
   - pairs:
@@ -25,7 +28,8 @@ labels:
 
 # Pinned by digest so every box runs byte-identical images and a re-pushed tag
 # cannot change what is deployed. This digest is v0.16.0 (2026-07-29), a
-# multi-arch index covering amd64.
+# multi-arch index covering amd64. Once the snapshot flag is tagged, the digest
+# must move to ghcr.io/ipni/someguy (the fork that carries it).
 images:
   - name: someguy
     newName: ghcr.io/ipfs/someguy
@@ -57,7 +61,8 @@ configMapGenerator:
       - SOMEGUY_PEER_ENDPOINTS=auto
       - SOMEGUY_IPNS_ENDPOINTS=auto
 
-      # Only the autoconf cache lives here; there is no identity or datastore.
+      # The autoconf cache and the address book snapshot live here; there is
+      # still no identity or datastore.
       - SOMEGUY_DATADIR=/data/someguy
 
       # Providers or peers per `Accept: application/json` response. The HTTP
@@ -79,6 +84,12 @@ configMapGenerator:
       # of 32 cores, so the cap - not CPU - was the limit. Rejected lookups
       # mean provider records returned without addresses.
       - SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS=2048
+
+      # Snapshot the address book to the volume every 15 minutes, plus once on
+      # a clean shutdown. The periodic write is the guarantee: an OOM kill
+      # skips shutdown, so the interval bounds what a crash can lose. Needs the
+      # fork image (see the images block above); inert on the upstream one.
+      - SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=15m
 
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 21Gi and get

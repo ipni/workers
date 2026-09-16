@@ -40,7 +40,7 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: Default
-      terminationGracePeriodSeconds: 15
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -103,6 +103,6 @@ spec:
               mountPath: /data/someguy
       volumes:
         - name: data
-          emptyDir:
-            sizeLimit: 1Gi
+          persistentVolumeClaim:
+            claimName: {{ instance.name }}-data
 {% endfor %}

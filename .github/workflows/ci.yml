@@ -73,19 +73,21 @@ jobs:
           done
 
       # The instance count is a knob (someguy_instances). It is only a real one
-      # if the Deployments and Envoy's endpoint list move together, which is the
-      # whole point of rendering them from one table.
-      - name: someguy instance count drives both manifests
+      # if the Deployments, their snapshots and Envoy's endpoint list move
+      # together, which is the whole point of rendering them from one table.
+      - name: someguy instance count drives all the manifests
         run: |
           for count in 1 2 4; do
             ansible-playbook scripts/render-manifests.yml \
               -e dest="rendered-$count" -e "someguy_instances=$count" > /dev/null
-            deployments=$(kubectl kustomize "rendered-$count/someguy" | grep -c '^kind: Deployment')
+            someguy_build=$(kubectl kustomize "rendered-$count/someguy")
+            deployments=$(printf '%s\n' "$someguy_build" | grep -c '^kind: Deployment')
+            pvcs=$(printf '%s\n' "$someguy_build" | grep -c '^kind: PersistentVolumeClaim')
             endpoints=$(kubectl kustomize "rendered-$count/route-origin" \
                         | grep -c 'port_value: 819')
-            echo "someguy_instances=$count -> $deployments Deployments, $endpoints endpoints"
-            if [ "$deployments" -ne "$count" ] || [ "$endpoints" -ne "$count" ]; then
-              echo "::error::someguy_instances=$count produced $deployments Deployments and $endpoints Envoy endpoints"
+            echo "someguy_instances=$count -> $deployments Deployments, $pvcs PVCs, $endpoints endpoints"
+            if [ "$deployments" -ne "$count" ] || [ "$pvcs" -ne "$count" ] || [ "$endpoints" -ne "$count" ]; then
+              echo "::error::someguy_instances=$count produced $deployments Deployments, $pvcs PVCs and $endpoints Envoy endpoints"
               exit 1
             fi
           done

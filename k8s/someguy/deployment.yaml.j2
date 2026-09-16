@@ -46,9 +46,11 @@ spec:
       # cluster DNS).
       dnsPolicy: Default
 
-      # someguy shuts its HTTP server down within 5s of SIGTERM, then closes the
-      # DHT. 15s covers both.
-      terminationGracePeriodSeconds: 15
+      # someguy shuts its HTTP server down within 5s of SIGTERM, then writes the
+      # address book snapshot (sub-second at 25k peers) and closes the DHT. 30s
+      # covers all three; SIGKILL mid-write leaves the previous snapshot intact
+      # because the write is temp file plus rename.
+      terminationGracePeriodSeconds: 30
 
       securityContext:
         runAsNonRoot: true
@@ -56,7 +58,7 @@ spec:
         # 1000, which on these hosts is the provider's `ubuntu` login account
         # (in sudo and adm): with hostNetwork and no user namespace, an escape
         # would have landed as that user. Verified the image runs as 10001: its
-        # binaries are world-executable and it only writes to the emptyDir
+        # binaries are world-executable and it only writes to the volume
         # below, which fsGroup makes writable.
         runAsUser: 10001
         runAsGroup: 10001
@@ -152,8 +154,10 @@ spec:
               mountPath: /data/someguy
 
       volumes:
-        # Only the autoconf cache is written. Nothing needs to survive a
-        # restart: someguy keeps its identity and caches in memory.
+        # The autoconf cache and the address book snapshot survive on this
+        # volume; the identity and the DHT routing table do not - they stay in
+        # memory and are rebuilt at start. Rendered per instance in
+        # pvc.yaml.j2, one claim per running instance.
         - name: data
-          emptyDir:
-            sizeLimit: 1Gi
+          persistentVolumeClaim:
+            claimName: {{ someguy_first_instance.name }}-data

@@ -117,6 +117,20 @@
   loop_control:
     label: "{{ item.name }}"
 
+# local-path deletes the volume's data with the claim, which is what retiring
+# an instance means: its address book snapshot stops existing too.
+- name: Delete the snapshots of instances that are not running
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: PersistentVolumeClaim
+    name: "{{ item.name }}-data"
+    namespace: someguy
+    state: absent
+  loop: "{{ someguy_retired_instances }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 # The first instance was rolled by the apply above; check it the same way
 # roll_instance.yml checks the others.
 - name: Confirm the first instance's API answers locally

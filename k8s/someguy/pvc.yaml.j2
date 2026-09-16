@@ -1,0 +1,24 @@
+{#
+  Rendered by roles/kustomize_apply from someguy_running_instances
+  (roles/someguy/defaults/main.yml): one PersistentVolumeClaim per running
+  instance, mounted at /data/someguy by its Deployment.
+
+  One per instance. It holds the autoconf cache and the cached address book
+  snapshot (cached-addr-book.ndjson); losing one costs only that instance's
+  warm-up, which the other three absorb. ReadWriteOnce is safe because each
+  Deployment is Recreate: the old pod is stopped before the new one mounts the
+  same claim, so two pods never share it.
+#}
+{% for instance in someguy_running_instances %}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ instance.name }}-data
+spec:
+  storageClassName: local-path
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+{% endfor %}

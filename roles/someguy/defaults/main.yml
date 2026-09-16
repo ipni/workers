@@ -59,12 +59,13 @@ someguy_rollout_timeout: 600s
 # ---------------------------------------------------------------------------
 # Rollout safety
 # ---------------------------------------------------------------------------
-# someguy keeps NO state on disk: a restart throws away the cached address book
-# and the accelerated DHT client's routing table, and both are rebuilt only by
-# serving traffic. With four instances only the one being rolled is cold, and
-# Envoy keeps traffic on the other three, so a rollout costs a quarter of the
-# box's capacity instead of all of it - but that quarter still takes an hour to
-# come back. Measured on these boxes at 200 req/s:
+# The cached address book is snapshotted to a per-instance PVC and restored at
+# start, so a restart is cold only for the accelerated DHT client's routing
+# table, which is rebuilt only by serving traffic. With four instances only the
+# one being rolled is cold, and Envoy keeps traffic on the other three, so a
+# rollout costs a quarter of the box's capacity instead of all of it. The warm
+# gate below is satisfied by the restore and stays as the safety net for a lost
+# or stale snapshot - which rebuilds cold, the way these measurements describe:
 #
 #   11 minutes after a restart:  p95 2904ms, 2937 rejected FindPeer lookups,
 #                                3x the CPU of a warm box
