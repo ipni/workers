@@ -27,9 +27,10 @@ kubeconfigs/
 .ansible/
 facts_cache/
 
-# Local working notes — reviews and task scratch, not part of the deliverable.
-# Anchored with a leading slash: an unanchored "tasks/" would also swallow
-# every role's roles/<role>/tasks/ directory.
-/reviews/
-/tasks/
+# Fetched by scripts/wss-check; not part of the deliverable.
 /scripts/wss-check/node_modules/
+
+# Personal scratch directories - working notes, review write-ups and the like -
+# are deliberately absent from this list. They are one operator's workflow, not
+# the repository's, and this repository is public. Ignore them per clone in
+# .git/info/exclude instead of adding them here.
