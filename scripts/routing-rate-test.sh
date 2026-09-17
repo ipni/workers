@@ -28,7 +28,7 @@
 # Usage: ./scripts/routing-rate-test.sh --url-base URL [--rates 25,50,100,200]
 #          [--stage-seconds N] [--workload cold|fixtures] [--cold-fraction F]
 #          [--fixtures FILE] [--metrics-url URL] [--timeout S]
-#          [--max-error-rate F] [--json FILE]
+#          [--max-error-rate F] [--json FILE] [--per-request FILE]
 set -euo pipefail
 
 usage() {
@@ -54,6 +54,11 @@ Options:
                         capped at 2048). Must exceed rate x latency or the
                         client, not the endpoint, caps the achieved rate.
   --json FILE           write full results as JSON
+  --per-request FILE    append one TSV line per completed request:
+                        op, id, status, bytes, service_ms, timed_out.
+                        status and bytes are empty when the request raised;
+                        timed_out is 1 when it raised the client --timeout.
+                        Appends, so a header is written only for a new file.
   -h, --help            show this help
 
 A stage stops the climb when its error rate exceeds --max-error-rate, any 429
@@ -74,6 +79,7 @@ timeout=30
 max_error_rate=0.05
 workers=
 json_out=
+per_request_out=
 
 need_value() {
   if [[ $# -lt 2 || -z $2 ]]; then
@@ -95,6 +101,7 @@ while [[ $# -gt 0 ]]; do
     --max-error-rate) need_value "$@"; max_error_rate=$2; shift 2 ;;
     --workers)        need_value "$@"; workers=$2; shift 2 ;;
     --json)           need_value "$@"; json_out=$2; shift 2 ;;
+    --per-request)    need_value "$@"; per_request_out=$2; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "error: unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -129,12 +136,14 @@ if [[ -n $workers && ! $workers =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 python3 - "$url_base" "$rates" "$stage_seconds" "$cold_fraction" "$fixtures" \
-         "$metrics_url" "$timeout" "$max_error_rate" "$json_out" "${workers:-0}" <<'PYEOF'
-import datetime, hashlib, http.client, json, math, os, queue, resource, ssl, sys, threading, time
+         "$metrics_url" "$timeout" "$max_error_rate" "$json_out" "${workers:-0}" \
+         "$per_request_out" <<'PYEOF'
+import datetime, hashlib, http.client, json, math, os, queue, resource, socket, ssl, sys, threading, time
 import urllib.parse, urllib.request
 
 (url_base, rates_arg, stage_seconds, cold_fraction, fixtures_path,
- metrics_url, timeout, max_error_rate, json_out, workers_arg) = sys.argv[1:11]
+ metrics_url, timeout, max_error_rate, json_out, workers_arg,
+ per_request_out) = sys.argv[1:12]
 rates = [int(r) for r in rates_arg.split(",")]
 stage_seconds, timeout = int(stage_seconds), int(timeout)
 cold_fraction, max_error_rate = float(cold_fraction), float(max_error_rate)
@@ -283,6 +292,24 @@ def connect():
     return http.client.HTTPConnection(HOST, PORT, timeout=timeout)
 
 
+def write_per_request(records):
+    """Append one TSV line per completed request. Opened per stage in append
+    mode so a run that is killed mid-climb still keeps the stages it finished,
+    and so several stages accumulate in one file."""
+    if not per_request_out:
+        return
+    new = not os.path.exists(per_request_out) or os.path.getsize(per_request_out) == 0
+    with open(per_request_out, "a") as fh:
+        if new:
+            fh.write("op\tid\tstatus\tbytes\tservice_ms\ttimed_out\n")
+        for r in records:
+            status = "" if r.get("status") is None else r["status"]
+            nbytes = "" if r.get("bytes") is None else r["bytes"]
+            fh.write("%s\t%s\t%s\t%s\t%.3f\t%d\n" % (
+                r.get("op", ""), r.get("id", ""), status, nbytes,
+                r.get("service_ms", 0.0), 1 if r.get("timed_out") else 0))
+
+
 class Worker(threading.Thread):
     def __init__(self, jobs, results):
         super().__init__(daemon=True)
@@ -297,7 +324,7 @@ class Worker(threading.Thread):
                 return
             scheduled, kind, ident = job
             started = time.monotonic()
-            rec = {"queue_ms": (started - scheduled) * 1000}
+            rec = {"queue_ms": (started - scheduled) * 1000, "op": kind, "id": ident}
             try:
                 if self.conn is None:
                     self.conn = connect()
@@ -312,8 +339,12 @@ class Worker(threading.Thread):
                     self.conn.close()
                     self.conn = None
             except Exception as exc:
+                # A socket timeout is the client's own --timeout firing, which is
+                # a different thing from the endpoint answering slowly, so record
+                # it separately rather than lumping it in with the other errors.
                 rec.update(status=None, error=type(exc).__name__, end=time.monotonic(),
-                           service_ms=(time.monotonic() - started) * 1000)
+                           service_ms=(time.monotonic() - started) * 1000,
+                           timed_out=isinstance(exc, (TimeoutError, socket.timeout)))
                 try:
                     self.conn.close()
                 except Exception:
@@ -362,6 +393,8 @@ def run_stage(rate):
     failed = [r for r in results if r.get("status") not in OK_STATUS]
     service = [r["service_ms"] for r in good]
     queued = [r["queue_ms"] for r in results]
+    write_per_request(results)
+
     statuses, errors = {}, {}
     for r in results:
         if r.get("error"):
