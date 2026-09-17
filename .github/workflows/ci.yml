@@ -30,6 +30,12 @@ jobs:
           pip install ansible-core ansible-lint yamllint
           ansible-galaxy collection install community.general ansible.posix
 
+      # ansible.cfg points vault at .vault_pass, a gitignored credential that
+      # does not exist in CI. Nothing here encrypts or decrypts, so a
+      # throwaway file is enough to satisfy the config.
+      - name: Provide a throwaway vault password file
+        run: echo ci > .vault_pass
+
       # Every playbook, not just site.yml: a role edit can break one of the
       # others and nothing else would say so.
       - name: Syntax-check every playbook
@@ -52,6 +58,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Same vault situation as the ansible job: the config names a gitignored
+      # file that CI does not have, and nothing here decrypts.
+      - name: Provide a throwaway vault password file
+        run: echo ci > .vault_pass
 
       # Some manifests are .j2, rendered on the node by roles/kustomize_apply.
       # Rendering them here through the same playbook a person would use means

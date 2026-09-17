@@ -101,14 +101,16 @@ PY
 
 # One exec each: "<name>\t<resolved path or error>", then the resolved CIDs
 # and every other CID in CIDv1 base32 ("invalid" for a non-CID), one per line.
-# shellcheck disable=SC2046
+# SC2016: single quotes are deliberate; the body must expand on the node, not here.
+# shellcheck disable=SC2016,SC2046
 k -c kubo -- sh -c '
   for n; do
     r=$(ipfs --api=/ip4/127.0.0.1/tcp/5021 --timeout=30s resolve -r "/ipns/$n" 2>&1) || r="error: $r"
     printf "%s\t%s\n" "$n" "$(echo "$r" | tr "\n" " ")"
   done' sh $(cat "${WORK}/dnslink-names") > "${WORK}/dnslink.tsv"
 sed -n 's|^[^\t]*\t/ipfs/\([^/ ]*\) *$|\1|p' "${WORK}/dnslink.tsv" >> "${WORK}/cids"
-# shellcheck disable=SC2046
+# SC2016: single quotes are deliberate; the body must expand on the node, not here.
+# shellcheck disable=SC2016,SC2046
 k -c kubo -- sh -c '
   for c; do
     ipfs --api=/ip4/127.0.0.1/tcp/5021 cid format -v 1 -b base32 "$c" 2>/dev/null || echo invalid

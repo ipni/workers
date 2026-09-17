@@ -133,6 +133,8 @@ EOF
 
 if [[ -e "$PUBLIC" ]]; then
   for pair in "content_cluster_peer_id $CLUSTER_ID" "content_kubo_peer_id $KUBO_ID"; do
+    # SC2086: unquoted is deliberate; the pair is exactly two words.
+    # shellcheck disable=SC2086
     set -- $pair
     existing=$(python3 -c 'import sys, yaml; print((yaml.safe_load(open(sys.argv[1])) or {}).get(sys.argv[2], ""))' "$PUBLIC" "$1")
     if [[ -n "$existing" && "$existing" != "$2" ]]; then
