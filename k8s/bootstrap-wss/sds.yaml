@@ -1,3 +1,4 @@
+---
 # The WSS certificate for envoy.yaml, as a file-based SDS resource. The files
 # come from the bootstrap-wss-tls Secret that cert-manager writes. Envoy watches
 # the directory: kubelet swaps a renewed Secret in with an atomic rename there.

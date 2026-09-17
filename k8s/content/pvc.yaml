@@ -1,3 +1,4 @@
+---
 # Shared by both containers: kubo's repo (blocks of the pinned website
 # content, datastore) under ipfs/, and ipfs-cluster's state (CRDT pinset,
 # identity, peerstore) under ipfs-cluster/. Nothing enforces the size:

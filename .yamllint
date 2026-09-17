@@ -8,6 +8,9 @@ ignore: |
   reviews/
   tasks/
   scripts/wss-check/node_modules/
+  # Vendored upstream release manifest, pinned by the sha256 in its
+  # kustomization; it must never be reformatted.
+  k8s/cert-manager/cert-manager.yaml
 
 rules:
   # See .ansible-lint for why these two are off.

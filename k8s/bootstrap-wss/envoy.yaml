@@ -1,3 +1,4 @@
+---
 # Envoy terminating TLS for the bootstrapper's libp2p WebSocket transport, so
 # browsers can dial /dns4/<box>.bootstrap.ipni.io/tcp/4443/wss.
 #
