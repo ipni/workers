@@ -5,9 +5,10 @@ ignore: |
   .github/
   facts_cache/
   kubeconfigs/
-  reviews/
-  # The leading slash anchors this to the repo-root `tasks/` directory, so
-  # `roles/*/tasks/` is not excluded with it.
+  # The leading slash anchors these to the repo-root directories of those
+  # names, so a same-named directory inside a role - `roles/*/tasks/` - is not
+  # excluded with them.
+  /reviews/
   /tasks/
   scripts/wss-check/node_modules/
   # Vendored upstream release manifest, pinned by the sha256 in its

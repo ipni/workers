@@ -12,12 +12,6 @@ vault.yml
 kubeconfigs/
 *.kubeconfig
 
-# Personal Claude Code settings (and the writer's transient temp files).
-# settings.json is ignored too: this repository is public, and the allowlist in
-# it is one operator's convenience, not part of the deliverable.
-.claude/settings.json
-.claude/settings.local.json*
-
 # Manifests rendered by scripts/render-manifests.yml for inspection or CI
 /rendered/
 /rendered-*/
@@ -30,7 +24,7 @@ facts_cache/
 # Fetched by scripts/wss-check; not part of the deliverable.
 /scripts/wss-check/node_modules/
 
-# Personal scratch directories - working notes, review write-ups and the like -
-# are deliberately absent from this list. They are one operator's workflow, not
-# the repository's, and this repository is public. Ignore them per clone in
-# .git/info/exclude instead of adding them here.
+# Personal working files - scratch notes, review write-ups, editor and agent
+# settings - are deliberately absent from this list. They are one operator's
+# workflow, not the repository's, and this repository is public. Ignore them
+# per clone in .git/info/exclude instead of adding them here.
