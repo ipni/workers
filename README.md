@@ -212,13 +212,15 @@ To upgrade, change the digest.
 - **Upstreams.** The DHT plus the autoconf default endpoints, which means
   cid.contact for providers. **These boxes must never be configured as an
   upstream of cid.contact**, or provider lookups would loop.
-- **No persistent state.** someguy keeps no identity or datastore on disk
-  (`--datadir` holds only the autoconf cache, and the address book is purely
-  in-memory with a 48h TTL). Each restart gets a new PeerID - which is why four
-  instances get four separate DHT identities - and re-crawls, about 1-2 minutes
-  before the accelerated client is ready. Requests are served during the crawl
-  through the standard client, but the *address book* takes about an hour of
-  real traffic to refill, and idle time refills nothing.
+- **Almost no persistent state.** someguy keeps no identity or datastore on
+  disk, so each restart gets a new PeerID - which is why four instances get four
+  separate DHT identities. What `--datadir` does hold is the autoconf cache and
+  the two snapshots described under "Rolling someguy" below: the cached address
+  book, and (once the fork image is pinned) the accelerated client's routing
+  table. Without them a restart re-crawls for 1-2 minutes before the accelerated
+  client is ready, serving through the standard client meanwhile, and the
+  address book takes about an hour of real traffic to refill - idle time refills
+  nothing.
 - **Memory.** The libp2p resource manager defaults to 85% of *host* RAM,
   ignoring the pod limit. It is capped explicitly at 16 GiB per instance, below
   the 21 GiB container limit, with `GOMEMLIMIT=20GiB`.
@@ -254,6 +256,33 @@ outage - Envoy ejects whichever instance is down and serves from the other
 three - but it does not avoid the degradation: by the time the last instance
 rolls, all three still up were themselves restarted within the previous few
 minutes, so the box answers everything and answers it slowly for about an hour.
+
+**What the snapshots change.** Both halves of the state a restart used to throw
+away now survive it on the instance's own PVC: the cached address book
+(`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`, deployed) and the accelerated
+client's routing table (`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`, written into
+`k8s/someguy/kustomization.yaml` but commented out until the fork image is
+pinned). With both, a restarted instance comes back in seconds with a full
+address book and a replayed routing table, serving from the accelerated client
+immediately while a fresh crawl runs behind it, instead of an hour of
+degradation. That makes the break-glass row above the normal way to roll rather
+than the exception - but only once a restart on this fleet is *observed* to come
+up warm, which nothing has measured yet, so the warm gate is still in place
+unchanged. Per instance, within 30s of a restart:
+
+- `someguy_dht_accelerated_ready` - `1` when the accelerated client is serving.
+  **This is the one to gate on.**
+- `someguy_cached_addr_book_snapshot_restored_peers` - peers the address book
+  restore put back.
+- `someguy_dht_crawl_snapshot_restored_peers` - peers the crawl replay reported.
+  Not a readiness signal on its own: it counts what the replay reported before
+  someguy's routing table filter decides what to keep, so on an image without
+  the kad-dht fork it reads 15k+ while the table is empty and the client is not
+  ready.
+
+`someguy_dht_crawl_snapshot_last_success_timestamp_seconds` advancing a few
+minutes after the restart is the post-replay crawl finishing and re-saving,
+which is what keeps the next restart warm.
 
 ```bash
 # break glass: one instance at a time, no warm-up wait (~6 min/box)

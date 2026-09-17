@@ -92,6 +92,29 @@ configMapGenerator:
       # fork image (see the images block above); inert on the upstream one.
       - SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=15m
 
+      # Snapshot the accelerated client's routing table to the same volume, as
+      # dht-crawl.ndjson (10k-25k peers with their public addresses, a few MB),
+      # and replay it at start when the file is younger than this. It is
+      # written after every completed crawl and at no other time - not on a
+      # timer, not at shutdown - because the table only changes when a crawl
+      # completes. A replay triggers a fresh crawl the moment the replayed
+      # table is in place, so the table is stale only by the last crawl plus
+      # the downtime. A file older than the max age is ignored, not deleted;
+      # the next completed crawl overwrites it.
+      #
+      # 2h: past two crawl intervals of drift, crawling from cold is the safer
+      # start than replaying a table that has moved on.
+      #
+      # Commented out until the digest above moves to the fork image, which
+      # has to carry BOTH the snapshot code and the kad-dht fork someguy pins
+      # for fullrt.WithRouteTableFilter. Enabling it against an image without
+      # that fork is not merely inert: the replay runs and reports its peers,
+      # fullrt's default filter drops every one of them for having no open
+      # connection, and the instance comes up with an EMPTY routing table
+      # while someguy_dht_crawl_snapshot_restored_peers reads 15k+. Gate on
+      # someguy_dht_accelerated_ready, never on that gauge.
+      # - SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h
+
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 21Gi and get
       # OOM-killed. 16 GiB, in bytes: a quarter of the 64 GiB the single

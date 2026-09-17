@@ -59,16 +59,23 @@ someguy_rollout_timeout: 600s
 # ---------------------------------------------------------------------------
 # Rollout safety
 # ---------------------------------------------------------------------------
-# Once the fork image is deployed and a snapshot exists, the cached address
-# book is restored from its per-instance PVC at start, so a restart is cold
-# only for the accelerated DHT client's routing table, which is rebuilt only
-# by serving traffic. Until then - and on the first rollout after either
-# lands - a restart is cold for the address book as well, at the cost
-# described below. With four instances only the one being rolled is cold, and
-# Envoy keeps traffic on the other three, so a rollout costs a quarter of the
-# box's capacity instead of all of it. The warm gate below is satisfied by the
-# restore and stays as the safety net for a lost or stale snapshot - which
-# rebuilds cold, the way these measurements describe:
+# Both halves of what a restart used to throw away are snapshotted to the
+# instance's own PVC once the fork image is deployed: the cached address book,
+# which otherwise takes about an hour of real traffic to refill, and the
+# accelerated DHT client's routing table, which otherwise takes a full crawl -
+# minutes - during which every lookup falls back to the standard client. A
+# restart with both files present is warm in seconds and serves from the
+# accelerated client immediately, on a replayed table, while a fresh crawl runs
+# behind it; the only genuinely cold window left is that crawl, and lookups do
+# not wait on it.
+#
+# It is still cold the old way whenever a snapshot is missing or too old: the
+# first rollout after either lands, a lost PVC, or an instance down longer than
+# the crawl snapshot's max age. With four instances only the one being rolled is
+# affected, and Envoy keeps traffic on the other three, so a rollout costs a
+# quarter of the box's capacity rather than all of it. The warm gate below is
+# satisfied immediately by the address book restore and stays as the safety net
+# for those cold starts - which rebuild the way these measurements describe:
 #
 #   11 minutes after a restart:  p95 2904ms, 2937 rejected FindPeer lookups,
 #                                3x the CPU of a warm box
