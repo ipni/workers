@@ -28,7 +28,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ansible-core ansible-lint yamllint
-          ansible-galaxy collection install community.general ansible.posix
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
 
       # ansible.cfg points vault at .vault_pass, a gitignored credential that
       # does not exist in CI. Nothing here encrypts or decrypts, so a
@@ -53,6 +53,11 @@ jobs:
 
   manifests:
     runs-on: ubuntu-latest
+    # ansible.cfg sets stdout_callback to yaml, which no installed collection
+    # provides here. A syntax-check never loads stdout callbacks, but this job
+    # runs a playbook, so CI renders with the built-in callback instead.
+    env:
+      ANSIBLE_STDOUT_CALLBACK: default
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
