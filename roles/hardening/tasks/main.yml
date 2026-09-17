@@ -121,9 +121,11 @@
       - fail2ban
     state: present
 
-- name: Set ufw default policies
+- name: Set ufw default policies  # noqa args[module]
   community.general.ufw:
     direction: "{{ item.direction }}"
+    # The loop items only ever use allow/deny; the rule cannot see through the
+    # variable.
     policy: "{{ item.policy }}"
   loop:
     - { direction: incoming, policy: deny }

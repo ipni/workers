@@ -45,8 +45,8 @@ someguy_all_instances:
   - { name: someguy-c, api: 8192, libp2p: 4006 }
   - { name: someguy-d, api: 8193, libp2p: 4007 }
 
-someguy_running_instances: "{{ someguy_all_instances[:someguy_instances | int] }}"
-someguy_retired_instances: "{{ someguy_all_instances[someguy_instances | int:] }}"
+someguy_running_instances: "{{ someguy_all_instances[: someguy_instances | int] }}"
+someguy_retired_instances: "{{ someguy_all_instances[someguy_instances | int :] }}"
 
 # Instance a, the one k8s/someguy/deployment.yaml.j2 renders. Named rather than
 # indexed inline so the template reads as "the first instance" instead of

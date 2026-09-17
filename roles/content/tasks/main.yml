@@ -496,7 +496,7 @@
     # source: upstream-cluster content is not re-resolvable: the recorded CID is
     # the only copy that exists. Say so now, by name. The run continues with the
     # other entries and fails at the end (content.yml summary).
-    - name: Fail loudly for upstream-cluster roots that cannot be found
+    - name: Fail loudly for upstream-cluster roots that cannot be found  # noqa ignore-errors
       ansible.builtin.fail:
         msg: >-
           UNRETRIEVABLE {{ item.name }}: root {{ item.cid }} was not found on the
@@ -544,7 +544,7 @@
       timeout: "{{ content_pin_timeout | int + 60 }}"
       when: item.stdout | trim | int <= gate_bytes | int
 
-    - name: Fail loudly for upstream-cluster content that could not be fetched
+    - name: Fail loudly for upstream-cluster content that could not be fetched  # noqa ignore-errors
       ansible.builtin.fail:
         msg: >-
           UNRETRIEVABLE {{ item.name }}: the DAG under {{ item.cid }} could not be

@@ -274,7 +274,7 @@
 # Verification, on the box: the right certificate is served, allowlisted
 # paths reach someguy, and everything else (notably /debug/) does not.
 # ---------------------------------------------------------------------------
-- name: Read the certificate Envoy is actually serving
+- name: Read the certificate Envoy is actually serving  # noqa risky-shell-pipe
   ansible.builtin.shell:
     # No pipefail on purpose: with AOP enforced this client presents no
     # certificate, so s_client exits non-zero once Envoy aborts the handshake.

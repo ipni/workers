@@ -9,6 +9,8 @@ exclude_paths:
   - reviews/
   - tasks/
   - scripts/wss-check/node_modules/
+  # Gitignored encrypted credentials; only the operators' machines have them.
+  - vault.yml
 
 skip_list:
   # Long lines are mostly kubectl/ipfs-cluster-ctl argv lists, which are
@@ -23,3 +25,13 @@ skip_list:
   # Task names are written as sentences ("Fail unless ..."), which reads
   # better in output than the enforced casing.
   - name[casing]
+  # ...and as sentences with templates in them ("Ship the {{ kustomize_app }}
+  # kustomization"), which reads better than pushing the templates to the end.
+  - name[template]
+  # No play sets `strategy: free`, so the behaviour the rule warns about does
+  # not occur; the tasks (fleet-wide waits, the upgrade gate) run once on purpose.
+  - run-once
+  # The restart-wait and reload tasks are sequenced on purpose: the play's
+  # verification depends on them having completed, and a handler - notified,
+  # then run at the end of the play - would run after the verification.
+  - no-handler
