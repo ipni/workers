@@ -62,9 +62,12 @@
           - server
       changed_when: true
 
-    - name: Download the k3s installer
-      ansible.builtin.get_url:
-        url: https://get.k3s.io
+    # The same vendored installer the initial install uses (see main.yml);
+    # force, so every hop takes it from the repo rather than trusting what
+    # /root happens to hold.
+    - name: Install the k3s installer
+      ansible.builtin.copy:
+        src: k3s-install.sh
         dest: /root/k3s-install.sh
         mode: "0700"
         owner: root

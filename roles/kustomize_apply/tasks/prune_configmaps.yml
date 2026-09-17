@@ -9,6 +9,16 @@
 # have several (someguy runs four), and each names the ConfigMap it uses. The
 # union can only ever protect more ConfigMaps than it should, never fewer.
 #
+# The reference scan is deliberately narrow: Deployment volumes[].configMap
+# and container envFrom configMapRef only. It does not see initContainer
+# envFrom, env[].valueFrom.configMapRef, projected volumes, or non-Deployment
+# workloads. Every manifest in this fleet references ConfigMaps only through
+# those two forms, so the scan is complete for them. If a manifest ever
+# consumes a ConfigMap any other way, widen the jsonpath in the same change:
+# the "no Deployment references anything" guard below only catches the case
+# where the new form is the ONLY reference, not one alongside the scanned
+# forms.
+#
 # Included by main.yml at the end of an apply, or later by the including role
 # when the prune has to wait for a serial rollout to finish - see the comment
 # there.

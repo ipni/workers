@@ -153,9 +153,14 @@
       secrets-encryption: true
   register: k3s_config
 
-- name: Download the k3s installer
-  ansible.builtin.get_url:
-    url: https://get.k3s.io
+# Vendored from https://get.k3s.io on 2026-09-16 (sha256
+# e5cc3b3d9dfc1662c2d9be6da5abc9a4cd317d6abc3a5ffc02e3dd3248207fee), so an
+# install never depends on what get.k3s.io serves at deploy time. The binary
+# is still pinned by INSTALL_K3S_VERSION; to move the installer, re-fetch it
+# and review the diff as a normal change.
+- name: Install the k3s installer
+  ansible.builtin.copy:
+    src: k3s-install.sh
     dest: /root/k3s-install.sh
     mode: "0700"
     owner: root
