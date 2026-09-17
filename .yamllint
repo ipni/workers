@@ -6,7 +6,9 @@ ignore: |
   facts_cache/
   kubeconfigs/
   reviews/
-  tasks/
+  # The leading slash anchors this to the repo-root `tasks/` directory, so
+  # `roles/*/tasks/` is not excluded with it.
+  /tasks/
   scripts/wss-check/node_modules/
   # Vendored upstream release manifest, pinned by the sha256 in its
   # kustomization; it must never be reformatted.

@@ -7,7 +7,9 @@ exclude_paths:
   - facts_cache/
   - kubeconfigs/
   - reviews/
-  - tasks/
+  # The leading slash anchors this to the repo-root `tasks/` directory, so
+  # `roles/*/tasks/` is not excluded with it.
+  - /tasks/
   - scripts/wss-check/node_modules/
   # Gitignored encrypted credentials; only the operators' machines have them.
   - vault.yml
