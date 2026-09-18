@@ -184,8 +184,17 @@ Manifests live in `k8s/someguy/` (kustomize, same conventions as
 `storetheindex/deploy`). The role opens the libp2p port, ships the manifests,
 applies them, waits for the rollout and checks `/version` on the box.
 
-**Version:** v0.16.0, pinned by image digest in `k8s/someguy/kustomization.yaml`.
-To upgrade, change the digest.
+**Version:** `ghcr.io/ipni/someguy:v0.16.0-ipni.1`, pinned by index digest in
+`k8s/someguy/kustomization.yaml`. To upgrade, change the digest.
+
+That is IPNI's fork of someguy, not upstream `ghcr.io/ipfs/someguy`. It is
+upstream v0.16.0 plus eight changes measured on this fleet - pprof, per-router
+timing metrics, the cached address book snapshot, the negative TTL with
+singleflight, the DHT tail budget, the DHT crawl snapshot, the
+accelerated-ready gauge, and the FindPeer grace and dial timeout - and is built
+against `github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2`. Each change is off
+unless the matching `SOMEGUY_*` variable in the kustomization turns it on. See
+that repo's `FORK.md` for what the kad-dht fork carries and why.
 
 **Design points, and why**
 
@@ -471,10 +480,10 @@ request at a time.
 - **Latency includes your path to Cloudflare**, the same for every endpoint.
   Box-to-box differences partly reflect where you ran it from.
 
-**Do not compare within an hour of a someguy restart.** someguy keeps no state,
-so a restart starts from an empty DHT routing table and an empty address book,
-and both are rebuilt only by serving traffic. Until they are, our counts and
-latencies are understated. Measured on sing-1 at 200 req/s after a restart:
+**A restart no longer costs an hour.** It used to: someguy kept no state, so a
+restart began with an empty DHT routing table and an empty address book, both
+rebuilt only by serving traffic, and until they were our counts and latencies
+were understated. That is what this table recorded, on sing-1 at 200 req/s:
 
 | Age | p50 | Address-book hit rate | someguy CPU per 30s |
 |-----|-----|-----------------------|---------------------|
@@ -484,9 +493,22 @@ latencies are understated. Measured on sing-1 at 200 req/s after a restart:
 | 62 min | 2194ms | 69% | 104s |
 
 chic-1 was indistinguishable from its 23-hour state by 69 minutes (p95 588ms,
-no rejected lookups, warm CPU). Check the pod's age first
-(`kubectl -n someguy get pods`), and use `--out` to track how results change
-as the table warms.
+no rejected lookups, warm CPU).
+
+Since `v0.16.0-ipni.1` both halves of that state survive a restart on the
+instance's own PVC - the address book every 15 minutes, the crawled routing
+table after every completed crawl - so a restarted instance restores both and
+serves properly in seconds. Re-measured on sing-1 at 200 req/s, same conditions:
+
+| Age | p50 | p95 | `someguy_cached_addr_book_peer_state_size` |
+|-----|-----|-----|--------------------------------------------|
+| 2 min | _measured 2026-09-18_ | | |
+| 15 min | _measured 2026-09-18_ | | |
+
+Check the pod's age first (`kubectl -n someguy get pods`) and use `--out` to
+track how results change, but the hour-long embargo above no longer applies to
+an instance that restored its snapshots - `someguy_dht_accelerated_ready` at `1`
+with both `*_snapshot_restored_peers` gauges non-zero is the thing to confirm.
 
 ### Capacity: four someguy instances per box
 
@@ -518,13 +540,17 @@ round-robining across them. Each is a separate process with its own PeerID,
 concurrency budget and connection pool. Measured on sing-1, 2026-09-16, warm,
 fixture mix through Cloudflare, zero HTTP errors at every stage:
 
-| Target | 1 instance | 2 instances | 4 instances |
-|--------|-----------|-------------|-------------|
-| 200/s | 182/s, p50 2208ms | 194/s, p50 317ms | 198/s, p50 190ms |
-| 400/s | 352/s, p50 5014ms | 361/s, p50 2154ms | 389/s, p50 217ms |
-| 600/s | not reached | 530/s, p50 4489ms | 574/s, p50 467ms |
-| 850/s | not reached | not reached | 775/s, p50 1964ms |
-| 1000/s | - | - | **894/s**, p50 3044ms |
+| Target | 1 instance | 2 instances | 4 instances | 4 instances (final) |
+|--------|-----------|-------------|-------------|---------------------|
+| 200/s | 182/s, p50 2208ms | 194/s, p50 317ms | 198/s, p50 190ms | _measured 2026-09-18_ |
+| 400/s | 352/s, p50 5014ms | 361/s, p50 2154ms | 389/s, p50 217ms | _measured 2026-09-18_ |
+| 600/s | not reached | 530/s, p50 4489ms | 574/s, p50 467ms | _measured 2026-09-18_ |
+| 850/s | not reached | not reached | 775/s, p50 1964ms | _measured 2026-09-18_ |
+| 1000/s | - | - | **894/s**, p50 3044ms | _measured 2026-09-18_ |
+
+The final column is `v0.16.0-ipni.1` with every feature on, taken from the
+sing-1 column of the fleet run below rather than re-run on its own; 1 and 2
+instances were not re-measured, since the instance count is not what changed.
 
 **Why it works.** A single instance was throwing away 23,156 background
 FindPeer lookups per 30s stage at 400 req/s - its in-process concurrency budget
@@ -572,6 +598,28 @@ against its own hostname through Cloudflare, after 75 minutes of warm-up at
 Zero HTTP errors anywhere, zero rejected lookups on all twelve instances, no
 pod restarts. **2873 req/s is 6.8x the 424 req/s that 1.1B requests/month
 implies**, and every box was still inside the 1000 req/s rate limit.
+
+**The same run on `v0.16.0-ipni.1`**, every feature on, under the conditions
+above with one difference: no warm-up wait, because with the snapshots restored
+none is needed. p95 is recorded this time; the 2026-09-16 rows above have p50
+only.
+
+| Target/box | sing-1 | lith-1 | chic-1 | fleet |
+|-----------|--------|--------|--------|-------|
+| 200/s | _measured 2026-09-18_ | | | |
+| 400/s | _measured 2026-09-18_ | | | |
+| 600/s | _measured 2026-09-18_ | | | |
+| 850/s | _measured 2026-09-18_ | | | |
+| 1000/s | _measured 2026-09-18_ | | | |
+
+**Continuity with the profiling series.** One point on the final build under the
+conditions the September profiling runs used - sing-1, direct to `127.0.0.1:8190`
+rather than through Cloudflare, the cid.contact replay fixture, 350 req/s for
+60s with `--workers 4096`:
+
+| Build | p50 | p95 | providers over 4.5s | peers over 4.5s |
+|-------|-----|-----|---------------------|-----------------|
+| v0.16.0-ipni.1 | _measured 2026-09-18_ | | | |
 
 **Four instances helped the two "healthy" boxes most of all.** Compare the
 single-instance table above at the same rate: lith-1 went from p50 4078ms to

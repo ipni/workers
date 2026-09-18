@@ -59,20 +59,30 @@ someguy_rollout_timeout: 600s
 # ---------------------------------------------------------------------------
 # Rollout safety
 # ---------------------------------------------------------------------------
-# Once the fork image is deployed and a snapshot exists, the cached address
-# book is restored from its per-instance PVC at start, so a restart is cold
-# only for the accelerated DHT client's routing table, which is rebuilt only
-# by serving traffic. Until then - and on the first rollout after either
-# lands - a restart is cold for the address book as well, at the cost
-# described below. With four instances only the one being rolled is cold, and
-# Envoy keeps traffic on the other three, so a rollout costs a quarter of the
-# box's capacity instead of all of it. The warm gate below is satisfied by the
-# restore and stays as the safety net for a lost or stale snapshot - which
-# rebuilds cold, the way these measurements describe:
+# BOTH halves of the state a restart used to throw away now survive it, on the
+# instance's own PVC:
+#
+#   * the cached address book (SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL),
+#     written every 15 minutes and on a clean shutdown, restored at start;
+#   * the accelerated DHT client's crawled routing table
+#     (SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE), written after every completed crawl
+#     and replayed at start when it is younger than 2h, with a real crawl
+#     triggered the moment the replayed table is in place.
+#
+# With both restored an instance is serving properly in seconds rather than
+# after an hour, so roles/someguy/tasks/wait_warm.yml skips its poll when both
+# restored gauges are non-zero and polls as before when they are not. The poll
+# is still the fallback that matters: a first rollout onto a box that has never
+# written a snapshot, a snapshot older than the max age, or a lost PVC all
+# rebuild cold, the way these measurements describe:
 #
 #   11 minutes after a restart:  p95 2904ms, 2937 rejected FindPeer lookups,
 #                                3x the CPU of a warm box
 #   69 minutes after a restart:  p95 588-691ms, 0 rejections, warm-box CPU
+#
+# With four instances only the one being rolled is affected either way, and
+# Envoy keeps traffic on the other three, so a rollout costs a quarter of the
+# box's capacity rather than all of it.
 #
 # `serial` alone does not protect against this. A pod goes Ready in about a
 # minute, so a serial rollout would still leave every box degraded at once.

@@ -28,13 +28,27 @@ labels:
       app.kubernetes.io/part-of: ipfs-workers
 
 # Pinned by digest so every box runs byte-identical images and a re-pushed tag
-# cannot change what is deployed. This digest is v0.16.0 (2026-07-29), a
-# multi-arch index covering amd64. Once the snapshot flag is tagged, the digest
-# must move to ghcr.io/ipni/someguy (the fork that carries it).
+# cannot change what is deployed. This is the index digest of
+# ghcr.io/ipni/someguy:v0.16.0-ipni.1 (2026-09-18), a multi-arch index covering
+# amd64, arm/v7 and arm64; the amd64 manifest these boxes run is
+# sha256:32e6f3f66c8468a80776d22dff8b313059c62cef72a499aae88f778389356138.
+#
+# ghcr.io/ipni is IPNI's fork of ipfs/someguy, not a re-tag of upstream. The
+# build carries eight things upstream v0.16.0 does not: pprof endpoints, the
+# per-router timing metrics, the cached address book snapshot, the negative TTL
+# with singleflight, the DHT tail budget, the DHT crawl snapshot, the
+# accelerated-ready gauge, and the FindPeer grace and dial timeout. Every one is
+# off unless the matching variable below turns it on.
+#
+# It is built against github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2, which is
+# what makes the crawl snapshot work at all: fullrt's default route table filter
+# keeps a peer only while the host has an open connection to it, so a replayed
+# peer, deliberately never dialled, would otherwise be dropped and the table
+# would come up empty. See that fork's FORK.md.
 images:
   - name: someguy
-    newName: ghcr.io/ipfs/someguy
-    digest: sha256:efb3817e099fe4983ec35ee1ea51e8441474b95cf0af8df4943b8468e87b921e
+    newName: ghcr.io/ipni/someguy
+    digest: sha256:723094f7dedc9899b6cd15893a363f36b66a888870005a1c6c23839ef33e3526
 
 configMapGenerator:
   - name: someguy-env-vars
@@ -88,9 +102,41 @@ configMapGenerator:
 
       # Snapshot the address book to the volume every 15 minutes, plus once on
       # a clean shutdown. The periodic write is the guarantee: an OOM kill
-      # skips shutdown, so the interval bounds what a crash can lose. Needs the
-      # fork image (see the images block above); inert on the upstream one.
+      # skips shutdown, so the interval bounds what a crash can lose.
       - SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=15m
+
+      # Answer /routing/v1/peers as not-found from a recorded earlier failure
+      # instead of repeating a full-timeout DHT walk. Measured on sing-1: four
+      # peer IDs were 69.5% of peers traffic at 5,000ms medians; with this and
+      # the always-on singleflight they run at 0.2ms, and goroutines under load
+      # fell from 28,558 to 15,081. The trade-off is staleness in one direction
+      # only: a peer that comes online is invisible on that instance for up to
+      # 1m, which is one client retry cycle.
+      - SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL=1m
+
+      # Once every non-DHT router in a request has finished, give the DHT this
+      # much longer and then cancel it, so one slow DHT walk stops holding the
+      # whole response open. Requests the DHT alone is serving are never cut.
+      # The trade-off is recall, and it is small and measured: 2% of the
+      # providers that only the DHT would have found, 0.4% of all exclusive
+      # records.
+      - SOMEGUY_DHT_TAIL_BUDGET=500ms
+
+      # Persist the accelerated client's crawled routing table to the volume
+      # after every completed crawl, and replay it at startup when the file is
+      # younger than this. Measured on sing-1: the accelerated client was
+      # serving 11.4s after a restart, against a 95-164s cold crawl. The
+      # trade-off is staleness: a table older than two crawl intervals has
+      # drifted enough that crawling from cold is the safer start, so past 2h
+      # the file is ignored and the instance crawls as it always did.
+      - SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h
+
+      # Go pprof endpoints on the API address. That address is loopback-only
+      # (see SOMEGUY_LISTEN_ADDRESS above), so this is exactly the exposure the
+      # metrics endpoint already has, and the profiles are how every number in
+      # this file was measured. It also turns on mutex and block sampling,
+      # which is the only reason the per-peer lock contention was ever visible.
+      - SOMEGUY_PPROF=true
 
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 21Gi and get
@@ -102,6 +148,17 @@ configMapGenerator:
       # harder before the kernel OOM-kills the pod. Each instance actually
       # holds about 1.5 GiB under load; this is headroom, not a forecast.
       - GOMEMLIMIT=20GiB
+
+      # Four instances share 32 cores, so let each plan for its quarter rather
+      # than for the whole box. Without it every instance sizes its runtime for
+      # 32 cores and they collectively oversubscribe under load.
+      - GOMAXPROCS=8
+
+      # The default GOGC=100 collects every time the heap doubles, which on a
+      # ~1.5 GiB working set is often and costs CPU that request handling wants.
+      # 400 trades heap for that CPU, and GOMEMLIMIT above is the backstop that
+      # makes the trade safe: the heap cannot run away to the container limit.
+      - GOGC=400
 
       - GOLOG_LOG_LEVEL=error,someguy=info
       - GOLOG_LOG_FMT=json
