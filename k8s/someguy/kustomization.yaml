@@ -44,10 +44,18 @@ labels:
 #     sha256:09e1c4f7bc96ebeb2c71d9bde2052f0de0c37ed884ae28815efed5d159ae90d9
 #     on every box it was imported to. That digest is the per-box check.
 #
-# IMPORTED ON: sing-1 only (2026-09-17). lith-1 and chic-1 still run upstream
-# v0.16.0 (2026-07-29,
-# sha256:efb3817e099fe4983ec35ee1ea51e8441474b95cf0af8df4943b8468e87b921e), so
-# the fleet is deliberately mixed while this is verified.
+# IMPORTED ON: sing-1 only (2026-09-17), so the fleet is deliberately mixed
+# while this is verified.
+#
+# The other two boxes are NOT on the v0.16.0 digest this block used to pin, and
+# were not put there by this repo: lith-1 and chic-1 are both serving
+# ghcr.io/ipni/someguy:snapshot-test (by tag, not digest), which reports
+# `v0.16.0 2026-09-16-7fa75e8`. That build carries the cached ADDRESS BOOK
+# snapshot but not the DHT crawl snapshot - it exports no someguy_dht_crawl_*
+# metrics and no someguy_dht_accelerated_ready - and their live ConfigMap sets
+# SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=2m against the 15m below. Treat
+# those boxes as drifted from this repo and reconcile them deliberately;
+# re-pinning them is not part of this change.
 #
 # Therefore: deploy with `-l <box>`, only to a box the image was imported to,
 # and import BEFORE applying this. A box without the import cannot pull

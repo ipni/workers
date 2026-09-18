@@ -190,7 +190,15 @@ verified.
 | Box | Image | How it is pinned |
 |---|---|---|
 | sing-1 | local build `someguy:dht-crawl-snapshot-20260917` | not pinned - see below |
-| lith-1, chic-1 | `ghcr.io/ipfs/someguy` v0.16.0 (2026-07-29) | image digest |
+| lith-1, chic-1 | `ghcr.io/ipni/someguy:snapshot-test` (reports `v0.16.0 2026-09-16-7fa75e8`) | by tag - **drifted, see below** |
+
+Note that **neither** box is on the `ghcr.io/ipfs/someguy` v0.16.0 digest that
+`k8s/someguy/kustomization.yaml` used to pin. lith-1 and chic-1 are serving a
+fork build by tag that carries the cached address book snapshot but *not* the
+DHT crawl snapshot (no `someguy_dht_crawl_*` metrics, no
+`someguy_dht_accelerated_ready`), and their live ConfigMap sets
+`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=2m` where this repo says `15m`. That
+drift predates this change and reconciling it is its own job.
 
 sing-1 runs a **locally built, unpublished** image from the someguy fork branch
 `claude/dht-crawl-snapshot-htnvck`, which carries the DHT crawl snapshot and the
@@ -288,8 +296,8 @@ minutes, so the box answers everything and answers it slowly for about an hour.
 away now survive it on the instance's own PVC: the cached address book
 (`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`) and the accelerated client's
 routing table (`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`). Both are live on sing-1,
-which runs the local fork image; lith-1 and chic-1 still run upstream v0.16.0
-and have only the address book.
+which runs the local fork image; lith-1 and chic-1 run a build that has the
+address book snapshot only (see "Version" above).
 
 **Measured on sing-1, 2026-09-18**, restarting all four instances together on
 the fork image. Timings are from the `rollout restart` being issued:
