@@ -502,8 +502,16 @@ serves properly in seconds. Re-measured on sing-1 at 200 req/s, same conditions:
 
 | Age | p50 | p95 | `someguy_cached_addr_book_peer_state_size` |
 |-----|-----|-----|--------------------------------------------|
-| 2 min | _measured 2026-09-18_ | | |
-| 15 min | _measured 2026-09-18_ | | |
+| 2 min | **262ms** | 559ms | 25,729 |
+| 15 min | **203ms** | 485ms | 27,233 |
+
+Measured 2026-09-18 on `ghcr.io/ipni/someguy:v0.16.0-ipni.1`, all four instances
+restarted together at 04:03:31Z, each stage
+`./scripts/routing-rate-test.sh --url-base https://route-sing-1.ipni.io --rates 200
+--stage-seconds 30 --workload fixtures --workers 12288`, run on the box. 198.4/s
+and 198.6/s achieved, 0% errors, 0 rejected lookups at both ages. The old table's
+15-minute row is 5002ms; this one is **203ms**, and the 2-minute row did not
+exist before because at two minutes the box was unusable.
 
 Check the pod's age first (`kubectl -n someguy get pods`) and use `--out` to
 track how results change, but the hour-long embargo above no longer applies to
@@ -542,11 +550,11 @@ fixture mix through Cloudflare, zero HTTP errors at every stage:
 
 | Target | 1 instance | 2 instances | 4 instances | 4 instances (final) |
 |--------|-----------|-------------|-------------|---------------------|
-| 200/s | 182/s, p50 2208ms | 194/s, p50 317ms | 198/s, p50 190ms | _measured 2026-09-18_ |
-| 400/s | 352/s, p50 5014ms | 361/s, p50 2154ms | 389/s, p50 217ms | _measured 2026-09-18_ |
-| 600/s | not reached | 530/s, p50 4489ms | 574/s, p50 467ms | _measured 2026-09-18_ |
-| 850/s | not reached | not reached | 775/s, p50 1964ms | _measured 2026-09-18_ |
-| 1000/s | - | - | **894/s**, p50 3044ms | _measured 2026-09-18_ |
+| 200/s | 182/s, p50 2208ms | 194/s, p50 317ms | 198/s, p50 190ms | 198.7/s, p50 197ms |
+| 400/s | 352/s, p50 5014ms | 361/s, p50 2154ms | 389/s, p50 217ms | 396.3/s, p50 207ms |
+| 600/s | not reached | 530/s, p50 4489ms | 574/s, p50 467ms | 593.9/s, p50 296ms |
+| 850/s | not reached | not reached | 775/s, p50 1964ms | 830.2/s, p50 479ms |
+| 1000/s | - | - | **894/s**, p50 3044ms | 970.9/s, p50 514ms |
 
 The final column is `v0.16.0-ipni.1` with every feature on, taken from the
 sing-1 column of the fleet run below rather than re-run on its own; 1 and 2
@@ -606,11 +614,21 @@ only.
 
 | Target/box | sing-1 | lith-1 | chic-1 | fleet |
 |-----------|--------|--------|--------|-------|
-| 200/s | _measured 2026-09-18_ | | | |
-| 400/s | _measured 2026-09-18_ | | | |
-| 600/s | _measured 2026-09-18_ | | | |
-| 850/s | _measured 2026-09-18_ | | | |
-| 1000/s | _measured 2026-09-18_ | | | |
+| 200/s | 198.7/s, p50 197ms, p95 409ms | 199.2/s, p50 125ms, p95 235ms | 199.3/s, p50 112ms, p95 147ms | 597/s |
+| 400/s | 396.3/s, p50 207ms, p95 528ms | 398.5/s, p50 112ms, p95 185ms | 399.1/s, p50 60ms, p95 148ms | 1194/s |
+| 600/s | 593.9/s, p50 296ms, p95 727ms | 598.3/s, p50 106ms, p95 182ms | 598.7/s, p50 42ms, p95 163ms | 1791/s |
+| 850/s | 830.2/s, p50 479ms, p95 3027ms | 846.5/s, p50 102ms, p95 181ms | 847.5/s, p50 41ms, p95 262ms | 2524/s |
+| 1000/s | 970.9/s, p50 514ms, p95 4524ms | 996.6/s, p50 103ms, p95 246ms | 996.0/s, p50 41ms, p95 481ms | **2964/s** |
+
+Measured 2026-09-18 on `ghcr.io/ipni/someguy:v0.16.0-ipni.1`, all three boxes
+driven at the same time, each on its own box:
+`./scripts/routing-rate-test.sh --url-base https://route-<box>.ipni.io --rates
+200,400,600,850,1000 --stage-seconds 30 --workload fixtures --workers 12288`.
+**Zero HTTP errors at every stage on every box, zero rejected lookups, no pod
+restarts.** 2964 req/s against 2873 on 2026-09-16, with no warm-up at all
+against 75 minutes of it - and sing-1 now holds 830/s at the 850 target where it
+held 771/s before. A repeat run minutes earlier gave 597/1194/1790/2523/2964,
+so these are stable to about 0.1%.
 
 **Continuity with the profiling series.** One point on the final build under the
 conditions the September profiling runs used - sing-1, direct to `127.0.0.1:8190`
@@ -619,7 +637,14 @@ rather than through Cloudflare, the cid.contact replay fixture, 350 req/s for
 
 | Build | p50 | p95 | providers over 4.5s | peers over 4.5s |
 |-------|-----|-----|---------------------|-----------------|
-| v0.16.0-ipni.1 | _measured 2026-09-18_ | | | |
+| v0.16.0-ipni.1 | **259ms** | 836ms | **0** of 13,958 | **0** of 7,001 |
+
+Measured 2026-09-18: `./scripts/routing-rate-test.sh --url-base
+http://127.0.0.1:8190 --rates 350 --stage-seconds 60 --workers 4096 --workload
+fixtures --fixtures /data/fixtures/replay.txt --per-request ...`, 348.6/s
+achieved, 0% errors, 0 rejected lookups. The 4.5s counts come from the
+`--per-request` TSV: **not one request of 21,000 crossed 4.5s**, on any op, where
+the September profiling runs had lookups sitting on the 5s `timeoutPerOp` wall.
 
 **Four instances helped the two "healthy" boxes most of all.** Compare the
 single-instance table above at the same rate: lith-1 went from p50 4078ms to
