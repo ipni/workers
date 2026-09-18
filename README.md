@@ -608,9 +608,9 @@ pod restarts. **2873 req/s is 6.8x the 424 req/s that 1.1B requests/month
 implies**, and every box was still inside the 1000 req/s rate limit.
 
 **The same run on `v0.16.0-ipni.1`**, every feature on, under the conditions
-above with one difference: no warm-up wait, because with the snapshots restored
-none is needed. p95 is recorded this time; the 2026-09-16 rows above have p50
-only.
+above except for the warm-up, which was 19-27 minutes of uptime with light
+traffic rather than 75 minutes at 60 req/s. p95 is recorded this time; the
+2026-09-16 rows above have p50 only.
 
 | Target/box | sing-1 | lith-1 | chic-1 | fleet |
 |-----------|--------|--------|--------|-------|
@@ -624,11 +624,28 @@ Measured 2026-09-18 on `ghcr.io/ipni/someguy:v0.16.0-ipni.1`, all three boxes
 driven at the same time, each on its own box:
 `./scripts/routing-rate-test.sh --url-base https://route-<box>.ipni.io --rates
 200,400,600,850,1000 --stage-seconds 30 --workload fixtures --workers 12288`.
-**Zero HTTP errors at every stage on every box, zero rejected lookups, no pod
-restarts.** 2964 req/s against 2873 on 2026-09-16, with no warm-up at all
-against 75 minutes of it - and sing-1 now holds 830/s at the 850 target where it
-held 771/s before. A repeat run minutes earlier gave 597/1194/1790/2523/2964,
-so these are stable to about 0.1%.
+Zero HTTP errors at every stage on every box, zero rejected lookups, no pod
+restarts. A repeat run minutes earlier gave 597/1194/1790/2523/2964, so these are
+stable to about 0.1%.
+
+**This is not a capacity measurement, and neither was the 2026-09-16 one.** Both
+stop at 1000/s per box because that is where Envoy's lookup bucket is set
+(`max_tokens: 2000, tokens_per_fill: 1000, fill_interval: 1s` in
+`k8s/route-origin/envoy.yaml.j2`). lith-1 and chic-1 served all 30,000 requests
+of the top rung with **zero 429s**, p50 103ms and 41ms, on about 6-7% of the
+box's CPU - they were nowhere near their limit, they were at ours. The fleet
+total is therefore roughly three times the rate limit, in both runs, and
+2873 -> 2964 says almost nothing about capacity.
+
+The one box that reveals anything is **sing-1**, the only one that could not
+reach the ceiling: 894/s -> 971/s achieved, and p50 at the 1000/s target
+3044ms -> 514ms. That difference is real, and it is the only throughput claim
+these runs support. Measuring actual fleet capacity needs the bucket raised and
+the ladder driven until boxes saturate, which has not been done.
+
+Warm-up also differs, in the baseline's favour: the 2026-09-16 run had 75 minutes
+of sustained 60 req/s beforehand, while these boxes had 19-27 minutes of uptime
+and only light, intermittent traffic.
 
 **Continuity with the profiling series.** One point on the final build under the
 conditions the September profiling runs used - sing-1, direct to `127.0.0.1:8190`
