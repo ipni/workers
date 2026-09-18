@@ -22,7 +22,7 @@ spec:
       # would DNAT the traffic into FORWARD, where kube-proxy's rules accept it
       # before ufw's and the allowlist would silently not apply.
       #
-      # It also makes the upstream plain loopback: someguy is hostNetwork too.
+      # It also makes the upstream plain loopback: needle is hostNetwork too.
       hostNetwork: true
       dnsPolicy: Default
       terminationGracePeriodSeconds: 45
@@ -42,7 +42,7 @@ spec:
             - -c
             - /etc/envoy/config/envoy.yaml
             # Envoy defaults to one worker per core (32 here). A small pool is
-            # ample for proxying to loopback and leaves CPU for someguy.
+            # ample for proxying to loopback and leaves CPU for needle.
             - --concurrency
             - "4"
             # Hot restart uses shared memory under /dev/shm and is not needed:

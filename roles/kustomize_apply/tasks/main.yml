@@ -10,7 +10,7 @@
 # A file in k8s/<app>/ ending in .j2 is rendered with the play's variables and
 # shipped under its name minus the suffix; the .j2 itself never reaches the
 # node. This is how manifests that repeat a list already held in a role's
-# defaults (the someguy instance table) stay in step with it instead of being
+# defaults (the needle instance table) stay in step with it instead of being
 # maintained twice.
 
 - name: "Create the manifest directory for {{ kustomize_app }}"
@@ -189,7 +189,7 @@
 # a time: between the apply and the last resume, the instances still waiting
 # run pods from the OLD ReplicaSet, which names the OLD ConfigMap. Pruning it
 # then leaves those pods unable to restart (CreateContainerConfigError) until
-# their turn comes - hours, with a warm-up gate in between. roles/someguy sets
+# their turn comes - hours, with a warm-up gate in between. roles/needle sets
 # kustomize_prune_configmaps: false and includes prune_configmaps.yml itself
 # once every instance is back.
 # ---------------------------------------------------------------------------

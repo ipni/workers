@@ -6,7 +6,7 @@
 # (kube-root-ca.crt has no labels, so it is never a candidate).
 #
 # EVERY Deployment in the namespace, not just kustomize_deployment: an app can
-# have several (someguy runs four), and each names the ConfigMap it uses. The
+# have several (needle runs four), and each names the ConfigMap it uses. The
 # union can only ever protect more ConfigMaps than it should, never fewer.
 #
 # The reference scan is deliberately narrow: Deployment volumes[].configMap

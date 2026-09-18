@@ -1,6 +1,6 @@
 ---
 # Wait until one instance is warm enough to roll the next. Included with
-# someguy_warm_instance set. See roles/someguy/defaults/main.yml for the
+# needle_warm_instance set. See roles/needle/defaults/main.yml for the
 # measurements behind the threshold.
 #
 # A restarted instance answers within a minute but, with nothing to restore from,
@@ -19,85 +19,85 @@
 #     two gauges already state is dead time, so the poll is skipped.
 #
 #   * Anything else - no snapshot yet, a snapshot older than
-#     SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE, a lost PVC, or a build that does not
+#     NEEDLE_DHT_CRAWL_SNAPSHOT_MAX_AGE, a lost PVC, or a build that does not
 #     write them - falls through to the original poll, unchanged. That is the
 #     genuinely cold start, and it is exactly the case the measurements above
 #     describe, so it still gets the full wait.
 #
 # The restored gauges are read once, together, and only decide WHICH path runs.
-# Neither is a readiness signal on its own: someguy_dht_crawl_snapshot_restored_peers
+# Neither is a readiness signal on its own: needle_dht_crawl_snapshot_restored_peers
 # counts what the replay reported before the routing table filter decides what to
 # keep, so on a build without the kad-dht fork it reads thousands while the table
-# is empty. someguy_dht_accelerated_ready is the signal for that, and the image
+# is empty. needle_dht_accelerated_ready is the signal for that, and the image
 # this fleet pins carries the fork, so a replay that reports peers does keep them.
 
-- name: "Read {{ someguy_warm_instance.name }}'s restored-snapshot gauges"
+- name: "Read {{ needle_warm_instance.name }}'s restored-snapshot gauges"
   ansible.builtin.shell:
     cmd: >-
       set -o pipefail;
-      curl -sf --max-time 10 http://127.0.0.1:{{ someguy_warm_instance.api }}/debug/metrics/prometheus
-      | awk '/^someguy_cached_addr_book_snapshot_restored_peers[ {]/ {book = int($2)}
-             /^someguy_dht_crawl_snapshot_restored_peers[ {]/        {crawl = int($2)}
+      curl -sf --max-time 10 http://127.0.0.1:{{ needle_warm_instance.api }}/debug/metrics/prometheus
+      | awk '/^needle_cached_addr_book_snapshot_restored_peers[ {]/ {book = int($2)}
+             /^needle_dht_crawl_snapshot_restored_peers[ {]/        {crawl = int($2)}
              END {printf "%d %d\n", book, crawl}'
     executable: /bin/bash
-  register: someguy_restored
+  register: needle_restored
   changed_when: false
   failed_when: false
 
-- name: "Decide whether {{ someguy_warm_instance.name }} came up on its snapshots"
+- name: "Decide whether {{ needle_warm_instance.name }} came up on its snapshots"
   ansible.builtin.set_fact:
-    someguy_warm_restored: >-
-      {{ (someguy_restored_fields[0] | int) > 0 and (someguy_restored_fields[1] | int) > 0 }}
-    someguy_warm_restored_book: "{{ someguy_restored_fields[0] | int }}"
-    someguy_warm_restored_crawl: "{{ someguy_restored_fields[1] | int }}"
+    needle_warm_restored: >-
+      {{ (needle_restored_fields[0] | int) > 0 and (needle_restored_fields[1] | int) > 0 }}
+    needle_warm_restored_book: "{{ needle_restored_fields[0] | int }}"
+    needle_warm_restored_crawl: "{{ needle_restored_fields[1] | int }}"
   vars:
     # A failed curl leaves stdout empty; awk prints "0 0" for a reachable
     # instance that exports neither gauge. Both mean "not restored", which is
     # the safe answer because it takes the poll.
-    someguy_restored_fields: >-
-      {{ ((someguy_restored | default({})).stdout | default('', true)
+    needle_restored_fields: >-
+      {{ ((needle_restored | default({})).stdout | default('', true)
           | trim | default('0 0', true)).split() }}
 
-- name: "Report that {{ someguy_warm_instance.name }} restored and needs no warm-up"
+- name: "Report that {{ needle_warm_instance.name }} restored and needs no warm-up"
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }} {{ someguy_warm_instance.name }} restored
-      {{ someguy_warm_restored_book }} address book peers and
-      {{ someguy_warm_restored_crawl }} crawled routing table peers from its
+      {{ inventory_hostname }} {{ needle_warm_instance.name }} restored
+      {{ needle_warm_restored_book }} address book peers and
+      {{ needle_warm_restored_crawl }} crawled routing table peers from its
       snapshots; skipping the warm-up poll and rolling the next.
-  when: someguy_warm_restored | bool
+  when: needle_warm_restored | bool
 
-- name: "Poll {{ someguy_warm_instance.name }} until it holds {{ someguy_warm_min_peers }} peers"
+- name: "Poll {{ needle_warm_instance.name }} until it holds {{ needle_warm_min_peers }} peers"
   ansible.builtin.shell:
     cmd: >-
       set -o pipefail;
-      curl -sf --max-time 10 http://127.0.0.1:{{ someguy_warm_instance.api }}/debug/metrics/prometheus
-      | awk '/^someguy_cached_addr_book_peer_state_size/ {print int($2); found = 1}
+      curl -sf --max-time 10 http://127.0.0.1:{{ needle_warm_instance.api }}/debug/metrics/prometheus
+      | awk '/^needle_cached_addr_book_peer_state_size/ {print int($2); found = 1}
              END {if (!found) print 0}'
     executable: /bin/bash
-  register: someguy_warm
+  register: needle_warm
   changed_when: false
   failed_when: false
-  retries: "{{ (someguy_warm_timeout_seconds | int // (someguy_warm_poll_seconds | int)) | int }}"
-  delay: "{{ someguy_warm_poll_seconds | int }}"
-  until: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
-  when: not (someguy_warm_restored | bool)
+  retries: "{{ (needle_warm_timeout_seconds | int // (needle_warm_poll_seconds | int)) | int }}"
+  delay: "{{ needle_warm_poll_seconds | int }}"
+  until: (needle_warm.stdout | trim | default('0', true) | int) >= (needle_warm_min_peers | int)
+  when: not (needle_warm_restored | bool)
 
-- name: "Report whether {{ someguy_warm_instance.name }} warmed up in time"
+- name: "Report whether {{ needle_warm_instance.name }} warmed up in time"
   ansible.builtin.assert:
-    that: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+    that: (needle_warm.stdout | trim | default('0', true) | int) >= (needle_warm_min_peers | int)
     fail_msg: >-
-      {{ inventory_hostname }} {{ someguy_warm_instance.name }} still holds only
-      {{ someguy_warm.stdout | trim | default('0', true) }} cached peers after
-      {{ someguy_warm_timeout_seconds }}s (wanted {{ someguy_warm_min_peers }}).
+      {{ inventory_hostname }} {{ needle_warm_instance.name }} still holds only
+      {{ needle_warm.stdout | trim | default('0', true) }} cached peers after
+      {{ needle_warm_timeout_seconds }}s (wanted {{ needle_warm_min_peers }}).
       Not rolling the next instance or box on the assumption that this one
-      recovered. Re-run with -e someguy_rollout_wait_warm=false to skip this gate.
+      recovered. Re-run with -e needle_rollout_wait_warm=false to skip this gate.
     success_msg: >-
-      {{ inventory_hostname }} {{ someguy_warm_instance.name }}: address book holds
-      {{ someguy_warm.stdout | trim }} peers; safe to roll the next.
+      {{ inventory_hostname }} {{ needle_warm_instance.name }}: address book holds
+      {{ needle_warm.stdout | trim }} peers; safe to roll the next.
     quiet: true
-  # Only when the poll actually ran: the restored path leaves someguy_warm unset,
+  # Only when the poll actually ran: the restored path leaves needle_warm unset,
   # or stale from a previous instance in the loop.
   when:
-    - someguy_warm_fail_on_timeout | bool
-    - not (someguy_warm_restored | bool)
+    - needle_warm_fail_on_timeout | bool
+    - not (needle_warm_restored | bool)

@@ -9,11 +9,11 @@
 #
 #   ansible-playbook scripts/render-manifests.yml                  # -> ./rendered/
 #   ansible-playbook scripts/render-manifests.yml -e dest=/tmp/out
-#   ansible-playbook scripts/render-manifests.yml -e someguy_instances=1
+#   ansible-playbook scripts/render-manifests.yml -e needle_instances=1
 #
 # A relative dest is taken from the repo root, not your shell's cwd.
 #
-# The someguy instance table is read straight from the role's defaults, so this
+# The needle instance table is read straight from the role's defaults, so this
 # cannot disagree with what a deploy would render.
 
 - name: Render the k8s manifest templates
@@ -21,7 +21,7 @@
   gather_facts: false
   connection: local
   vars_files:
-    - "{{ playbook_dir }}/../roles/someguy/defaults/main.yml"
+    - "{{ playbook_dir }}/../roles/needle/defaults/main.yml"
   vars:
     repo_root: "{{ (playbook_dir ~ '/..') | realpath }}"
     dest: rendered
@@ -91,4 +91,4 @@
           {{ manifest_dirs.files | length }} manifest directories into {{ render_dest }},
           {{ manifest_templates.files | length }} templates rendered
           ({{ manifest_templates.files | map(attribute='path') | map('basename') | sort | join(', ') }});
-          someguy_instances={{ someguy_instances }}
+          needle_instances={{ needle_instances }}

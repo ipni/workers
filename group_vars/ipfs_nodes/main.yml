@@ -43,7 +43,7 @@ firewall_allowed_udp: []
 # Rollout mode
 # ---------------------------------------------------------------------------
 # false (dev): playbooks roll every box at once, which is fastest to iterate on.
-# true (production): one box at a time, and someguy's rollout waits for each box
+# true (production): one box at a time, and needle's rollout waits for each box
 # to rebuild the state a restart throws away before the next one is touched.
 #
 # This governs routing.yml, bootstrap.yml, content.yml and k3s-upgrade.yml, via
@@ -54,13 +54,13 @@ firewall_allowed_udp: []
 #
 # Every box is a whole site behind its own hostname with no failover between
 # them, so once these are the only boxes serving traffic, a simultaneous
-# rollout is a full outage - and someguy stays degraded for tens of minutes
+# rollout is a full outage - and needle stays degraded for tens of minutes
 # after a restart, long after its pod reports Ready. Measured at 200 req/s:
 # 11 minutes in, p95 2904ms with 2937 rejected lookups and 3x the CPU; by 69
 # minutes, p95 588-691ms, no rejections, warm CPU.
 #
 # Flip this to true when the boxes go live. A production rollout then takes
-# roughly an hour per box, which is the real cost of restarting someguy.
+# roughly an hour per box, which is the real cost of restarting needle.
 production_rollout: false
 
 # ---------------------------------------------------------------------------
@@ -109,17 +109,17 @@ sysctl_tuning:
   net.ipv4.tcp_max_syn_backlog: 8192
   net.ipv4.ip_local_port_range: "1024 65535"
   # Host-network listeners that sit INSIDE the ephemeral range above. Without
-  # this, any outbound socket (someguy's DHT crawl alone opens ~800) can be
+  # this, any outbound socket (needle's DHT crawl alone opens ~800) can be
   # handed one of these numbers as its source port; a pod restarting under
   # `Recreate` then fails to re-bind with "address already in use".
   # Reserving only stops the kernel choosing them for outbound connections;
   # explicit binds still work. Update when a host-network port is added:
   #   443 Envoy (outside the range today, kept for safety)
   #   4001 bootstrapper libp2p  4002 bootstrapper /ws (loopback)
-  #   4004-4007 someguy libp2p (four instances)  4101 content kubo libp2p
+  #   4004-4007 needle libp2p (four instances)  4101 content kubo libp2p
   #   4443 bootstrapper WSS (Envoy)  5011 bootstrapper API
   #   5021 content kubo RPC API (loopback)
-  #   6443-6444 k3s API  8190-8193 someguy APIs (loopback, four instances)
+  #   6443-6444 k3s API  8190-8193 needle APIs (loopback, four instances)
   #   8472/udp flannel VXLAN
   #   9094 content ipfs-cluster REST API (loopback)
   #   9095 content ipfs-cluster IPFS proxy (loopback)

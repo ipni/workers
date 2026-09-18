@@ -87,7 +87,7 @@
 #    kubo to accept connections from 127.0.0.1, so the loopback entry is gone
 #    from Swarm.AddrFilters, which also stopped kubo DIALING loopback. A
 #    WSS client could otherwise hand kubo 127.0.0.1 addresses (identify accepts
-#    them from loopback peers) and make it probe the k3s API, kubelet, someguy
+#    them from loopback peers) and make it probe the k3s API, kubelet, needle
 #    and Envoy admin ports. Replies to accepted connections are not NEW, so
 #    serving the proxy is unaffected. This one stays IPv4-only on purpose:
 #    ::1 is still in Swarm.AddrFilters, so kubo never dials v6 loopback in the
@@ -154,7 +154,7 @@
       {{ entries }}
   ansible.builtin.set_fact:
     # API.Authorizations: with hostNetwork, 127.0.0.1 is shared with every host
-    # process and the other hostNetwork pods (someguy, Envoy), so loopback alone
+    # process and the other hostNetwork pods (needle, Envoy), so loopback alone
     # does not protect the admin RPC. Every /api/v0 call now needs the token.
     # (kubo does not guard /debug/metrics or /debug/pprof with it.)
     #

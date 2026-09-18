@@ -30,7 +30,7 @@ images:
   - name: quay.io/jetstack/cert-manager-webhook
     digest: sha256:a60e2dac46dbb8a7f3df95c54ce941012f54c2fe022f0ee55aaa1ab40ed957ae
 
-# The release sets no resources. Small requests keep these off someguy's
+# The release sets no resources. Small requests keep these off needle's
 # share; memory limits bound the Secret caches of the controller and cainjector.
 patches:
   - target: { kind: Deployment, namespace: cert-manager }

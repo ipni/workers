@@ -1,40 +1,40 @@
 ---
-# someguy: Delegated Routing V1 HTTP server, the primary workload on each box.
-# Manifests live in k8s/someguy (kustomize). This role owns someguy's firewall
+# needle: Delegated Routing V1 HTTP server, the primary workload on each box.
+# Manifests live in k8s/needle (kustomize). This role owns needle's firewall
 # ports and the rollout order; shipping and applying are shared via
 # roles/kustomize_apply.
 #
-# FOUR instances per box (someguy_instances), each a separate process with its
+# FOUR instances per box (needle_instances), each a separate process with its
 # own PeerID, concurrency budget and connection pool, behind Envoy's round-robin
-# fan-out. See roles/someguy/defaults/main.yml for what that is worth.
+# fan-out. See roles/needle/defaults/main.yml for what that is worth.
 
 # ---------------------------------------------------------------------------
 # Firewall. Only libp2p is opened; every instance's HTTP API is loopback only.
 #
-# The ports are fixed in someguy_all_instances and in
-# k8s/someguy/deployment*.yaml, and must be changed in both together.
+# The ports are fixed in needle_all_instances and in
+# k8s/needle/deployment*.yaml, and must be changed in both together.
 # ---------------------------------------------------------------------------
-- name: Allow someguy libp2p traffic (TCP)
+- name: Allow needle libp2p traffic (TCP)
   community.general.ufw:
     rule: allow
     port: "{{ item.libp2p }}"
     proto: tcp
     comment: "{{ item.name }} libp2p"
-  loop: "{{ someguy_running_instances }}"
+  loop: "{{ needle_running_instances }}"
   loop_control:
     label: "{{ item.name }} {{ item.libp2p }}/tcp"
 
-- name: Allow someguy libp2p traffic (UDP - QUIC, WebTransport, WebRTC)
+- name: Allow needle libp2p traffic (UDP - QUIC, WebTransport, WebRTC)
   community.general.ufw:
     rule: allow
     port: "{{ item.libp2p }}"
     proto: udp
     comment: "{{ item.name }} libp2p"
-  loop: "{{ someguy_running_instances }}"
+  loop: "{{ needle_running_instances }}"
   loop_control:
     label: "{{ item.name }} {{ item.libp2p }}/udp"
 
-# Lowering someguy_instances has to close the ports it opened, or a box keeps
+# Lowering needle_instances has to close the ports it opened, or a box keeps
 # holes for instances that no longer exist.
 - name: Close the libp2p ports of instances that are not running
   community.general.ufw:
@@ -42,28 +42,28 @@
     port: "{{ item.0.libp2p }}"
     proto: "{{ item.1 }}"
     delete: true
-  loop: "{{ someguy_retired_instances | product(['tcp', 'udp']) | list }}"
+  loop: "{{ needle_retired_instances | product(['tcp', 'udp']) | list }}"
   loop_control:
     label: "{{ item.0.name }} {{ item.0.libp2p }}/{{ item.1 }}"
 
-# someguy used to have a ClusterIP Service. It was removed when the API moved
+# needle used to have a ClusterIP Service. It was removed when the API moved
 # to loopback-only: its endpoint (node IP :8190) no longer answers. Removing a
 # file from a kustomization does not delete the live object - `kubectl apply`
 # does not prune - so delete it explicitly. Safe to keep: absent is a no-op.
-- name: Remove the obsolete someguy Service
+- name: Remove the obsolete needle Service
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/k3s/k3s.yaml
     api_version: v1
     kind: Service
-    name: someguy
-    namespace: someguy
+    name: needle
+    namespace: needle
     state: absent
 
 # ---------------------------------------------------------------------------
 # Rollout. Every instance's pod template changes together (they share the
 # generated env ConfigMap), and each Deployment is `Recreate`, so applying
 # without care stops all four at once - the outage this design exists to avoid.
-# With someguy_rollout_serial (production only) each instance is paused before
+# With needle_rollout_serial (production only) each instance is paused before
 # the apply and resumed in turn, so only one is ever down; in dev they all roll
 # together, which is a short outage but keeps the edit-deploy loop fast.
 #
@@ -71,49 +71,49 @@
 # the box keeps serving from the others throughout (verified: with an instance
 # scaled to zero, 40/40 requests still returned 200).
 # ---------------------------------------------------------------------------
-- name: Check which someguy deployments exist
+- name: Check which needle deployments exist
   ansible.builtin.command:
-    argv: [k3s, kubectl, --namespace=someguy, get, deployments, -o, "jsonpath={.items[*].metadata.name}"]
-  register: someguy_deployments
+    argv: [k3s, kubectl, --namespace=needle, get, deployments, -o, "jsonpath={.items[*].metadata.name}"]
+  register: needle_deployments
   changed_when: false
   check_mode: false
 
 - name: Pause every instance but the first, so they do not all roll at once
   ansible.builtin.command:
-    argv: [k3s, kubectl, --namespace=someguy, rollout, pause, "deployment/{{ item.name }}"]
-  loop: "{{ someguy_running_instances[1:] }}"
+    argv: [k3s, kubectl, --namespace=needle, rollout, pause, "deployment/{{ item.name }}"]
+  loop: "{{ needle_running_instances[1:] }}"
   loop_control:
     label: "{{ item.name }}"
   when:
-    - someguy_rollout_serial | bool
+    - needle_rollout_serial | bool
     - not ansible_check_mode
-    - item.name in someguy_deployments.stdout.split()
+    - item.name in needle_deployments.stdout.split()
   changed_when: false   # a rollout control, not a change to the box
 
-- name: Deploy the someguy manifests
+- name: Deploy the needle manifests
   ansible.builtin.include_role:
     name: kustomize_apply
   vars:
-    kustomize_app: someguy
-    kustomize_namespace: someguy
+    kustomize_app: needle
+    kustomize_namespace: needle
     # The rollout this waits for is the first instance's; the rest are paused
     # and are rolled one at a time below.
-    kustomize_deployment: "{{ someguy_running_instances[0].name }}"
-    kustomize_rollout_timeout: "{{ someguy_rollout_timeout }}"
+    kustomize_deployment: "{{ needle_running_instances[0].name }}"
+    kustomize_rollout_timeout: "{{ needle_rollout_timeout }}"
     # Deferred to the end of this file. The paused instances still run pods
     # from the old ReplicaSet, which names the old ConfigMap; deleting it now
     # would strand them if one restarted before its turn.
     kustomize_prune_configmaps: false
 
-- name: Delete instances above someguy_instances
+- name: Delete instances above needle_instances
   kubernetes.core.k8s:
     kubeconfig: /etc/rancher/k3s/k3s.yaml
     api_version: apps/v1
     kind: Deployment
     name: "{{ item.name }}"
-    namespace: someguy
+    namespace: needle
     state: absent
-  loop: "{{ someguy_retired_instances }}"
+  loop: "{{ needle_retired_instances }}"
   loop_control:
     label: "{{ item.name }}"
 
@@ -129,9 +129,9 @@
     api_version: v1
     kind: PersistentVolumeClaim
     name: "{{ item.name }}-data"
-    namespace: someguy
+    namespace: needle
     state: absent
-  loop: "{{ someguy_retired_instances }}"
+  loop: "{{ needle_retired_instances }}"
   loop_control:
     label: "{{ item.name }}"
 
@@ -139,20 +139,20 @@
 # roll_instance.yml checks the others.
 - name: Confirm the first instance's API answers locally
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ someguy_running_instances[0].api }}/version"
+    url: "http://127.0.0.1:{{ needle_running_instances[0].api }}/version"
     return_content: true
-  register: someguy_version
+  register: needle_version
   retries: 6
   delay: 5
-  until: someguy_version.status == 200
+  until: needle_version.status == 200
   when: not ansible_check_mode
 
 - name: Report the running version
   ansible.builtin.debug:
     msg: >-
-      someguy on {{ inventory_hostname }}: {{ someguy_version.content | trim }}
-      ({{ someguy_running_instances | length }} instance(s):
-      {{ someguy_running_instances | map(attribute='api') | join(', ') }})
+      needle on {{ inventory_hostname }}: {{ needle_version.content | trim }}
+      ({{ needle_running_instances | length }} instance(s):
+      {{ needle_running_instances | map(attribute='api') | join(', ') }})
   when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
@@ -168,12 +168,12 @@
 # ---------------------------------------------------------------------------
 - name: Wait for the first instance's address book to warm up
   when:
-    - someguy_rollout_wait_warm | bool
+    - needle_rollout_wait_warm | bool
     - not ansible_check_mode
     - kustomize_deployment_rolled | default(false) | bool
   ansible.builtin.include_tasks: wait_warm.yml
   vars:
-    someguy_warm_instance: "{{ someguy_running_instances[0] }}"
+    needle_warm_instance: "{{ needle_running_instances[0] }}"
 
 # ---------------------------------------------------------------------------
 # One instance at a time: resume it, wait for its pod, prove its API answers,
@@ -181,18 +181,18 @@
 # ---------------------------------------------------------------------------
 - name: Roll the remaining instances one at a time
   ansible.builtin.include_tasks: roll_instance.yml
-  loop: "{{ someguy_running_instances[1:] }}"
+  loop: "{{ needle_running_instances[1:] }}"
   loop_control:
-    loop_var: someguy_instance
-    label: "{{ someguy_instance.name }}"
+    loop_var: needle_instance
+    label: "{{ needle_instance.name }}"
   when: not ansible_check_mode
 
 # Deferred from the apply: safe now that every instance runs a pod from the new
 # ReplicaSet, so no live pod names the superseded ConfigMap any more.
-- name: Prune superseded someguy ConfigMaps
+- name: Prune superseded needle ConfigMaps
   ansible.builtin.include_role:
     name: kustomize_apply
     tasks_from: prune_configmaps
   vars:
-    kustomize_app: someguy
-    kustomize_namespace: someguy
+    kustomize_app: needle
+    kustomize_namespace: needle

@@ -1,6 +1,6 @@
 ---
 # route-origin: Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io,
-# proxying an allowlist of paths to someguy on loopback.
+# proxying an allowlist of paths to needle on loopback.
 #
 #   Cloudflare edge --(Full strict, Origin CA cert)--> :443 Envoy --> 127.0.0.1:8190
 #
@@ -272,7 +272,7 @@
 
 # ---------------------------------------------------------------------------
 # Verification, on the box: the right certificate is served, allowlisted
-# paths reach someguy, and everything else (notably /debug/) does not.
+# paths reach needle, and everything else (notably /debug/) does not.
 # ---------------------------------------------------------------------------
 - name: Read the certificate Envoy is actually serving  # noqa risky-shell-pipe
   ansible.builtin.shell:

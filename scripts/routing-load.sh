@@ -7,10 +7,10 @@
 #
 # Endpoints are tested ONE AT A TIME so a stage's numbers belong to one box.
 #
-# Load reaches real third parties: every lookup someguy cannot serve from its
+# Load reaches real third parties: every lookup needle cannot serve from its
 # cache becomes queries to the Amino DHT and cid.contact. By default the same
-# fixtures repeat, so someguy's cache absorbs most of them and this mainly
-# measures our own path (Cloudflare -> Envoy -> someguy). --cache-bust forces
+# fixtures repeat, so needle's cache absorbs most of them and this mainly
+# measures our own path (Cloudflare -> Envoy -> needle). --cache-bust forces
 # every request to miss that cache; keep concurrency and duration low with it.
 #
 # Exit 0 when every endpoint completed all stages within thresholds, 1 when any
@@ -40,7 +40,7 @@ Options:
                         (default: scripts/routing-compare-cids.txt)
   --timeout SECONDS     per-request timeout (default: 30)
   --max-error-rate F    stop climbing an endpoint above this rate (default: 0.05)
-  --cache-bust          unique query string per request, so someguy answers
+  --cache-bust          unique query string per request, so needle answers
                         every request from the DHT/cid.contact instead of cache
   --out FILE            also write the full results as JSON
   -h, --help            show this help
