@@ -639,13 +639,69 @@ total is therefore roughly three times the rate limit, in both runs, and
 
 The one box that reveals anything is **sing-1**, the only one that could not
 reach the ceiling: 894/s -> 971/s achieved, and p50 at the 1000/s target
-3044ms -> 514ms. That difference is real, and it is the only throughput claim
-these runs support. Measuring actual fleet capacity needs the bucket raised and
-the ladder driven until boxes saturate, which has not been done.
+3044ms -> 514ms.
+
+For what the boxes can actually do, see "Capacity with the rate limit out of the
+way" below, which raises the bucket and drives them to saturation.
 
 Warm-up also differs, in the baseline's favour: the 2026-09-16 run had 75 minutes
 of sustained 60 req/s beforehand, while these boxes had 19-27 minutes of uptime
 and only light, intermittent traffic.
+
+### Capacity with the rate limit out of the way
+
+Everything above is bounded by Envoy's 1000/s lookup bucket. To find the real
+ceiling, and to answer "did the optimization work actually make it faster", the
+bucket was raised to 6000/s and both builds were driven to saturation under an
+otherwise identical protocol, 2026-09-18:
+
+- **before** - upstream `ghcr.io/ipfs/someguy` v0.16.0 with the pre-optimization
+  config: no snapshots, no negative TTL, no tail budget, no pprof;
+- **after** - `ghcr.io/ipni/someguy:v0.16.0-ipni.1`, every feature on.
+
+Each box drove its own `route-<box>.ipni.io` through Cloudflare, `--workload
+fixtures`, `--workers 12288`, 30s stages at 200/400/600/850/1000/1500/2000/3000/
+4000. The ladder stops climbing when a stage achieves under 90% of its target.
+Both builds were warmed until their cached address book plateaued - 75 minutes
+for the new one, 95 for the old one, which starts from empty because it cannot
+restore a snapshot.
+
+**Zero HTTP errors in every stage of both arms.** The boxes stop on throughput,
+never on failures.
+
+| Box | before | after | gain |
+|---|---|---|---|
+| sing-1 | 888.5/s | 2318.1/s | **2.61x** |
+| lith-1 | 1333.5/s | 2081.4/s | **1.56x** |
+| chic-1 | 1213.9/s | 1826.1/s | **1.50x** |
+| **fleet** | **3436/s** | **6226/s** | **1.81x** |
+
+So the fleet's real ceiling is about **6200 req/s**, not the ~2900 the tables
+above report - those were three rate limiters, measured twice.
+
+The tail is where it is starkest. sing-1's p95 sat on the 5s `timeoutPerOp` wall
+from 400/s upward before; after, it stays under 900ms until 1000/s:
+
+| sing-1 target | before p50 / p95 | after p50 / p95 |
+|---|---|---|
+| 400/s | 291ms / **4953ms** | 312ms / 720ms |
+| 600/s | 451ms / **5023ms** | 362ms / 863ms |
+| 850/s | 2057ms / **5083ms** | 514ms / 2420ms |
+| 1000/s | 3464ms / **5100ms** | 517ms / 4355ms |
+
+chic-1 at 1500/s went p50 1015ms -> 44ms, p95 6797ms -> 951ms. And it is cheaper:
+at 1000/s, someguy's CPU per 30s stage fell 131.3s -> 55.0s on sing-1, 125.8s ->
+53.4s on chic-1, 133.8s -> 74.7s on lith-1 - roughly half the CPU for the same
+work.
+
+**What this does not control for.** The cached address book was not equal at
+ladder time (before/after: sing-1 28,132/34,446, lith-1 27,902/21,311, chic-1
+~20,640/~31,655). Parity is not reachable by warming, because the new build's
+book carries peers accumulated across days of restarts - which is part of what
+the snapshot buys. The imbalance does not run one way: lith-1 was warmer in the
+old build, the other two in the new one. Both arms changed eight things at once;
+this is a before/after of the whole body of work, not an attribution to any one
+feature.
 
 **Continuity with the profiling series.** One point on the final build under the
 conditions the September profiling runs used - sing-1, direct to `127.0.0.1:8190`
