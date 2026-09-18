@@ -1,0 +1,50 @@
+# Fixtures for scripts/completeness-ab.sh, chosen to make truncation visible.
+#
+# Truncation by the DHT tail budget and the FindPeer grace can only be seen on
+# content with FEWER providers than SOMEGUY_RECORDS_LIMIT (50). Well-provided
+# content returns exactly 50 on every arm no matter how much of the walk was
+# cut, so it measures the limit, not the build. Those fixtures are kept here
+# anyway, as a control: if they ever differ between arms, something other than
+# truncation changed and the comparison is void.
+#
+# Provider counts in the comments are the annotations carried over from
+# scripts/routing-compare-cids.txt and are approximate.
+#
+# The task that motivated this file refers to four sparse fixtures from an
+# earlier standard-client comparison, which returned 45, 18, 16 and 17 providers
+# against the accelerated client's 38, 14, 14 and 12. Those four could NOT be
+# identified with confidence from the annotations - the counts do not map
+# cleanly onto any four of the fixtures below - so every sparse fixture is
+# included instead. That is strictly wider coverage; it just means the numbers
+# here are not a like-for-like continuation of that run. The best-guess matches
+# are marked "[likely]".
+
+# ---------------------------------------------------------------------------
+# Sparse: under the records limit, so the whole answer is visible
+# ---------------------------------------------------------------------------
+providers Qmd1sbtibEimhQbp9qS8cfhejvkFxoFAHrRLrK3FUk71R5   # XKCD archive child dir: ~33 DHT + 6 IPNI [likely 45/38]
+providers QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX   # older Wikipedia snapshot: ~16 DHT only [likely 18/14]
+providers bafybeiejegeowlh5warqnrjjmhbkf7hdjaiuhnpqajbktx6ta77urqmljy   # ipfs.tech DNSLink root: ~12 DHT [likely 16/14]
+providers bafybeier6ud42ptljtfaxrdlknktw54b7ohfpg5h33mosxpxjndxs7xzvm   # docs.ipfs.tech DNSLink root: ~7 DHT [likely 17/12]
+providers QmcQFiYTDih9UiF4swN797eCZYNL4em74XPmLvYu7WvsdH   # dist.ipfs.tech DNSLink root: ~5 DHT
+providers bafybeiaxhcueeks4ykyc3pha6qzorsger7b4mnmfe445shbnj7d5guuvni   # probelab.io DNSLink root: ~5 DHT
+providers bafybeidrs7wuvil5n2q2izkmh2mzbeakjkasxwpgttu7v5lgf2j4rmlgym   # cluster.ipfs.io DNSLink root: ~3 DHT
+providers bafybeied45v5pm44zfpcoh2ytqf7scpnm2qcsqinge5lwcgqq7pux3fxqq   # distributed.press IPNS target: ~2 DHT
+
+# ---------------------------------------------------------------------------
+# IPNI-only: no DHT walk to truncate, so these must not move between arms
+# ---------------------------------------------------------------------------
+providers bafkreihxthrlcx23sn4cpxasn3ctsr2kg5zyx7hsqweso3dsjxxxcmgjwi   # aur.lu advertisement: 3 IPNI, 0 DHT
+providers bafkreih4ouwl3cckh3glw3w2mlwyaprte5py2rdkqzr64i4mjuinlbmcxe   # twinquasar advertisement: 4 IPNI, 0 DHT
+
+# ---------------------------------------------------------------------------
+# Well-provided control: hits SOMEGUY_RECORDS_LIMIT on every arm
+# ---------------------------------------------------------------------------
+providers QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn   # empty UnixFS dir: ~1000 DHT + 2 IPNI
+providers bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi   # spec example CID: ~124 DHT + 16 IPNI
+providers QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG   # kubo readme dir: ~220 DHT + 10 IPNI
+
+# ---------------------------------------------------------------------------
+# Negative control: nobody provides these, both arms must return 0
+# ---------------------------------------------------------------------------
+providers bafkreib22ez2dyymmqz2yq3hqjbpekqs6tv3lgq72qnfwcltoxdpc2aamq   # sha256("...no-providers/raw")

@@ -694,6 +694,72 @@ at 1000/s, someguy's CPU per 30s stage fell 131.3s -> 55.0s on sing-1, 125.8s ->
 53.4s on chic-1, 133.8s -> 74.7s on lith-1 - roughly half the CPU for the same
 work.
 
+### What the 1.81x cost in completeness
+
+Throughput was bought with two levers that trade recall for tail latency: the
+DHT tail budget, and the FindPeer grace that stops querying shortly after the
+first peer reports the target. Measured on lith-1, 2026-09-18, with
+`scripts/completeness-ab.sh` over `scripts/completeness-cids.txt`:
+
+- **arm A** - both levers off (`SOMEGUY_DHT_TAIL_BUDGET=0`,
+  `SOMEGUY_DHT_FIND_PEER_GRACE=0`), the pre-optimization behaviour;
+- **arm B** - the shipped values (`500ms`, and the library default grace);
+- **bracket** - arm B re-measured after arm A, as the drift control.
+
+Same image, same negative TTL, same crawl snapshot in every arm: only the two
+levers move. Five queries per fixture, one per second, nothing else on the box.
+
+| Fixture | arm A | arm B | bracket | B - A |
+|---|---|---|---|---|
+| XKCD archive child dir | 39 | 40 | 40 | **+1** |
+| older Wikipedia snapshot | 15 | 15 | 14 | 0 |
+| ipfs.tech root | 15 | 15 | 15 | 0 |
+| docs.ipfs.tech root | 12 | 13 | 13 | **+1** |
+| dist.ipfs.tech root | 6 | 6 | 6 | 0 |
+| probelab.io root | 6 | 6 | 5 | 0 |
+| cluster.ipfs.io root | 3 | 3 | 3 | 0 |
+| distributed.press target | 1 | 1 | 1 | 0 |
+| aur.lu, IPNI only | 3 | 3 | 3 | 0 |
+| twinquasar, IPNI only | 4 | 4 | 4 | 0 |
+| empty UnixFS dir (limit-bound) | 50 | 50 | 50 | 0 |
+| spec example CID (limit-bound) | 50 | 50 | 50 | 0 |
+| kubo readme dir (limit-bound) | 50 | 50 | 50 | 0 |
+| no providers | 0 | 0 | 0 | 0 |
+
+Address book at measurement: arm A 27,744, arm B 27,681, bracket 27,931. Pod age
+71 min for arm B, 18 min for arm A and the bracket - and arm B agreeing with
+itself at both ages is what rules uptime out as a factor.
+
+**The 1.81x cost nothing measurable in provider counts.** No fixture lost a
+provider to truncation. The only consistent difference runs the other way: arm B
+returned one *more* provider on two fixtures, in both of its runs. That sits
+inside the noise the bracket establishes, which is +/-1 on the fixtures that move
+at all. The three limit-bound controls returned exactly 50 on every arm,
+confirming the method isolates truncation rather than something else, and the
+negative control returned 0 everywhere.
+
+**Two things this measurement cannot see**, stated because the result is
+otherwise easy to over-read:
+
+- Every fixture here has at least two providers. A CID with exactly **one**
+  provider, reachable only through a peer slow enough to be cut, would return
+  zero rather than a shorter list - a failed retrieval rather than a smaller
+  result set. Nothing above can see that case.
+- Repeats are not independent samples, though not for the reason usually
+  assumed: someguy has **no CID-keyed provider cache**. Verified directly - a
+  repeated query still contributes the same 34 DHT records
+  (`someguy_router_records{router="dht"}`), so the walk really does happen
+  again. The 531ms -> 154ms speedup between the first query and later ones is
+  the cached address book resolving provider addresses without FindPeer dials.
+  The script records hit/miss deltas per query and reports first-query and
+  later-query medians separately rather than averaging them.
+
+Counts through the accelerated client are close to deterministic because fullrt
+queries the 20 closest peers from a routing table that only changes when a crawl
+completes. That is why most fixtures return an identical count five times
+running, in *both* arms - it is a property of the client, not an artefact of
+caching.
+
 **What this does not control for.** The cached address book was not equal at
 ladder time (before/after: sing-1 28,132/34,446, lith-1 27,902/21,311, chic-1
 ~20,640/~31,655). Parity is not reachable by warming, because the new build's
