@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # Instances per box
 # ---------------------------------------------------------------------------
-# Four someguy processes per box, each with its own PeerID, concurrency budget
+# Four needle processes per box, each with its own PeerID, concurrency budget
 # and connection pool, behind Envoy's round-robin fan-out.
 #
 # Measured on sing-1 (2026-09-16, warm, through Cloudflare), achieved rate and
@@ -28,33 +28,33 @@
 # until someone hand-edited k8s/route-origin/envoy.yaml to match. Both of those
 # came from the same cause - this table was written out by hand in two other
 # files - which is why it is now rendered instead.
-someguy_instances: 4
+needle_instances: 4
 
 # Name, API port (loopback) and libp2p port (public) of each instance, in
 # rollout order.
 #
 # THE source of truth for the instance layout. roles/kustomize_apply renders
 # all three consumers from it:
-#   k8s/someguy/deployment.yaml.j2        instance a
-#   k8s/someguy/deployment-extra.yaml.j2  instances b onward
+#   k8s/needle/deployment.yaml.j2        instance a
+#   k8s/needle/deployment-extra.yaml.j2  instances b onward
 #   k8s/route-origin/envoy.yaml.j2        the load-balancer endpoint list
 # so a port is written down exactly once. Adding an instance is a line here.
-someguy_all_instances:
-  - { name: someguy, api: 8190, libp2p: 4004 }
-  - { name: someguy-b, api: 8191, libp2p: 4005 }
-  - { name: someguy-c, api: 8192, libp2p: 4006 }
-  - { name: someguy-d, api: 8193, libp2p: 4007 }
+needle_all_instances:
+  - { name: needle, api: 8190, libp2p: 4004 }
+  - { name: needle-b, api: 8191, libp2p: 4005 }
+  - { name: needle-c, api: 8192, libp2p: 4006 }
+  - { name: needle-d, api: 8193, libp2p: 4007 }
 
-someguy_running_instances: "{{ someguy_all_instances[: someguy_instances | int] }}"
-someguy_retired_instances: "{{ someguy_all_instances[someguy_instances | int :] }}"
+needle_running_instances: "{{ needle_all_instances[: needle_instances | int] }}"
+needle_retired_instances: "{{ needle_all_instances[needle_instances | int :] }}"
 
-# Instance a, the one k8s/someguy/deployment.yaml.j2 renders. Named rather than
+# Instance a, the one k8s/needle/deployment.yaml.j2 renders. Named rather than
 # indexed inline so the template reads as "the first instance" instead of
 # "[0]".
-someguy_first_instance: "{{ someguy_all_instances[0] }}"
+needle_first_instance: "{{ needle_all_instances[0] }}"
 
 # First start pulls the image; later rollouts wait for the old pod to stop.
-someguy_rollout_timeout: 600s
+needle_rollout_timeout: 600s
 
 # ---------------------------------------------------------------------------
 # Rollout safety
@@ -62,15 +62,15 @@ someguy_rollout_timeout: 600s
 # BOTH halves of the state a restart used to throw away now survive it, on the
 # instance's own PVC:
 #
-#   * the cached address book (SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL),
+#   * the cached address book (NEEDLE_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL),
 #     written every 15 minutes and on a clean shutdown, restored at start;
 #   * the accelerated DHT client's crawled routing table
-#     (SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE), written after every completed crawl
+#     (NEEDLE_DHT_CRAWL_SNAPSHOT_MAX_AGE), written after every completed crawl
 #     and replayed at start when it is younger than 2h, with a real crawl
 #     triggered the moment the replayed table is in place.
 #
 # With both restored an instance is serving properly in seconds rather than
-# after an hour, so roles/someguy/tasks/wait_warm.yml skips its poll when both
+# after an hour, so roles/needle/tasks/wait_warm.yml skips its poll when both
 # restored gauges are non-zero and polls as before when they are not. The poll
 # is still the fallback that matters: a first rollout onto a box that has never
 # written a snapshot, a snapshot older than the max age, or a lost PVC all
@@ -93,7 +93,7 @@ someguy_rollout_timeout: 600s
 # is off while these boxes are still a dev fleet and rollouts stay fast. Set
 # production_rollout: true - or pass -e production_rollout=true - once they are
 # the only boxes serving traffic.
-someguy_rollout_wait_warm: "{{ production_rollout | default(false) }}"
+needle_rollout_wait_warm: "{{ production_rollout | default(false) }}"
 
 # Roll the instances ONE AT A TIME rather than all at once. With four instances
 # behind Envoy's health checks, a serial rollout keeps the box serving from the
@@ -101,18 +101,18 @@ someguy_rollout_wait_warm: "{{ production_rollout | default(false) }}"
 # takes hours instead of minutes. That is the right trade only once these boxes
 # carry traffic, so it rides the same production switch: in dev all four roll
 # together and a rollout is over in a couple of minutes.
-someguy_rollout_serial: "{{ production_rollout | default(false) }}"
+needle_rollout_serial: "{{ production_rollout | default(false) }}"
 
 # Peers in the cached address book that count as warm. A settled box on this
 # fleet holds 23k-26k; 15k is comfortably past the painful phase without
 # waiting for the last slow arrivals.
-someguy_warm_min_peers: 15000
+needle_warm_min_peers: 15000
 
 # How long to wait for that, and how often to look. The whole gate is skipped
 # when this run did not actually restart the pod.
-someguy_warm_timeout_seconds: 3600
-someguy_warm_poll_seconds: 60
+needle_warm_timeout_seconds: 3600
+needle_warm_poll_seconds: 60
 
 # Fail the play when a box does not warm up in time, rather than rolling the
 # next box on the assumption that this one recovered.
-someguy_warm_fail_on_timeout: true
+needle_warm_fail_on_timeout: true

@@ -8,13 +8,13 @@
 # ones have finished, so queueing shows up as growing latency instead of
 # silently lowering throughput.
 #
-# It also samples what the box itself is doing around every stage: someguy's
+# It also samples what the box itself is doing around every stage: needle's
 # CPU, its address-book cache hit/miss counters, in-flight and rejected
-# lookups, open FDs, and NIC bytes. That is what separates "someguy is at its
+# lookups, open FDs, and NIC bytes. That is what separates "needle is at its
 # limit" from "the client or the network is".
 #
 # WORKLOAD. --workload cold generates random CIDs that nobody provides, so
-# every request is a real, uncached lookup (the expensive case: someguy has no
+# every request is a real, uncached lookup (the expensive case: needle has no
 # provider-response cache, only a cached address book). --workload fixtures
 # replays scripts/routing-compare-cids.txt, which is mostly popular CIDs that
 # cid.contact answers quickly. --cold-fraction mixes the two.
@@ -36,7 +36,7 @@ usage() {
 Usage: ./scripts/routing-rate-test.sh --url-base URL [options]
 
 Options:
-  --url-base URL        required, e.g. http://127.0.0.1:8190 (someguy direct)
+  --url-base URL        required, e.g. http://127.0.0.1:8190 (needle direct)
                         or https://route-chic-1.ipni.io (through Cloudflare)
   --rates LIST          comma-separated target rates in requests/sec
                         (default: 25,50,100,200)
@@ -46,7 +46,7 @@ Options:
                         1.0 for --workload cold, 0.0 for fixtures
   --fixtures FILE       fixture list for the non-cold share
                         (default: scripts/routing-compare-cids.txt)
-  --metrics-url URL     someguy Prometheus endpoint to sample around each stage
+  --metrics-url URL     needle Prometheus endpoint to sample around each stage
                         (default: http://127.0.0.1:8190/debug/metrics/prometheus)
   --timeout S           per-request timeout (default: 30)
   --max-error-rate F    stop climbing above this error rate (default: 0.05)
@@ -176,7 +176,7 @@ def b32(raw):
 
 def cold_cid():
     """A CIDv1 raw/sha2-256 over random bytes: valid, and nobody provides it,
-    so someguy must do the full lookup."""
+    so needle must do the full lookup."""
     return "b" + b32(bytes([0x01, 0x55, 0x12, 0x20]) + hashlib.sha256(os.urandom(32)).digest())
 
 
@@ -210,9 +210,9 @@ def ms(v):
 
 # --- what the box is doing --------------------------------------------------
 METRICS = (
-    "someguy_cached_router_peer_addr_lookups",
-    "someguy_cached_router_find_peer_lookups_rejected",
-    "someguy_cached_router_find_peer_lookups_in_flight",
+    "needle_cached_router_peer_addr_lookups",
+    "needle_cached_router_find_peer_lookups_rejected",
+    "needle_cached_router_find_peer_lookups_in_flight",
     "process_cpu_seconds_total",
     "process_open_fds",
     "go_goroutines",
@@ -220,7 +220,7 @@ METRICS = (
 
 
 def scrape():
-    """someguy's own counters. Returns {} if the endpoint is not reachable."""
+    """needle's own counters. Returns {} if the endpoint is not reachable."""
     out = {}
     try:
         with urllib.request.urlopen(metrics_url, timeout=10) as resp:
@@ -402,10 +402,10 @@ def run_stage(rate):
         else:
             statuses[r["status"]] = statuses.get(r["status"], 0) + 1
 
-    hits = sum_by(m_after, "someguy_cached_router_peer_addr_lookups", cache="hit") - \
-        sum_by(m_before, "someguy_cached_router_peer_addr_lookups", cache="hit")
-    misses = sum_by(m_after, "someguy_cached_router_peer_addr_lookups", cache="miss") - \
-        sum_by(m_before, "someguy_cached_router_peer_addr_lookups", cache="miss")
+    hits = sum_by(m_after, "needle_cached_router_peer_addr_lookups", cache="hit") - \
+        sum_by(m_before, "needle_cached_router_peer_addr_lookups", cache="hit")
+    misses = sum_by(m_after, "needle_cached_router_peer_addr_lookups", cache="miss") - \
+        sum_by(m_before, "needle_cached_router_peer_addr_lookups", cache="miss")
     return {
         "target_rate": rate, "workers": pool_size(rate), "seconds": round(wall, 1),
         "requests": len(results), "errors": len(failed),
@@ -422,13 +422,13 @@ def run_stage(rate):
         "queue_p50_ms": percentile(queued, 50), "queue_p95_ms": percentile(queued, 95),
         "bytes_total": sum(r.get("bytes", 0) for r in good),
         "statuses": statuses, "error_kinds": errors,
-        "someguy_cpu_s": delta(m_before, m_after, "process_cpu_seconds_total"),
-        "someguy_open_fds": m_after.get("process_open_fds"),
-        "someguy_goroutines": m_after.get("go_goroutines"),
-        "someguy_lookups_rejected": delta(
-            m_before, m_after, "someguy_cached_router_find_peer_lookups_rejected"),
-        "someguy_lookups_in_flight": m_after.get(
-            "someguy_cached_router_find_peer_lookups_in_flight"),
+        "needle_cpu_s": delta(m_before, m_after, "process_cpu_seconds_total"),
+        "needle_open_fds": m_after.get("process_open_fds"),
+        "needle_goroutines": m_after.get("go_goroutines"),
+        "needle_lookups_rejected": delta(
+            m_before, m_after, "needle_cached_router_find_peer_lookups_rejected"),
+        "needle_lookups_in_flight": m_after.get(
+            "needle_cached_router_find_peer_lookups_in_flight"),
         "addr_cache_hits": hits, "addr_cache_misses": misses,
         "addr_cache_hit_rate": hits / (hits + misses) if (hits + misses) else None,
         "client_cpu_s": round(cpu1 - cpu0, 1),
@@ -457,7 +457,7 @@ for rate in rates:
     doc["stages"].append(stage)
     print(f"  {rate:>5}/s -> {stage['achieved_rps']:>7.1f}/s  p50 {ms(stage['p50_ms']):>8}"
           f"  p95 {ms(stage['p95_ms']):>8}  drain {stage['drain_s']}s"
-          f"  err {stage['error_rate']:.1%}  someguy_cpu {stage['someguy_cpu_s']}s",
+          f"  err {stage['error_rate']:.1%}  needle_cpu {stage['needle_cpu_s']}s",
           file=sys.stderr)
     throttled = stage["statuses"].get(429, 0)
     if throttled:
@@ -477,15 +477,15 @@ print(head)
 print("-" * len(head))
 for s in doc["stages"]:
     hit = "-" if s["addr_cache_hit_rate"] is None else f"{s['addr_cache_hit_rate']:.0%}"
-    cpu = "-" if s["someguy_cpu_s"] is None else f"{s['someguy_cpu_s']:.1f}s"
+    cpu = "-" if s["needle_cpu_s"] is None else f"{s['needle_cpu_s']:.1f}s"
     mbs = s["bytes_total"] / 1e6 / s["seconds"] if s["seconds"] else 0
     print(f"{s['target_rate']:>7} {s['achieved_rps']:>8.1f} {ms(s['p50_ms']):>8} "
           f"{ms(s['p95_ms']):>8} {ms(s['p99_ms']):>8} {ms(s['queue_p95_ms']):>8} "
           f"{s['error_rate']:>6.1%} {cpu:>7} {hit:>6} {mbs:>6.1f}")
 last = doc["stages"][-1]
 print(f"client cpu {last['client_cpu_s']}s/stage, nic rx {last['net_rx_mbps']}Mb/s "
-      f"tx {last['net_tx_mbps']}Mb/s, someguy fds {last['someguy_open_fds']}, "
-      f"goroutines {last['someguy_goroutines']}, lookups rejected {last['someguy_lookups_rejected']}")
+      f"tx {last['net_tx_mbps']}Mb/s, needle fds {last['needle_open_fds']}, "
+      f"goroutines {last['needle_goroutines']}, lookups rejected {last['needle_lookups_rejected']}")
 print("STOPPED: " + stopped if stopped else "OK: every stage met its target rate")
 
 doc.update(finished_at=now(), exit_code=1 if stopped else 0, stopped=stopped)

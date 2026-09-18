@@ -1,0 +1,46 @@
+---
+# Roll ONE needle instance: resume the rollout the apply left paused, wait for
+# its pod, prove its API answers, and (in production) wait for its address book
+# before the caller moves to the next one. Included per instance by main.yml
+# with needle_instance set.
+#
+# The other instances keep serving throughout; Envoy ejects this one while it
+# is down and takes it back when /version answers again.
+
+- name: "Resume {{ needle_instance.name }}"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=needle, rollout, resume, "deployment/{{ needle_instance.name }}"]
+  register: needle_resume
+  # Resuming a deployment that was never paused is an error, not a failure:
+  # it happens whenever this instance was created by the apply just now.
+  failed_when:
+    - needle_resume.rc != 0
+    - "'is not paused' not in needle_resume.stderr"
+  changed_when: needle_resume.rc == 0
+
+- name: "Wait for {{ needle_instance.name }} to roll out"
+  ansible.builtin.command:
+    argv:
+      - k3s
+      - kubectl
+      - --namespace=needle
+      - rollout
+      - status
+      - "deployment/{{ needle_instance.name }}"
+      - "--timeout={{ needle_rollout_timeout }}"
+  changed_when: false
+
+- name: "Confirm {{ needle_instance.name }} answers on 127.0.0.1:{{ needle_instance.api }}"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ needle_instance.api }}/version"
+    return_content: true
+  register: needle_instance_version
+  retries: 6
+  delay: 5
+  until: needle_instance_version.status == 200
+
+- name: "Wait for {{ needle_instance.name }}'s address book to warm up"
+  ansible.builtin.include_tasks: wait_warm.yml
+  vars:
+    needle_warm_instance: "{{ needle_instance }}"
+  when: needle_rollout_wait_warm | bool

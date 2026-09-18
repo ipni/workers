@@ -1,7 +1,7 @@
 {#
-  Rendered by roles/kustomize_apply from someguy_all_instances
-  (roles/someguy/defaults/main.yml): instance a, the first entry in that table.
-  Instances b onward are k8s/someguy/deployment-extra.yaml.j2, which is
+  Rendered by roles/kustomize_apply from needle_all_instances
+  (roles/needle/defaults/main.yml): instance a, the first entry in that table.
+  Instances b onward are k8s/needle/deployment-extra.yaml.j2, which is
   deliberately mechanical and points back here for the reasoning.
 
   Only the name and the two ports come from the table. Everything else is
@@ -11,7 +11,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ someguy_first_instance.name }}
+  name: {{ needle_first_instance.name }}
 spec:
   replicas: 1
   # hostNetwork binds ports 8190 and 4004 on the node itself, so a second pod
@@ -21,32 +21,32 @@ spec:
   # A restart of THIS instance is no longer an outage for the box: Envoy fans
   # out across all four, health-checks them, and ejects one that stops
   # answering (verified: with an instance scaled to zero, 40/40 requests still
-  # returned 200). roles/someguy rolls them one at a time, so a rollout costs
+  # returned 200). roles/needle rolls them one at a time, so a rollout costs
   # a quarter of the box's capacity rather than all of it. That matters
-  # because responses are not cached (cf-cache-status: DYNAMIC), so someguy's
+  # because responses are not cached (cf-cache-status: DYNAMIC), so needle's
   # stale-if-error header has no effect.
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app: {{ someguy_first_instance.name }}
+      app: {{ needle_first_instance.name }}
   template:
     metadata:
       labels:
-        app: {{ someguy_first_instance.name }}
+        app: {{ needle_first_instance.name }}
     spec:
       # libp2p has no announce-address option and advertises the addresses it
       # sees on its interfaces. On the pod network those would be unreachable
       # 10.42.x addresses; on the host network they include the public IP.
       hostNetwork: true
-      # The host's resolvers, deliberately not cluster DNS. someguy only needs
+      # The host's resolvers, deliberately not cluster DNS. needle only needs
       # public names (autoconf, cid.contact, /dnsaddr). With hostNetwork,
       # ClusterFirst would also fall back to the host resolvers; Default states
       # that intent explicitly (ClusterFirstWithHostNet would opt in to
       # cluster DNS).
       dnsPolicy: Default
 
-      # someguy shuts its HTTP server down within 5s of SIGTERM, then writes the
+      # needle shuts its HTTP server down within 5s of SIGTERM, then writes the
       # address book snapshot (sub-second at 25k peers) and closes the DHT. 30s
       # covers all three; SIGKILL mid-write leaves the previous snapshot intact
       # because the write is temp file plus rename.
@@ -67,32 +67,32 @@ spec:
           type: RuntimeDefault
 
       containers:
-        - name: someguy
-          image: someguy
+        - name: needle
+          image: needle
           envFrom:
             - configMapRef:
-                name: someguy-env-vars
+                name: needle-env-vars
           # The only per-instance settings: which ports this one owns. Set here
           # rather than in a per-instance ConfigMap so the generated-ConfigMap
           # prune in roles/kustomize_apply still sees every ConfigMap in use.
-          # someguy keeps no identity on disk, so each instance also gets its
+          # needle keeps no identity on disk, so each instance also gets its
           # own PeerID at start - the point of running more than one.
           env:
-            - name: SOMEGUY_LISTEN_ADDRESS
-              value: 127.0.0.1:{{ someguy_first_instance.api }}
-            - name: SOMEGUY_LIBP2P_LISTEN_ADDRS
-              value: /ip4/0.0.0.0/tcp/{{ someguy_first_instance.libp2p }},/ip4/0.0.0.0/udp/{{ someguy_first_instance.libp2p }}/quic-v1,/ip4/0.0.0.0/udp/{{ someguy_first_instance.libp2p }}/webrtc-direct,/ip4/0.0.0.0/udp/{{ someguy_first_instance.libp2p }}/quic-v1/webtransport,/ip6/::/tcp/{{ someguy_first_instance.libp2p }},/ip6/::/udp/{{ someguy_first_instance.libp2p }}/quic-v1,/ip6/::/udp/{{ someguy_first_instance.libp2p }}/webrtc-direct,/ip6/::/udp/{{ someguy_first_instance.libp2p }}/quic-v1/webtransport
+            - name: NEEDLE_LISTEN_ADDRESS
+              value: 127.0.0.1:{{ needle_first_instance.api }}
+            - name: NEEDLE_LIBP2P_LISTEN_ADDRS
+              value: /ip4/0.0.0.0/tcp/{{ needle_first_instance.libp2p }},/ip4/0.0.0.0/udp/{{ needle_first_instance.libp2p }}/quic-v1,/ip4/0.0.0.0/udp/{{ needle_first_instance.libp2p }}/webrtc-direct,/ip4/0.0.0.0/udp/{{ needle_first_instance.libp2p }}/quic-v1/webtransport,/ip6/::/tcp/{{ needle_first_instance.libp2p }},/ip6/::/udp/{{ needle_first_instance.libp2p }}/quic-v1,/ip6/::/udp/{{ needle_first_instance.libp2p }}/webrtc-direct,/ip6/::/udp/{{ needle_first_instance.libp2p }}/quic-v1/webtransport
           ports:
             - name: http
-              containerPort: {{ someguy_first_instance.api }}
+              containerPort: {{ needle_first_instance.api }}
               protocol: TCP
-            # 4004 is someguy's built-in libp2p default; roles/someguy opens the
+            # 4004 is needle's built-in libp2p default; roles/needle opens the
             # same port in ufw. Change both together.
             - name: libp2p-tcp
-              containerPort: {{ someguy_first_instance.libp2p }}
+              containerPort: {{ needle_first_instance.libp2p }}
               protocol: TCP
             - name: libp2p-udp
-              containerPort: {{ someguy_first_instance.libp2p }}
+              containerPort: {{ needle_first_instance.libp2p }}
               protocol: UDP
 
           # One of FOUR instances per box (see kustomization.yaml). Together
@@ -115,7 +115,7 @@ spec:
             limits:
               memory: 21Gi
 
-          # someguy has no health endpoint. /version answers as soon as the
+          # needle has no health endpoint. /version answers as soon as the
           # HTTP server is up, and the server keeps answering while the
           # accelerated DHT crawls (lookups fall back to the standard client).
           # host: 127.0.0.1 - the API only listens on loopback, and with
@@ -156,7 +156,7 @@ spec:
 
           volumeMounts:
             - name: data
-              mountPath: /data/someguy
+              mountPath: /data/needle
 
       volumes:
         # The autoconf cache and the address book snapshot survive on this
@@ -165,4 +165,4 @@ spec:
         # pvc.yaml.j2, one claim per running instance.
         - name: data
           persistentVolumeClaim:
-            claimName: {{ someguy_first_instance.name }}-data
+            claimName: {{ needle_first_instance.name }}-data

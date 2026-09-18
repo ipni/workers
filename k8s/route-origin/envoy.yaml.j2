@@ -1,7 +1,7 @@
 # Envoy as the Cloudflare origin for route-<box>.ipni.io.
 #
-# Cloudflare (Full strict) -> :443 TLS here -> 127.0.0.1:8190 (someguy).
-# Both Envoy and someguy use hostNetwork, so the upstream is plain loopback.
+# Cloudflare (Full strict) -> :443 TLS here -> 127.0.0.1:8190 (needle).
+# Both Envoy and needle use hostNetwork, so the upstream is plain loopback.
 
 admin:
   # Host loopback only (hostNetwork). ufw would block it anyway; this keeps the
@@ -65,14 +65,14 @@ static_resources:
                 # Canonicalize the path BEFORE route matching. Without this the
                 # "/routing/v1/" prefix also matched /routing/v1/../debug/... and
                 # forwarded it unchanged; /debug stayed hidden only because
-                # someguy's router happens to redirect unclean paths. The
+                # needle's router happens to redirect unclean paths. The
                 # allowlist must not depend on an upstream implementation detail.
                 normalize_path: true
                 merge_slashes: true
                 path_with_escaped_slashes_action: REJECT_REQUEST
                 request_headers_timeout: 10s
-                # someguy keeps a response open for up to 25s
-                # (SOMEGUY_ROUTING_TIMEOUT) while lookups run, and NDJSON
+                # needle keeps a response open for up to 25s
+                # (NEEDLE_ROUTING_TIMEOUT) while lookups run, and NDJSON
                 # streams can be silent between records for most of that.
                 stream_idle_timeout: 60s
                 common_http_protocol_options:
@@ -94,7 +94,7 @@ static_resources:
                           bytes: "%BYTES_SENT%"
                           duration_ms: "%DURATION%"
                           upstream_ms: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
-                          # Which someguy instance served it. With four behind
+                          # Which needle instance served it. With four behind
                           # the round robin, a slow tail is only actionable if
                           # it can be attributed to one of them - a cold
                           # instance after a rollout looks exactly like a slow
@@ -131,10 +131,10 @@ static_resources:
                         - route-sing-1.ipni.io
                         - route-lith-1.ipni.io
                         - route-chic-1.ipni.io
-                      # ALLOWLIST, not a blocklist. someguy serves Prometheus
+                      # ALLOWLIST, not a blocklist. needle serves Prometheus
                       # metrics on the same port as the API (/debug/...);
                       # anything not listed here - including endpoints a future
-                      # someguy release adds - is never exposed publicly.
+                      # needle release adds - is never exposed publicly.
                       routes:
                         # IPNS publishing is deliberately open, matching the
                         # production delegated-ipfs.dev: records are
@@ -146,7 +146,7 @@ static_resources:
                               - name: ":method"
                                 string_match: { exact: "PUT" }
                           route:
-                            cluster: someguy
+                            cluster: needle
                             timeout: 60s
                           typed_per_filter_config:
                             envoy.filters.http.local_ratelimit:
@@ -163,7 +163,7 @@ static_resources:
                                 - append_action: OVERWRITE_IF_EXISTS_OR_ADD
                                   header: { key: x-local-rate-limit, value: "ipns-put" }
                         # Lookups. A miss can hold a request for up to 25s while
-                        # someguy queries the DHT and cid.contact. The bucket is a
+                        # needle queries the DHT and cid.contact. The bucket is a
                         # per-box ceiling, not a per-client limit (that is
                         # Cloudflare's job).
                         #
@@ -184,7 +184,7 @@ static_resources:
                         # box (see README, "Capacity").
                         - match: { prefix: "/routing/v1/" }
                           route:
-                            cluster: someguy
+                            cluster: needle
                             # Above the 25s routing timeout, below Cloudflare's
                             # 100s proxy read timeout.
                             timeout: 60s
@@ -204,7 +204,7 @@ static_resources:
                                   header: { key: x-local-rate-limit, value: "lookups" }
                         - match: { path: "/version" }
                           route:
-                            cluster: someguy
+                            cluster: needle
                             timeout: 5s
                         - match: { prefix: "/" }
                           direct_response:
@@ -222,7 +222,7 @@ static_resources:
                             body: { inline_string: "misdirected request\n" }
 
   clusters:
-    - name: someguy
+    - name: needle
       type: STATIC
       connect_timeout: 2s
       # Envoy's default of 1024 concurrent requests is too low when each lookup
@@ -235,14 +235,14 @@ static_resources:
             max_connections: 20000
             max_pending_requests: 20000
             max_requests: 20000
-      # Four someguy instances per box (k8s/someguy). Round robin across them:
+      # Four needle instances per box (k8s/needle). Round robin across them:
       # each is a separate process with its own PeerID and concurrency budget,
       # and requests queue behind slow DHT rounds per process, so spreading
       # them is what raised sing-1 from 355 to 894 req/s (README, "Capacity").
       lb_policy: ROUND_ROBIN
 
       # An instance that stops answering must be taken out of rotation, not
-      # sent traffic that then fails: roles/someguy restarts them one at a time.
+      # sent traffic that then fails: roles/needle restarts them one at a time.
       # An ACTIVE health check is what does that here - passive outlier
       # detection alone cannot, because with four endpoints the default
       # max_ejection_percent of 10% never reaches one whole endpoint.
@@ -253,7 +253,7 @@ static_resources:
       #
       # The 2s timeout is safe because /version is a trivial handler that
       # touches neither the DHT nor the address book: lookup p50 runs to
-      # seconds under load, but /version does not. WATCH THIS if someguy ever
+      # seconds under load, but /version does not. WATCH THIS if needle ever
       # grows a real health endpoint that does work, or if health-check
       # failures start appearing in the Envoy logs at peak - an instance that
       # flaps out for 5-10s sheds its share onto the other three and makes the
@@ -279,16 +279,16 @@ static_resources:
         interval: 5s
         base_ejection_time: 10s
         max_ejection_percent: 50
-      # Rendered from someguy_running_instances (roles/someguy/defaults) by
-      # roles/kustomize_apply, so lowering someguy_instances trims this list
+      # Rendered from needle_running_instances (roles/needle/defaults) by
+      # roles/kustomize_apply, so lowering needle_instances trims this list
       # too. It used to be written out by hand, which meant a lowered count
       # left Envoy health-checking ports that no longer existed and logging
       # the failures forever.
       load_assignment:
-        cluster_name: someguy
+        cluster_name: needle
         endpoints:
           - lb_endpoints:
-{% for instance in someguy_running_instances %}
+{% for instance in needle_running_instances %}
               # {{ instance.name }}
               - endpoint:
                   address:

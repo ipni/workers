@@ -1,11 +1,11 @@
 # IPFS/IPNI worker nodes
 
 Ansible base preparation for three geographically distributed hosts that will
-run IPFS-related services (someguy, a bootstrapper node, and the "content
+run IPFS-related services (needle, a bootstrapper node, and the "content
 cluster" node serving website content and documentation).
 
 `site.yml` prepares the boxes; `routing.yml` deploys the routing service
-(someguy, the primary workload, behind an Envoy origin for Cloudflare);
+(needle, the primary workload, behind an Envoy origin for Cloudflare);
 `bootstrap.yml` deploys the public bootstrap nodes; `content.yml` deploys the
 content cluster node (kubo + ipfs-cluster, one cluster peer per box) that
 hosts the website content.
@@ -57,8 +57,8 @@ reason). Once hardening has run, every later connection is key-based and
 iterating. Set it to `true` - or pass `-e production_rollout=true` for one
 deploy - once these boxes serve real traffic: `routing.yml`, `bootstrap.yml`,
 `content.yml` and `k3s-upgrade.yml` then roll one box at a time, and
-`routing.yml` additionally waits for each box to rebuild the state a someguy
-restart throws away, about an hour per box (see "Capacity: four someguy
+`routing.yml` additionally waits for each box to rebuild the state a needle
+restart throws away, about an hour per box (see "Capacity: four needle
 instances per box"). Every box is a whole site with no failover between them,
 so a simultaneous rollout in production is a full outage. `site.yml` is the
 exception: it is not serialised, so re-run it against a live fleet one box at
@@ -167,25 +167,26 @@ unless the two agree, so the target and the route to it stay in step. Then run
 - Each step waits for the node version, Ready, and every deployment.
 - Rolling back to an older minor needs the backup taken on that minor.
 
-## someguy
+## needle
 
-[someguy](https://github.com/ipfs/someguy) is a Delegated Routing V1 HTTP
+[needle](https://github.com/ipni/needle) is IPNI's fork of
+[ipfs/someguy](https://github.com/ipfs/someguy), a Delegated Routing V1 HTTP
 server (`/routing/v1/providers`, `/peers`, `/ipns`, `/dht/closest/peers`). It
 answers lookups from the Amino DHT (accelerated client) and cid.contact.
 
 ```bash
-ansible-playbook routing.yml                  # someguy + origin, all boxes
+ansible-playbook routing.yml                  # needle + origin, all boxes
 ansible-playbook routing.yml -l chic-1        # one box
-ansible-playbook routing.yml --tags someguy   # someguy only
+ansible-playbook routing.yml --tags needle   # needle only
 ansible-playbook routing.yml --check --diff   # dry run, validated by the API server
 ```
 
-Manifests live in `k8s/someguy/` (kustomize, same conventions as
+Manifests live in `k8s/needle/` (kustomize, same conventions as
 `storetheindex/deploy`). The role opens the libp2p port, ships the manifests,
 applies them, waits for the rollout and checks `/version` on the box.
 
-**Version:** `ghcr.io/ipni/someguy:v0.16.0-ipni.1`, pinned by index digest in
-`k8s/someguy/kustomization.yaml`. To upgrade, change the digest.
+**Version:** `ghcr.io/ipni/needle:v1.0.0`, pinned by index digest in
+`k8s/needle/kustomization.yaml`. To upgrade, change the digest.
 
 That is IPNI's fork of someguy, not upstream `ghcr.io/ipfs/someguy`. It is
 upstream v0.16.0 plus eight changes measured on this fleet - pprof, per-router
@@ -193,12 +194,12 @@ timing metrics, the cached address book snapshot, the negative TTL with
 singleflight, the DHT tail budget, the DHT crawl snapshot, the
 accelerated-ready gauge, and the FindPeer grace and dial timeout - and is built
 against `github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2`. Each change is off
-unless the matching `SOMEGUY_*` variable in the kustomization turns it on. See
+unless the matching `NEEDLE_*` variable in the kustomization turns it on. See
 that repo's `FORK.md` for what the kad-dht fork carries and why.
 
 **Design points, and why**
 
-- **`hostNetwork: true`.** someguy has no option to announce an address, and
+- **`hostNetwork: true`.** needle has no option to announce an address, and
   libp2p advertises the addresses it sees on its interfaces. On the pod network
   those are unreachable `10.42.x` addresses. With the host network each box
   advertises its public IP on TCP, QUIC, WebTransport and WebRTC.
@@ -207,8 +208,8 @@ that repo's `FORK.md` for what the kad-dht fork carries and why.
   loopback, where their single client (the Envoy origin, also `hostNetwork`)
   lives. They are unreachable from any interface even without the firewall.
   There is deliberately no Service for them.
-- **Four instances per box, so a restart is no longer an outage.** `someguy`,
-  `someguy-b`, `someguy-c` and `someguy-d` own 8190-8193 (API, loopback) and
+- **Four instances per box, so a restart is no longer an outage.** `needle`,
+  `needle-b`, `needle-c` and `needle-d` own 8190-8193 (API, loopback) and
   4004-4007 (libp2p). Envoy round-robins across them, health-checks each on
   `/version`, and ejects one that stops answering (verified: with an instance
   scaled to zero, 40/40 requests still returned 200). Each Deployment is still
@@ -216,12 +217,12 @@ that repo's `FORK.md` for what the kad-dht fork carries and why.
   only one instance is down at a time, so a rollout costs a quarter of the
   box's capacity rather than all of it. That matters because Cloudflare does
   **not** cover a gap: responses are not cached (`cf-cache-status: DYNAMIC`),
-  so someguy's `stale-if-error` header has no effect. There is no preStop
+  so needle's `stale-if-error` header has no effect. There is no preStop
   pause: with no Service in front, it would only lengthen rollouts.
 - **Upstreams.** The DHT plus the autoconf default endpoints, which means
   cid.contact for providers. **These boxes must never be configured as an
   upstream of cid.contact**, or provider lookups would loop.
-- **No persistent state.** someguy keeps no identity or datastore on disk
+- **No persistent state.** needle keeps no identity or datastore on disk
   (`--datadir` holds only the autoconf cache, and the address book is purely
   in-memory with a 48h TTL). Each restart gets a new PeerID - which is why four
   instances get four separate DHT identities - and re-crawls, about 1-2 minutes
@@ -231,7 +232,7 @@ that repo's `FORK.md` for what the kad-dht fork carries and why.
 - **Memory.** The libp2p resource manager defaults to 85% of *host* RAM,
   ignoring the pod limit. It is capped explicitly at 16 GiB per instance, below
   the 21 GiB container limit, with `GOMEMLIMIT=20GiB`.
-- **Health checks.** someguy has no health endpoint, so the probes use `/version`.
+- **Health checks.** needle has no health endpoint, so the probes use `/version`.
 - **Runs as uid 10001,** a uid with no account on the host, rather than the
   image's default 1000.
 
@@ -242,7 +243,7 @@ bootstrapper, the content cluster node and the OS. Memory is a reservation, not
 measured need - four instances serving 894 req/s held 1.2-1.5 GiB each. The CPU
 floor is measured: the same run used 4.4-4.9 cores each, 18.2 of 32.
 
-**Rolling someguy.** Both the one-at-a-time order and the warm-up gate hang off
+**Rolling needle.** Both the one-at-a-time order and the warm-up gate hang off
 `production_rollout`, which is **`false` today** in
 `group_vars/ipfs_nodes/main.yml`. So the default run - the one you get with no
 `-e` at all - rolls all four instances on all three boxes simultaneously. That
@@ -252,11 +253,11 @@ in `group_vars` when they go live.
 | | boxes | instances per box | warm-up gate | cost |
 |---|---|---|---|---|
 | `production_rollout=false` (today) | all at once | all four at once | no | ~5 min, fleet-wide outage |
-| `-e production_rollout=true -e someguy_rollout_wait_warm=false` | one at a time | one at a time | no | ~6 min/box, no outage |
+| `-e production_rollout=true -e needle_rollout_wait_warm=false` | one at a time | one at a time | no | ~6 min/box, no outage |
 | `production_rollout=true` | one at a time | one at a time | yes | hours/box, no outage |
 
 With the gate on, each instance waits for its address book to reach
-`someguy_warm_min_peers` before the next instance - or the next box - is
+`needle_warm_min_peers` before the next instance - or the next box - is
 touched, so the box never drops below three quarters of *warm* capacity. The
 middle row is the break-glass path for an urgent fix. It still avoids an
 outage - Envoy ejects whichever instance is down and serves from the other
@@ -266,25 +267,25 @@ minutes, so the box answers everything and answers it slowly for about an hour.
 
 ```bash
 # break glass: one instance at a time, no warm-up wait (~6 min/box)
-ansible-playbook routing.yml -e production_rollout=true -e someguy_rollout_wait_warm=false
+ansible-playbook routing.yml -e production_rollout=true -e needle_rollout_wait_warm=false
 ```
 
-Note that `routing.yml` runs the `someguy` role before `route_origin`, so the
+Note that `routing.yml` runs the `needle` role before `route_origin`, so the
 **first** run that introduces a new instance is still a full outage for the box:
 Envoy only learns the new endpoints when the origin role applies, one role
 later. The no-outage property holds from the second run onward.
 
-`someguy_instances` (default 4) lowers the count: the extra Deployments are
+`needle_instances` (default 4) lowers the count: the extra Deployments are
 deleted and their firewall ports closed. It is not a full revert on its own -
-see `roles/someguy/defaults/main.yml` for what else has to change.
+see `roles/needle/defaults/main.yml` for what else has to change.
 
 ## Public endpoint: route-<box>.ipni.io
 
-The public names deliberately avoid "someguy", since the implementation may
+The public names deliberately avoid "needle", since the implementation may
 change.
 
 ```
-client -> Cloudflare (proxied, Full strict) -> :443 Envoy on the box -> 127.0.0.1:8190 someguy
+client -> Cloudflare (proxied, Full strict) -> :443 Envoy on the box -> 127.0.0.1:8190 needle
 ```
 
 | Box    | Hostname             |
@@ -297,12 +298,12 @@ Envoy (`k8s/route-origin`, `roles/route_origin`, v1.39.1 pinned by digest)
 terminates TLS with a **Cloudflare Origin CA certificate**.
 
 - **Paths are allowlisted, not blocklisted.** Only `/routing/v1/*` and
-  `/version` reach someguy. Everything else returns 404, including
+  `/version` reach needle. Everything else returns 404, including
   `/debug/metrics/prometheus`, which shares a port with the API.
 - **Paths are canonicalized before matching** (`normalize_path`,
   `merge_slashes`, escaped slashes rejected with 400). Without this,
   `/routing/v1/../debug/...` matched the allowlisted prefix and was forwarded
-  unchanged. `/debug` stayed hidden only because someguy happened to redirect
+  unchanged. `/debug` stayed hidden only because needle happened to redirect
   unclean paths.
 - **Host allowlist.** Only the three `route-<box>.ipni.io` names are served; any
   other Host gets **421**. If the live Cloudflare router sends a different Host,
@@ -315,7 +316,7 @@ terminates TLS with a **Cloudflare Origin CA certificate**.
   Pulls, is prepared but deferred** (see "Deferred: Authenticated Origin Pulls"
   below) until it is clear which Cloudflare zones will send traffic here.
   Until then, another Cloudflare account that rewrites Host can still reach
-  someguy through these origins. The data is public, but that bypasses any
+  needle through these origins. The data is public, but that bypasses any
   `ipni.io` zone controls such as rate limiting.
 - **Envoy runs with `hostNetwork` so the ufw rule applies at all.** Traffic to a
   LoadBalancer or hostPort is DNATed into the FORWARD chain, where kube-proxy
@@ -325,7 +326,7 @@ terminates TLS with a **Cloudflare Origin CA certificate**.
   removed automatically, and `scripts/check-cloudflare-ranges.sh` compares the
   pinned list with Cloudflare's API (exit 1 on drift).
 - **IPNS publishing is open, deliberately.** `PUT /routing/v1/ipns/{name}`
-  reaches someguy, matching production `delegated-ipfs.dev`. Records are
+  reaches needle, matching production `delegated-ipfs.dev`. Records are
   self-certifying, but each PUT fans out to the DHT, so it has its own small
   rate limit.
 - **Rate limits.** A Cloudflare rate limiting rule limits per client. Envoy
@@ -338,7 +339,7 @@ terminates TLS with a **Cloudflare Origin CA certificate**.
   traffic arrives. Circuit breakers are 20,000, matching the downstream
   connection cap and well under loopback's ~64k source ports.
 - **Streaming and timeouts.** NDJSON responses stream unbuffered (first byte in
-  about 0.1s). The route timeout is 60s: above someguy's 25s lookup cap, below
+  about 0.1s). The route timeout is 60s: above needle's 25s lookup cap, below
   Cloudflare's 100s proxy timeout.
 - **Binding 443 as non-root.** Kubernetes does not give added capabilities to
   non-root processes. The role instead sets the host's
@@ -374,7 +375,7 @@ terminates TLS with a **Cloudflare Origin CA certificate**.
 
 **After deploy** it checks that Envoy serves exactly that certificate (by
 SHA-256 fingerprint), then runs `roles/route_origin/tasks/verify.yml`:
-allowlisted and hidden paths, IPNS PUT reaching someguy, four path-traversal
+allowlisted and hidden paths, IPNS PUT reaching needle, four path-traversal
 cases, and a wrong Host (421). With AOP enforced it also checks that a
 connection without the client certificate is refused. Any unexpected result
 fails the deploy.
@@ -480,12 +481,12 @@ request at a time.
 - **Latency includes your path to Cloudflare**, the same for every endpoint.
   Box-to-box differences partly reflect where you ran it from.
 
-**A restart no longer costs an hour.** It used to: someguy kept no state, so a
+**A restart no longer costs an hour.** It used to: needle kept no state, so a
 restart began with an empty DHT routing table and an empty address book, both
 rebuilt only by serving traffic, and until they were our counts and latencies
 were understated. That is what this table recorded, on sing-1 at 200 req/s:
 
-| Age | p50 | Address-book hit rate | someguy CPU per 30s |
+| Age | p50 | Address-book hit rate | needle CPU per 30s |
 |-----|-----|-----------------------|---------------------|
 | 15 min | 5002ms | 51% | 300s |
 | 30 min | 2940ms | 58% | 187s |
@@ -500,17 +501,17 @@ instance's own PVC - the address book every 15 minutes, the crawled routing
 table after every completed crawl - so a restarted instance restores both and
 serves properly in seconds. Re-measured on sing-1 at 200 req/s, same conditions:
 
-| Age | p50 | p95 | `someguy_cached_addr_book_peer_state_size` |
+| Age | p50 | p95 | `needle_cached_addr_book_peer_state_size` |
 |-----|-----|-----|--------------------------------------------|
 | 2 min | _measured 2026-09-18_ | | |
 | 15 min | _measured 2026-09-18_ | | |
 
-Check the pod's age first (`kubectl -n someguy get pods`) and use `--out` to
+Check the pod's age first (`kubectl -n needle get pods`) and use `--out` to
 track how results change, but the hour-long embargo above no longer applies to
-an instance that restored its snapshots - `someguy_dht_accelerated_ready` at `1`
+an instance that restored its snapshots - `needle_dht_accelerated_ready` at `1`
 with both `*_snapshot_restored_peers` gauges non-zero is the thing to confirm.
 
-### Capacity: four someguy instances per box
+### Capacity: four needle instances per box
 
 `routing-compare.sh` shows the boxes answer correctly; it says nothing about
 load. Two scripts measure that:
@@ -524,7 +525,7 @@ load. Two scripts measure that:
 `routing-load.sh` holds N requests in flight, so its throughput is
 `concurrency / latency` and a slow link caps the answer. `routing-rate-test.sh`
 drives a fixed **arrival rate** instead, so a box that cannot keep up shows
-growing latency rather than quietly lower throughput, and it samples someguy's
+growing latency rather than quietly lower throughput, and it samples needle's
 own counters (CPU, address-book hit rate, rejected lookups, open FDs) around
 every stage. **Run it on the box** (`ansible <box> -m script -a ...`): from a
 workstation, the round trip and the client's own thread pool become the limit
@@ -534,8 +535,8 @@ takes seconds, so the client silently becomes the ceiling. The 2026-09-16
 numbers below marked "client-bound" were measured that way and are too low;
 re-measured with `--workers 12288` the same boxes went 50% higher.
 
-**Each box runs FOUR someguy instances** (`someguy`, `someguy-b`, `someguy-c`,
-`someguy-d`) on 8190-8193 (API, loopback) and 4004-4007 (libp2p), with Envoy
+**Each box runs FOUR needle instances** (`needle`, `needle-b`, `needle-c`,
+`needle-d`) on 8190-8193 (API, loopback) and 4004-4007 (libp2p), with Envoy
 round-robining across them. Each is a separate process with its own PeerID,
 concurrency budget and connection pool. Measured on sing-1, 2026-09-16, warm,
 fixture mix through Cloudflare, zero HTTP errors at every stage:
@@ -637,7 +638,7 @@ penalty: it costs tail latency at high rates, not capacity.
 
 **Watch chic-1's tail.** Its p95 degrades at the top of the ladder (1427ms at
 850/s, 2739ms at 1000/s, p99 at the 5s wall) while lith-1 holds p95 at 283ms,
-and its someguy CPU was the highest of the three (~190s per 30s stage). Nothing
+and its needle CPU was the highest of the three (~190s per 30s stage). Nothing
 failed, but it is the first box that would.
 
 For scale, 1.1B requests/month is ~424 req/s across the fleet, or ~141 req/s
@@ -651,7 +652,7 @@ instances not the FindPeer cap either. It is **DHT round-trip distance**. A look
 records arrive without addresses needs a FindPeer walk, several sequential hops
 each costing a round trip, and every operation inside the accelerated client is
 capped at 5s (`timeoutPerOp` in go-libp2p-kad-dht `fullrt/dht.go`, not exposed
-by someguy - it is why p95 pins at almost exactly 5000ms under load). Walks
+by needle - it is why p95 pins at almost exactly 5000ms under load). Walks
 that hit the cap return records without addresses, so fewer addresses are
 cached, so more walks are needed: the further a box sits from the DHT's centre
 of mass, the worse the loop. sing-1 pays it hardest - cold lookups take 594ms
@@ -659,10 +660,10 @@ against chic-1's 303ms, and its address-book hit rate settles at 57-69% against
 chic-1's 76-82%, on identical hardware and identical configuration.
 
 **The 5s cap costs results, on every box.** Running sing-1 on
-`SOMEGUY_DHT=standard` for one comparison (2026-09-16) showed what the
+`NEEDLE_DHT=standard` for one comparison (2026-09-16) showed what the
 accelerated client drops: on sparse DHT content a full iterative walk found 45,
 18, 16 and 17 providers where the accelerated boxes returned 38, 14, 14 and 12.
-Well-provided content is unaffected - every box hits `SOMEGUY_RECORDS_LIMIT`
+Well-provided content is unaffected - every box hits `NEEDLE_RECORDS_LIMIT`
 either way - so the loss is invisible except on exactly the content that has
 few providers to begin with. This is the strongest argument for exposing
 `fullrt`'s `timeoutPerOp`: a value between 5s and 25s would likely recover most
@@ -713,34 +714,34 @@ below still stand on their own merits:
 **What has already been tried:**
 
 - **Kept: four instances per box** (2026-09-16). See the table above. Rejected
-  along the way: raising `SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS`
+  along the way: raising `NEEDLE_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS`
   again. It bounds *background* address-book fills, not the foreground lookup
   path; the earlier 512 -> 2048 raise cut CPU but never moved the ceiling, and
   there was no reason to expect a third raise to differ.
 
-- **Kept:** `SOMEGUY_RECORDS_LIMIT` 100 -> 50 (all boxes). Measured on sing-1
+- **Kept:** `NEEDLE_RECORDS_LIMIT` 100 -> 50 (all boxes). Measured on sing-1
   at 25: p50 halved at 200 req/s (2208ms -> 1180ms) and response bytes fell
-  ~70%; warm-up was quicker at every checkpoint. But someguy's CPU (100s per
+  ~70%; warm-up was quicker at every checkpoint. But needle's CPU (100s per
   30s stage), its p95 (5018ms) and its ceiling (~355 req/s) did not move, so
   the gain is in building and shipping the response, **not** in fewer provider
   lookups as expected - the tail is DHT walks, and they happen whatever we
   return. 50 trades half that measured gain for half the loss in completeness;
   the spec recommends 100. Bandwidth was never the constraint here, so the
   ~70% saving is incidental.
-- **Kept:** `SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS` 512 -> 2048.
+- **Kept:** `NEEDLE_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS` 512 -> 2048.
   At 200 req/s sing-1 was rejecting 7,809 background FindPeer lookups per 30s
   while using 5.5 of 32 cores - the cap, not the box, was the limit. Raising it
   removed the rejections and cut CPU about 2.3x. Inert on chic-1, which never
   reached the old cap.
-- **Rejected:** `SOMEGUY_DHT=standard` on sing-1. It answered *more*
+- **Rejected:** `NEEDLE_DHT=standard` on sing-1. It answered *more*
   completely - more providers on 7 of 28 fixtures - but many requests then ran
-  someguy's full 25s `routing-timeout` where the accelerated boxes answer in
+  needle's full 25s `routing-timeout` where the accelerated boxes answer in
   0.1-0.5s. At that latency a public endpoint holds connections and goroutines
   open until they time out, so throughput would fall below the ~355 req/s
-  sing-1 already manages. `SOMEGUY_DHT=disabled` (cid.contact only) is ruled
+  sing-1 already manages. `NEEDLE_DHT=disabled` (cid.contact only) is ruled
   out by requirement: these endpoints must serve DHT-only content.
 - **Reverted:** connection manager 1000/8000 with a 96h address TTL. It doubled
-  someguy's CPU (2.7 -> 5.5 cores at 200 req/s) and made p50 about 1.5x worse
+  needle's CPU (2.7 -> 5.5 cores at 200 req/s) and made p50 about 1.5x worse
   for a marginal hit-rate change. More retained connections cost more to
   maintain than the dials they saved.
 
@@ -810,7 +811,7 @@ clients; if it changed, every bootstrap address would break.
   (`API.Authorizations`, per-box `vault_bootstrap_api_token`). With
   `hostNetwork`, loopback is shared with every host process and the other
   host-network pods, so loopback alone did not protect the admin RPC. Verified:
-  without the token, `/api/v0` returns 403, including from inside someguy's
+  without the token, `/api/v0` returns 403, including from inside needle's
   container. kubo does not guard `/debug/metrics` and `/debug/pprof` with it;
 - connection manager 4000/8000 (a bootstrapper's job is to accept peers),
   resource manager 8 GiB;
@@ -943,7 +944,7 @@ browser --wss--> :4443 Envoy (TLS, Let's Encrypt) --ws--> 127.0.0.1:4002 kubo
 - **Kubo (uid 10002) may not open new loopback connections** except to its RPC
   API. Removing the loopback filter also let kubo *dial* loopback, and a WSS
   client (a loopback peer to kubo) could hand it 127.0.0.1 addresses to probe
-  the k3s API, kubelet, someguy and Envoy admin ports. Replies to the proxy's
+  the k3s API, kubelet, needle and Envoy admin ports. Replies to the proxy's
   connections are unaffected.
 
 **Testing like a browser.** `scripts/wss-check` dials with js-libp2p, WebSockets
@@ -1091,7 +1092,7 @@ k3s kubectl -n content exec deploy/content -c cluster -- \
   starts from a root (for example DNSLink to the site root, then path
   resolution) finds these nodes. A client asking the DHT for any other CID (a
   direct `ipfs://` link to a file or subdirectory) finds no provider unless it
-  is already connected to one of them. The reason was contention with someguy,
+  is already connected to one of them. The reason was contention with needle,
   which runs about 416 DHT lookups/sec on the same boxes. The two do not share a
   libp2p host or resource manager, only the host's CPU and sockets, and kubo
   0.43's sweeping provider batches reprovides by keyspace region, so the cost of
@@ -1115,9 +1116,9 @@ k3s kubectl -n content exec deploy/content -c cluster -- \
   Not at `/data`: both images declare `VOLUME /data/...`, and containerd mounts
   an anonymous volume on the OS disk over those paths unless a pod volume is
   mounted exactly there. `hostNetwork`, `Recreate`, uid/gid 10003 (distinct
-  from someguy's 10001 and the bootstrapper's 10002), read-only root
+  from needle's 10001 and the bootstrapper's 10002), read-only root
   filesystems.
-- From the ~30% of each box not reserved for someguy, shared with the
+- From the ~30% of each box not reserved for needle, shared with the
   bootstrapper: kubo requests 500m / 2 GiB (limit 4 CPU / 8 GiB), cluster
   250m / 512 MiB (limit 2 CPU / 4 GiB). **Initial guesses**, to tune once
   content is pinned.
@@ -1126,7 +1127,7 @@ k3s kubectl -n content exec deploy/content -c cluster -- \
   `ipfs-cluster-ctl id`.
 - **The APIs are unauthenticated on loopback, by decision.** Loopback is shared
   with the host and the other host-network pods, all of them this project's own
-  workloads (someguy, both Envoys and the bootstrapper, several internet-facing).
+  workloads (needle, both Envoys and the bootstrapper, several internet-facing).
   A request from any of them to 9094 or 9095 changes the shared pinset, so
   **every box** would fetch, store and announce that content from this
   project's IPs. Changes to kubo's config through 5021 last only until the
@@ -1195,7 +1196,7 @@ means three copies on three boxes; the pins do not override it with a fixed
 
 **Only roots are reprovided.** `Provide.Strategy` is `roots` (the kubo 0.43
 name for `Reprovider.Strategy`): each pin's root CID is announced to the DHT,
-not every block. someguy runs about 416 DHT lookups/sec on the same boxes, and
+not every block. needle runs about 416 DHT lookups/sec on the same boxes, and
 reproviding every block of every site would compete with it. Clients reach a
 site through its root (DNSLink, then path resolution) and fetch the rest over
 Bitswap. See **kubo** above.
@@ -1307,7 +1308,7 @@ same path a deploy takes), so what is checked is what would be applied:
 | `ansible-playbook --syntax-check` on all five playbooks | a role edit that breaks a playbook nobody ran |
 | `ansible-lint`, `yamllint` | the rest, minus the style rules in `.ansible-lint` |
 | `kubectl kustomize` on every rendered `k8s/*/` | a patch or digest pin that no longer applies |
-| rendering at `someguy_instances` 1, 2 and 4 | the Deployments and Envoy's endpoint list falling out of step |
+| rendering at `needle_instances` 1, 2 and 4 | the Deployments and Envoy's endpoint list falling out of step |
 | `sha256sum -c` on `cert-manager.yaml` | the vendored release manifest changing under its pin |
 | `bootstrap-dns.py \| diff - dns.txt` | `dns.txt` drifting from its generator |
 | every `pinset.yml` section is in the role's `known_sections` | a section the content role silently ignores |
@@ -1351,7 +1352,7 @@ turn an unrelated pull request red.
 - [ ] **Enable Authenticated Origin Pulls** once the zones are known (see
       "Deferred: Authenticated Origin Pulls").
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
-- [ ] Tune someguy resources and Envoy's rate limits against real traffic metrics.
+- [ ] Tune needle resources and Envoy's rate limits against real traffic metrics.
 - [ ] **Three sites have no CID anywhere:** `docs.libp2p.io`, `ipld.io` and
       `dnslink.io` are under `recover_from_upstream`, and the 2026-09-16 search
       found them nowhere in the upstream pinset listings committed beside
@@ -1405,12 +1406,12 @@ inventory/hosts.yml       the three hosts
 group_vars/ipfs_nodes/    tunables (admin user, firewall, k3s, sysctl)
 host_vars/<box>/vault.yml   encrypted per-box credentials (gitignored, see Secrets)
 roles/{common,storage,hardening,k3s}/   base preparation
-roles/someguy/            someguy firewall + deploy
+roles/needle/            needle firewall + deploy
 roles/route_origin/       Envoy origin: cert preflight, Cloudflare allowlist, TLS secret
   tasks/verify.yml        post-deploy request checks (paths, Host, traversal; AOP when enforced)
 roles/kustomize_apply/    shared: ship, dry-run/apply, wait, prune stale ConfigMaps
-k8s/someguy/              someguy kustomize manifests; the Deployments are .j2, rendered from someguy_all_instances
-k8s/route-origin/         Envoy kustomize manifests and envoy.yaml.j2 (someguy endpoints rendered)
+k8s/needle/              needle kustomize manifests; the Deployments are .j2, rendered from needle_all_instances
+k8s/route-origin/         Envoy kustomize manifests and envoy.yaml.j2 (needle endpoints rendered)
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
 k8s/bootstrap-wss/        Envoy TLS proxy for the bootstrappers' WSS listener
 k8s/content/              content cluster node manifests (kubo + ipfs-cluster, repo PVC)
@@ -1445,7 +1446,7 @@ scripts/recover-upstream-pinset.sh  capture the upstream collab cluster's pinset
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
-routing.yml               routing service playbook (someguy + origin)
+routing.yml               routing service playbook (needle + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)
 .github/workflows/ci.yml  drift checks: playbook syntax, lint, kustomize build, generated files, shellcheck

@@ -1,6 +1,6 @@
 ---
 # Public hostname Cloudflare proxies to this box, e.g. route-chic-1.ipni.io.
-# Deliberately not named after someguy: the implementation may change.
+# Deliberately not named after what it fronts: the implementation may change.
 route_hostname: "route-{{ inventory_hostname }}.ipni.io"
 
 # Cloudflare Origin CA certificate covering every route_hostname. Public, so it

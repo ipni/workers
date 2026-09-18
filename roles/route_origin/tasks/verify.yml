@@ -17,17 +17,17 @@
 # assert below reports failures.
 #
 # Every negative case is a regression test: if any returns something else
-# (a redirect from someguy, a 200), the deploy fails.
+# (a redirect from needle, a 200), the deploy fails.
 - name: Run the origin request checks
   vars:
     origin_checks:
-      # Allowlisted paths reach someguy.
+      # Allowlisted paths reach needle.
       - { path: /version, status: 200 }
-      # Proves the Envoy -> someguy wiring for lookups. It does NOT prove the
-      # DHT works: someguy answers 200 for unknown peers too.
+      # Proves the Envoy -> needle wiring for lookups. It does NOT prove the
+      # DHT works: needle answers 200 for unknown peers too.
       - { path: /routing/v1/peers/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN, status: 200 }
       # IPNS publishing is deliberately open: a malformed record must reach
-      # someguy and be rejected BY SOMEGUY (400), not by Envoy.
+      # needle and be rejected BY NEEDLE (400), not by Envoy.
       - { path: /routing/v1/ipns/k2k4r8jl0yz8qjgqbmc2cdu5hkqek5rj6flgnlkyywynci20j0iuyfuj, method: PUT, status: 400 }
       # Everything else is hidden.
       - { path: /debug/metrics/prometheus, status: 404 }
@@ -39,7 +39,7 @@
       - { path: /routing/v1/%2e%2e/debug/metrics/prometheus, status: 404 }
       # Here ".." only removes the EMPTY segment from the double slash (RFC
       # 3986), giving /routing/v1/debug/metrics/prometheus: still inside the
-      # allowlisted prefix, so Envoy forwards it and someguy answers 404. Not an
+      # allowlisted prefix, so Envoy forwards it and needle answers 404. Not an
       # escape - it can never become /debug/metrics/prometheus.
       - { path: //routing/v1//..//debug/metrics/prometheus, status: 404 }
       # Escaped slashes are rejected by Envoy outright.

@@ -102,7 +102,7 @@ candidates = endpoints[1:]
 
 # Why these Accept headers: providers and peers are asked for as one JSON
 # document (the default is NDJSON streaming). IPNS has no JSON form; both
-# delegated-ipfs.dev and someguy answer application/json with 406, so records
+# delegated-ipfs.dev and needle answer application/json with 406, so records
 # are requested as application/vnd.ipfs.ipns-record.
 ACCEPT = {
     "providers": "application/json",
@@ -110,7 +110,7 @@ ACCEPT = {
     "ipns": "application/vnd.ipfs.ipns-record",
 }
 # A missing record comes back as `200 text/plain` with this body (seen on both
-# someguy and delegated-ipfs.dev), or as 404. Both mean "no result", not error.
+# needle and delegated-ipfs.dev), or as 404. Both mean "no result", not error.
 NOT_FOUND = b"routing: not found"
 ERROR_RATE_MARGIN = 0.05
 USER_AGENT = "ipni-workers-routing-compare/1 (+https://github.com/ipni/workers)"

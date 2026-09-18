@@ -90,7 +90,7 @@
 #   content-cluster  the cluster identity, swarm secret and peer lists
 # ---------------------------------------------------------------------------
 # Choices in files/kubo-config.json (JSON cannot carry comments):
-#   Provide.Strategy "roots" - announce only each pin's root CID. someguy runs
+#   Provide.Strategy "roots" - announce only each pin's root CID. needle runs
 #     ~416 DHT lookups/sec on these boxes, and reproviding every block of the
 #     website content would compete with it for the host's CPU and sockets.
 #     Clients find a root's providers and fetch the rest over Bitswap. (kubo 0.43

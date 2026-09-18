@@ -29,7 +29,7 @@ spec:
       terminationGracePeriodSeconds: 45
 
       securityContext:
-        # A uid with no host account, distinct from someguy (10001) and the
+        # A uid with no host account, distinct from needle (10001) and the
         # bootstrapper (10002), so the repos on the shared data volume cannot
         # be read or written across workloads.
         runAsNonRoot: true
@@ -132,7 +132,7 @@ spec:
               containerPort: 4101
               protocol: UDP
 
-          # From the ~30% of each box not reserved for someguy, shared with the
+          # From the ~30% of each box not reserved for needle, shared with the
           # bootstrapper (requests 500m/2Gi). Initial guesses, to be tuned from
           # observed use once content is pinned (libp2p_rcmgr_* and Bitswap
           # metrics), as the bootstrapper's were.

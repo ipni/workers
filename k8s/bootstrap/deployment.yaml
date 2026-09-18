@@ -132,7 +132,7 @@ spec:
             # RPC bearer token for probes and CLI calls (kubo's --api-auth takes
             # no env var or config fallback). Expanded inside `sh -c` below, so
             # it only appears in argv of processes in THIS container's PID
-            # namespace - not visible to someguy's or Envoy's containers.
+            # namespace - not visible to needle's or Envoy's containers.
             - name: KUBO_API_AUTH
               valueFrom:
                 secretKeyRef:
@@ -148,9 +148,9 @@ spec:
               containerPort: 4001
               protocol: UDP
 
-          # Shares the ~30% of each box not reserved for someguy with the
+          # Shares the ~30% of each box not reserved for needle with the
           # future content cluster node. A CPU limit is set here (unlike
-          # someguy): Go sizes GOMAXPROCS from it, and a bootstrapper is not
+          # needle): Go sizes GOMAXPROCS from it, and a bootstrapper is not
           # latency-critical.
           #
           # Requests follow observed use (about 20 minutes after deploy: 15-43m

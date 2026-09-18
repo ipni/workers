@@ -37,8 +37,8 @@ it and there is no flag to open it. Two ways in:
 
 ```bash
 # 1. straight through ssh, no setup
-ansible sing-1 -u ipni -m shell -a 'sudo k3s kubectl get pods -n someguy -o wide'
-ssh ipni@5.199.165.77 'sudo k3s kubectl -n someguy logs deploy/someguy --tail=50'
+ansible sing-1 -u ipni -m shell -a 'sudo k3s kubectl get pods -n needle -o wide'
+ssh ipni@5.199.165.77 'sudo k3s kubectl -n needle logs deploy/needle --tail=50'
 
 # 2. an ssh tunnel plus the fetched kubeconfig, for real kubectl
 ./scripts/kubectl-tunnel.sh sing-1        # prints the KUBECONFIG line to use
@@ -47,30 +47,30 @@ pkill -f "^ssh -f -N .*-L 6443:127.0.0.1:6443"   # stop it
 
 `kubeconfigs/` holds cluster-admin credentials and is gitignored.
 
-## someguy
+## needle
 
 Four instances per box, `hostNetwork`, all on loopback. Defined in
-`roles/someguy/defaults/main.yml` as `someguy_running_instances`:
+`roles/needle/defaults/main.yml` as `needle_running_instances`:
 
 | Instance  | HTTP API         | libp2p |
 |-----------|------------------|--------|
-| someguy   | 127.0.0.1:8190   | 4004   |
-| someguy-b | 127.0.0.1:8191   | 4005   |
-| someguy-c | 127.0.0.1:8192   | 4006   |
-| someguy-d | 127.0.0.1:8193   | 4007   |
+| needle   | 127.0.0.1:8190   | 4004   |
+| needle-b | 127.0.0.1:8191   | 4005   |
+| needle-c | 127.0.0.1:8192   | 4006   |
+| needle-d | 127.0.0.1:8193   | 4007   |
 
 Loopback-only, so metrics have to be curled **on the box**:
 
 ```bash
 ansible sing-1 -u ipni -m shell -a \
-  'curl -s http://127.0.0.1:8190/debug/metrics/prometheus | grep ^someguy_dht'
+  'curl -s http://127.0.0.1:8190/debug/metrics/prometheus | grep ^needle_dht'
 ```
 
-Each instance has an `<instance>-data` PVC mounted at `/data/someguy`, holding
+Each instance has an `<instance>-data` PVC mounted at `/data/needle`, holding
 the autoconf cache and the `*.ndjson` snapshots. It is backed by k3s
 `local-path`, pointed at the NVMe by `default-local-storage-path`
 (`roles/k3s/tasks/main.yml`), so on the box the data is under
-`/data/local-path-provisioner/<pv>_someguy_<instance>-data`. Find it by claim
+`/data/local-path-provisioner/<pv>_needle_<instance>-data`. Find it by claim
 rather than guessing:
 
 ```bash
@@ -92,10 +92,10 @@ ansible-playbook routing.yml -l sing-1                  # one box
 ansible-playbook routing.yml -e production_rollout=true # one box at a time, warmed
 ```
 
-someguy stays degraded for tens of minutes after a restart, long after the pod
+needle stays degraded for tens of minutes after a restart, long after the pod
 reports Ready — measured at 200 req/s: 11 minutes in, p95 2904 ms with 2937
 rejected lookups; by 69 minutes, p95 588–691 ms. That is what
-`production_rollout` and `roles/someguy/tasks/wait_warm.yml` exist for, and why
+`production_rollout` and `roles/needle/tasks/wait_warm.yml` exist for, and why
 `-l <box>` is the habit rather than the exception.
 
 ## Locally built images
@@ -109,12 +109,12 @@ into `ImagePullBackOff` — an outage for that box, on all four instances.
 # build once, on the controller, and ship the result - never build per box,
 # or the boxes end up running different bytes under the same tag
 docker buildx build --platform linux/amd64 --load --provenance=false --sbom=false \
-  -t someguy:<tag> .
-docker save someguy:<tag> -o someguy-snap.tar
+  -t needle:<tag> .
+docker save needle:<tag> -o needle-snap.tar
 
-scp someguy-snap.tar ipni@<ip>:/tmp/
-ssh ipni@<ip> 'sudo k3s ctr images import /tmp/someguy-snap.tar'
-ssh ipni@<ip> 'sudo k3s ctr images ls | grep someguy'   # digest must match everywhere
+scp needle-snap.tar ipni@<ip>:/tmp/
+ssh ipni@<ip> 'sudo k3s ctr images import /tmp/needle-snap.tar'
+ssh ipni@<ip> 'sudo k3s ctr images ls | grep needle'   # digest must match everywhere
 ```
 
 `--provenance=false --sbom=false` matters: buildx otherwise attaches an
@@ -170,7 +170,7 @@ for d in rendered/*/; do [ -f "$d/kustomization.yaml" ] && kubectl kustomize "$d
 
 `rendered/` is gitignored and is the way to see what a change actually does to
 the manifests before it reaches a box. Diffing `kubectl kustomize
-rendered/someguy` against the same render on `main` is how you check a manifest
+rendered/needle` against the same render on `main` is how you check a manifest
 change does only what you meant.
 
 **Two traps when linting locally**, both of which make a clean branch look

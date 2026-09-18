@@ -1,8 +1,8 @@
 {#
-  Rendered by roles/kustomize_apply from someguy_all_instances and
-  someguy_instances (roles/someguy/defaults/main.yml).
+  Rendered by roles/kustomize_apply from needle_all_instances and
+  needle_instances (roles/needle/defaults/main.yml).
 
-  Every instance after the first, identical to k8s/someguy/deployment.yaml
+  Every instance after the first, identical to k8s/needle/deployment.yaml
   (instance a) except for the name and the two ports it owns. Every comment
   explaining why the pod looks like this lives in that file; this one is
   deliberately mechanical, so the instances cannot drift apart.
@@ -11,16 +11,16 @@
   and in k8s/route-origin/envoy.yaml. Now the defaults hold it and the other
   two are rendered, so a port is written down in exactly one place.
 #}
-# GENERATED from someguy_all_instances in roles/someguy/defaults/main.yml.
+# GENERATED from needle_all_instances in roles/needle/defaults/main.yml.
 # Edit that table, not this file. Rendered by roles/kustomize_apply.
 #
 # Instances running on this box:
 #
 #   instance   API (loopback)   libp2p (public)
-{% for instance in someguy_running_instances %}
+{% for instance in needle_running_instances %}
 #   {{ '%-10s %-16s %s' | format(instance.name, instance.api, instance.libp2p) }}
 {% endfor %}
-{% for instance in someguy_running_instances[1:] %}
+{% for instance in needle_running_instances[1:] %}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,15 +49,15 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: someguy
-          image: someguy
+        - name: needle
+          image: needle
           envFrom:
             - configMapRef:
-                name: someguy-env-vars
+                name: needle-env-vars
           env:
-            - name: SOMEGUY_LISTEN_ADDRESS
+            - name: NEEDLE_LISTEN_ADDRESS
               value: 127.0.0.1:{{ instance.api }}
-            - name: SOMEGUY_LIBP2P_LISTEN_ADDRS
+            - name: NEEDLE_LIBP2P_LISTEN_ADDRS
               value: /ip4/0.0.0.0/tcp/{{ instance.libp2p }},/ip4/0.0.0.0/udp/{{ instance.libp2p }}/quic-v1,/ip4/0.0.0.0/udp/{{ instance.libp2p }}/webrtc-direct,/ip4/0.0.0.0/udp/{{ instance.libp2p }}/quic-v1/webtransport,/ip6/::/tcp/{{ instance.libp2p }},/ip6/::/udp/{{ instance.libp2p }}/quic-v1,/ip6/::/udp/{{ instance.libp2p }}/webrtc-direct,/ip6/::/udp/{{ instance.libp2p }}/quic-v1/webtransport
           ports:
             - name: http
@@ -100,7 +100,7 @@ spec:
               drop: ["ALL"]
           volumeMounts:
             - name: data
-              mountPath: /data/someguy
+              mountPath: /data/needle
       volumes:
         - name: data
           persistentVolumeClaim:

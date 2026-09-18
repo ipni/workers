@@ -2,43 +2,45 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: someguy
+namespace: needle
 
 resources:
   - namespace.yaml
-  # Both are RENDERED from someguy_all_instances (roles/someguy/defaults) by
+  # Both are RENDERED from needle_all_instances (roles/needle/defaults) by
   # roles/kustomize_apply; the repo holds deployment.yaml.j2 and
   # deployment-extra.yaml.j2. The names below are what lands on the node.
   - deployment.yaml
-  # Instances b onward. Four someguy processes per box, each with its own
+  # Instances b onward. Four needle processes per box, each with its own
   # PeerID, concurrency budget and connection pool; Envoy fans out across them
   # (k8s/route-origin/envoy.yaml.j2). Measured on sing-1 2026-09-16: one
   # instance topped out at 355 req/s with p50 5004ms at 400 req/s, four reached
   # 894 req/s with p50 217ms at 400 - see README, "Capacity". At
-  # someguy_instances: 1 this renders to a comment, which kustomize accepts as
+  # needle_instances: 1 this renders to a comment, which kustomize accepts as
   # an empty resource.
   - deployment-extra.yaml
-  # RENDERED from someguy_running_instances: one per instance, the volume
+  # RENDERED from needle_running_instances: one per instance, the volume
   # behind the data mount (see deployment.yaml.j2).
   - pvc.yaml
 
 labels:
   - pairs:
-      app.kubernetes.io/name: someguy
+      app.kubernetes.io/name: needle
       app.kubernetes.io/part-of: ipfs-workers
 
 # Pinned by digest so every box runs byte-identical images and a re-pushed tag
 # cannot change what is deployed. This is the index digest of
-# ghcr.io/ipni/someguy:v0.16.0-ipni.1 (2026-09-18), a multi-arch index covering
+# ghcr.io/ipni/needle:v1.0.0 (2026-09-18), a multi-arch index covering
 # amd64, arm/v7 and arm64; the amd64 manifest these boxes run is
-# sha256:32e6f3f66c8468a80776d22dff8b313059c62cef72a499aae88f778389356138.
+# sha256:f31bd19df98216b6418cb6c007fe5ce2559c7ed430d60bf18c0929e74d5671f3.
 #
-# ghcr.io/ipni is IPNI's fork of ipfs/someguy, not a re-tag of upstream. The
-# build carries eight things upstream v0.16.0 does not: pprof endpoints, the
-# per-router timing metrics, the cached address book snapshot, the negative TTL
-# with singleflight, the DHT tail budget, the DHT crawl snapshot, the
-# accelerated-ready gauge, and the FindPeer grace and dial timeout. Every one is
-# off unless the matching variable below turns it on.
+# ghcr.io/ipni is IPNI's fork of ipfs/someguy, not a re-tag of upstream. At
+# v1.0.0 the fork was renamed to needle: module github.com/ipni/needle, image
+# ghcr.io/ipni/needle, NEEDLE_ env prefix and needle_ metric prefix (no
+# someguy_ aliases). The build carries everything v0.16.0-ipni.2 did: pprof
+# endpoints, the per-router timing metrics, the cached address book snapshot,
+# the negative TTL with singleflight, the DHT tail budget, the DHT crawl
+# snapshot, the accelerated-ready gauge, and the FindPeer grace and dial
+# timeout. Every one is off unless the matching variable below turns it on.
 #
 # It is built against github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2, which is
 # what makes the crawl snapshot work at all: fullrt's default route table filter
@@ -46,12 +48,12 @@ labels:
 # peer, deliberately never dialled, would otherwise be dropped and the table
 # would come up empty. See that fork's FORK.md.
 images:
-  - name: someguy
-    newName: ghcr.io/ipni/someguy
-    digest: sha256:723094f7dedc9899b6cd15893a363f36b66a888870005a1c6c23839ef33e3526
+  - name: needle
+    newName: ghcr.io/ipni/needle
+    digest: sha256:65cfdabeb5eb1a616960ac9aab1e2c4663802c8fabb3ae84fb87151006b6ada6
 
 configMapGenerator:
-  - name: someguy-env-vars
+  - name: needle-env-vars
     behavior: create
     literals:
       # Loopback only. Under hostNetwork this is the HOST's loopback, which is
@@ -61,49 +63,49 @@ configMapGenerator:
       # firewall. The public path is Cloudflare -> Envoy :443 -> here.
       #
       # The PORT here is a fallback that nothing uses: every Deployment sets
-      # SOMEGUY_LISTEN_ADDRESS in its own `env:` (container `env` wins over
+      # NEEDLE_LISTEN_ADDRESS in its own `env:` (container `env` wins over
       # `envFrom`), because the four instances need four different ports. The
       # address is kept here so the loopback-only decision stays documented in
       # one place, and so a new instance that forgot its override would still
       # not be able to listen on a public interface.
-      - SOMEGUY_LISTEN_ADDRESS=127.0.0.1:8190
+      - NEEDLE_LISTEN_ADDRESS=127.0.0.1:8190
 
       # Accelerated DHT plus the autoconf `auto` endpoints (cid.contact for
       # providers). These boxes must never become an upstream of cid.contact,
       # or provider lookups would loop.
-      - SOMEGUY_DHT=accelerated
-      - SOMEGUY_PROVIDER_ENDPOINTS=auto
-      - SOMEGUY_PEER_ENDPOINTS=auto
-      - SOMEGUY_IPNS_ENDPOINTS=auto
+      - NEEDLE_DHT=accelerated
+      - NEEDLE_PROVIDER_ENDPOINTS=auto
+      - NEEDLE_PEER_ENDPOINTS=auto
+      - NEEDLE_IPNS_ENDPOINTS=auto
 
       # The autoconf cache and the address book snapshot live here; there is
       # still no identity or datastore.
-      - SOMEGUY_DATADIR=/data/someguy
+      - NEEDLE_DATADIR=/data/needle
 
       # Providers or peers per `Accept: application/json` response. The HTTP
-      # Routing v1 spec recommends 100 (someguy's default); 50 still gives a
+      # Routing v1 spec recommends 100 (needle's default); 50 still gives a
       # client plenty of providers to try.
       #
       # Measured on sing-1 at 200 req/s, warm, 2026-09-16: dropping this to 25
-      # halved p50 (2208ms -> 1180ms) and cut response bytes ~70%. someguy's
+      # halved p50 (2208ms -> 1180ms) and cut response bytes ~70%. needle's
       # CPU and p95 did not move, so the gain is in building and shipping the
       # response, NOT in fewer provider-address lookups - the tail is still
-      # bounded by DHT walks (see README, "Capacity: four someguy instances
+      # bounded by DHT walks (see README, "Capacity: four needle instances
       # per box"). 50 is the compromise: most of a measured gain, half the
       # loss in completeness. 25 is what was measured; 50 is interpolation.
-      - SOMEGUY_RECORDS_LIMIT=50
+      - NEEDLE_RECORDS_LIMIT=50
 
       # Background FindPeer lookups for provider records that arrive without
       # addresses. The default (512) is reached under load: a rate test at
-      # 200 req/s on sing-1 rejected 7809 of them while someguy used only 5.5
+      # 200 req/s on sing-1 rejected 7809 of them while needle used only 5.5
       # of 32 cores, so the cap - not CPU - was the limit. Rejected lookups
       # mean provider records returned without addresses.
-      - SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS=2048
+      - NEEDLE_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS=2048
 
       # Snapshot the address book to the volume every 15 minutes, plus once on
       # a clean shutdown. The periodic write is the guarantee: an OOM kill
       # skips shutdown, so the interval bounds what a crash can lose.
-      - SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=15m
+      - NEEDLE_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=15m
 
       # Answer /routing/v1/peers as not-found from a recorded earlier failure
       # instead of repeating a full-timeout DHT walk. Measured on sing-1: four
@@ -112,7 +114,7 @@ configMapGenerator:
       # fell from 28,558 to 15,081. The trade-off is staleness in one direction
       # only: a peer that comes online is invisible on that instance for up to
       # 1m, which is one client retry cycle.
-      - SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL=1m
+      - NEEDLE_CACHED_ADDR_BOOK_NEGATIVE_TTL=1m
 
       # Once every non-DHT router in a request has finished, give the DHT this
       # much longer and then cancel it, so one slow DHT walk stops holding the
@@ -120,7 +122,7 @@ configMapGenerator:
       # The trade-off is recall, and it is small and measured: 2% of the
       # providers that only the DHT would have found, 0.4% of all exclusive
       # records.
-      - SOMEGUY_DHT_TAIL_BUDGET=500ms
+      - NEEDLE_DHT_TAIL_BUDGET=500ms
 
       # Persist the accelerated client's crawled routing table to the volume
       # after every completed crawl, and replay it at startup when the file is
@@ -129,20 +131,20 @@ configMapGenerator:
       # trade-off is staleness: a table older than two crawl intervals has
       # drifted enough that crawling from cold is the safer start, so past 2h
       # the file is ignored and the instance crawls as it always did.
-      - SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h
+      - NEEDLE_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h
 
       # Go pprof endpoints on the API address. That address is loopback-only
-      # (see SOMEGUY_LISTEN_ADDRESS above), so this is exactly the exposure the
+      # (see NEEDLE_LISTEN_ADDRESS above), so this is exactly the exposure the
       # metrics endpoint already has, and the profiles are how every number in
       # this file was measured. It also turns on mutex and block sampling,
       # which is the only reason the per-peer lock contention was ever visible.
-      - SOMEGUY_PPROF=true
+      - NEEDLE_PPROF=true
 
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 21Gi and get
       # OOM-killed. 16 GiB, in bytes: a quarter of the 64 GiB the single
       # instance was given, as there are now four of them.
-      - SOMEGUY_LIBP2P_MAX_MEMORY=17179869184
+      - NEEDLE_LIBP2P_MAX_MEMORY=17179869184
 
       # Soft Go heap target below the 21Gi container limit, so the GC works
       # harder before the kernel OOM-kills the pod. Each instance actually
@@ -160,5 +162,5 @@ configMapGenerator:
       # makes the trade safe: the heap cannot run away to the container limit.
       - GOGC=400
 
-      - GOLOG_LOG_LEVEL=error,someguy=info
+      - GOLOG_LOG_LEVEL=error,needle=info
       - GOLOG_LOG_FMT=json

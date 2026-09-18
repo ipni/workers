@@ -1,6 +1,6 @@
 ---
 # Deploy the routing service to the prepared boxes:
-#   someguy        Delegated Routing V1 server (hostNetwork, four instances,
+#   needle        Delegated Routing V1 server (hostNetwork, four instances,
 #                  libp2p on 4004-4007, HTTP API on 127.0.0.1:8190-8193)
 #   route_origin   Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io
 #
@@ -17,9 +17,9 @@
 #
 # ROLLOUT MODE. Each box is a whole site behind its own hostname with no
 # failover between them, so in production a simultaneous rollout takes the
-# entire routing service down - and someguy stays degraded for tens of minutes
+# entire routing service down - and needle stays degraded for tens of minutes
 # after a restart, long after the pod reports Ready (see
-# roles/someguy/defaults/main.yml for the measurements).
+# roles/needle/defaults/main.yml for the measurements).
 #
 #   production_rollout: false (default, dev)  all boxes at once, no warm-up wait
 #   production_rollout: true                  one box at a time, each warmed up
@@ -37,7 +37,7 @@
   become: true
   gather_facts: false
   roles:
-    - role: someguy
-      tags: [someguy]
+    - role: needle
+      tags: [needle]
     - role: route_origin
       tags: [origin]
