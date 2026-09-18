@@ -184,8 +184,31 @@ Manifests live in `k8s/someguy/` (kustomize, same conventions as
 `storetheindex/deploy`). The role opens the libp2p port, ships the manifests,
 applies them, waits for the rollout and checks `/version` on the box.
 
-**Version:** v0.16.0, pinned by image digest in `k8s/someguy/kustomization.yaml`.
-To upgrade, change the digest.
+**Version:** mixed, and deliberately so while the DHT crawl snapshot is being
+verified.
+
+| Box | Image | How it is pinned |
+|---|---|---|
+| sing-1 | local build `someguy:dht-crawl-snapshot-20260917` | not pinned - see below |
+| lith-1, chic-1 | `ghcr.io/ipfs/someguy` v0.16.0 (2026-07-29) | image digest |
+
+sing-1 runs a **locally built, unpublished** image from the someguy fork branch
+`claude/dht-crawl-snapshot-htnvck`, which carries the DHT crawl snapshot and the
+kad-dht fork pin it needs. It was built once on the controller, shipped as a
+`docker save` tarball and imported with `k3s ctr images import`; `k3s ctr images
+ls` reports
+`sha256:09e1c4f7bc96ebeb2c71d9bde2052f0de0c37ed884ae28815efed5d159ae90d9`, and
+that digest is what makes a second box comparable if one is ever added. There is
+no registry behind it, so it exists only on sing-1.
+
+That has two consequences worth stating plainly: deploy **only** with `-l
+sing-1` while this is the case, because a box without the import goes
+`ImagePullBackOff` on all four instances; and the branch carrying this **must
+not be merged to `main`**, where a fleet-wide run would reach the two boxes that
+do not have it. Publishing the image to `ghcr.io/ipni/someguy` and restoring a
+digest pin is the prerequisite for merging.
+
+To upgrade the two boxes on the registry image, change the digest.
 
 **Design points, and why**
 
@@ -249,9 +272,13 @@ in `group_vars` when they go live.
 | `production_rollout=true` | one at a time | one at a time | yes | hours/box, no outage |
 
 With the gate on, each instance waits for its address book to reach
-`someguy_warm_min_peers` before the next instance - or the next box - is
-touched, so the box never drops below three quarters of *warm* capacity. The
-middle row is the break-glass path for an urgent fix. It still avoids an
+`someguy_warm_min_peers` **and** for `someguy_dht_accelerated_ready` to report
+`1`, before the next instance - or the next box - is touched, so the box never
+drops below three quarters of *warm* capacity. Builds that do not export that
+second metric are held to the address book alone (see "What the snapshots
+change").
+
+The middle row is the break-glass path for an urgent fix. It still avoids an
 outage - Envoy ejects whichever instance is down and serves from the other
 three - but it does not avoid the degradation: by the time the last instance
 rolls, all three still up were themselves restarted within the previous few
@@ -259,16 +286,54 @@ minutes, so the box answers everything and answers it slowly for about an hour.
 
 **What the snapshots change.** Both halves of the state a restart used to throw
 away now survive it on the instance's own PVC: the cached address book
-(`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`, deployed) and the accelerated
-client's routing table (`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`, written into
-`k8s/someguy/kustomization.yaml` but commented out until the fork image is
-pinned). With both, a restarted instance comes back in seconds with a full
-address book and a replayed routing table, serving from the accelerated client
-immediately while a fresh crawl runs behind it, instead of an hour of
-degradation. That makes the break-glass row above the normal way to roll rather
-than the exception - but only once a restart on this fleet is *observed* to come
-up warm, which nothing has measured yet, so the warm gate is still in place
-unchanged. Per instance, within 30s of a restart:
+(`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL`) and the accelerated client's
+routing table (`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE`). Both are live on sing-1,
+which runs the local fork image; lith-1 and chic-1 still run upstream v0.16.0
+and have only the address book.
+
+**Measured on sing-1, 2026-09-18**, restarting all four instances together on
+the fork image. Timings are from the `rollout restart` being issued:
+
+| | |
+|---|---|
+| old pod gone, new one answering `/debug/metrics` | 1.2s |
+| `someguy_dht_accelerated_ready` reaches `1` | **11.4s** |
+| `someguy_cached_addr_book_snapshot_restored_peers` | 25507, on the first sample at 1.2s |
+| `someguy_cached_addr_book_peer_state_size` | 25507 at 1.2s - already past the 15000 warm threshold |
+| `someguy_dht_crawl_snapshot_restored_peers` | 3332 |
+| `someguy_dht_crawl_snapshot_age_seconds_at_restore` | 420.7s, matching the 7 minutes since the previous save |
+| `someguy_dht_crawl_snapshot_errors` | absent - no error series appeared |
+
+All four instances reached `someguy_dht_accelerated_ready 1`, restoring
+3294-3332 routing-table peers and 7798-25507 address-book peers. A
+`/routing/v1/providers/` lookup for a known CID returned the full 50 records in
+0.3s about a minute after the restart. The post-replay crawl finished at
++1m35s and re-saved 3313 peers, advancing
+`someguy_dht_crawl_snapshot_last_success_timestamp_seconds` - that re-save is
+what keeps the *next* restart warm.
+
+For contrast, the same instance's first start on the fork image had no snapshot
+to replay: it logged `no dht crawl snapshot ... yet, crawling` and the
+accelerated client was not ready until that 1m35s crawl completed. The snapshot
+turns that into 11.4s.
+
+Two things the numbers did **not** support:
+
+- The routing table this fleet crawls is about **3.3k peers**, not the 10k-25k
+  assumed before it was measured. Two consecutive crawls found 3332 and 3313, so
+  that is the steady state here, not a cold-start artefact. It is still far
+  above the 1000-peer floor below which a snapshot is not written at all.
+- The restore does **not** make the warm gate redundant. Three of the four
+  instances were past `someguy_warm_min_peers` on the gate's first poll and cost
+  nothing, but someguy-b restored 7798 peers and was not - its address book is
+  genuinely smaller (6.8 MB on disk against 17 MB), so the poll still does real
+  work. The gate was therefore **tightened rather than skipped**: it now also
+  requires `someguy_dht_accelerated_ready == 1`, so a box proves the accelerated
+  client is serving before the next instance rolls. Builds that do not export
+  that metric - lith-1 and chic-1 today - are held to the address book gate
+  exactly as before, so the mixed fleet does not hang.
+
+Per instance, within 30s of a restart:
 
 - `someguy_dht_accelerated_ready` - `1` when the accelerated client is serving.
   **This is the one to gate on.**

@@ -27,14 +27,47 @@ labels:
       app.kubernetes.io/name: someguy
       app.kubernetes.io/part-of: ipfs-workers
 
-# Pinned by digest so every box runs byte-identical images and a re-pushed tag
-# cannot change what is deployed. This digest is v0.16.0 (2026-07-29), a
-# multi-arch index covering amd64. Once the snapshot flag is tagged, the digest
-# must move to ghcr.io/ipni/someguy (the fork that carries it).
+# TEMPORARY: a LOCAL build, not a registry image. This is the someguy fork
+# branch (claude/dht-crawl-snapshot-htnvck) carrying the DHT crawl snapshot and
+# the kad-dht fork pin the snapshot below needs. It is not published anywhere,
+# so there is no digest to pin: a tarball that was `docker save`d and
+# `ctr import`ed does not reliably keep the digest buildx computed, and writing
+# one here would assert a guarantee nothing checks.
+#
+# What replaces the digest pin, since the "every box runs byte-identical
+# images" property still has to come from somewhere:
+#   * ONE build, on the controller, never per box (three builds = three
+#     different images wearing the same tag);
+#   * one `docker save` tarball, checksum-verified after the copy:
+#     sha256:b2e410df607ac60f4bce344065eaeecd6d79b13cf4de0e02ae15b243b84bf442
+#   * `k3s ctr images import`, and `k3s ctr images ls` showing
+#     sha256:09e1c4f7bc96ebeb2c71d9bde2052f0de0c37ed884ae28815efed5d159ae90d9
+#     on every box it was imported to. That digest is the per-box check.
+#
+# IMPORTED ON: sing-1 only (2026-09-17). lith-1 and chic-1 still run upstream
+# v0.16.0 (2026-07-29,
+# sha256:efb3817e099fe4983ec35ee1ea51e8441474b95cf0af8df4943b8468e87b921e), so
+# the fleet is deliberately mixed while this is verified.
+#
+# Therefore: deploy with `-l <box>`, only to a box the image was imported to,
+# and import BEFORE applying this. A box without the import cannot pull
+# `someguy:<tag>` from anywhere and goes ImagePullBackOff on all four
+# instances.
+#
+# THIS BRANCH MUST NOT REACH main WHILE THE IMAGE IS LOCAL. It is safe as an
+# unmerged branch and an outage as main, where a fleet-wide routing.yml run
+# would reach the two boxes without the import. Publishing the image to
+# ghcr.io/ipni/someguy and restoring a digest pin here is the prerequisite for
+# merging, and is a separate piece of work.
+#
+# No imagePullPolicy is set deliberately: a non-`latest` tag already defaults
+# to IfNotPresent, which is what is wanted, and hardcoding `Never` in the
+# Deployment templates would have to be remembered and undone when the image
+# goes back to a registry.
 images:
   - name: someguy
-    newName: ghcr.io/ipfs/someguy
-    digest: sha256:efb3817e099fe4983ec35ee1ea51e8441474b95cf0af8df4943b8468e87b921e
+    newName: someguy
+    newTag: dht-crawl-snapshot-20260917
 
 configMapGenerator:
   - name: someguy-env-vars
@@ -105,15 +138,15 @@ configMapGenerator:
       # 2h: past two crawl intervals of drift, crawling from cold is the safer
       # start than replaying a table that has moved on.
       #
-      # Commented out until the digest above moves to the fork image, which
-      # has to carry BOTH the snapshot code and the kad-dht fork someguy pins
-      # for fullrt.WithRouteTableFilter. Enabling it against an image without
-      # that fork is not merely inert: the replay runs and reports its peers,
-      # fullrt's default filter drops every one of them for having no open
-      # connection, and the instance comes up with an EMPTY routing table
-      # while someguy_dht_crawl_snapshot_restored_peers reads 15k+. Gate on
+      # Requires an image carrying BOTH the snapshot code and the kad-dht fork
+      # someguy pins for fullrt.WithRouteTableFilter - see the images block
+      # above. Enabling it against an image without that fork is not merely
+      # inert: the replay runs and reports its peers, fullrt's default filter
+      # drops every one of them for having no open connection, and the
+      # instance comes up with an EMPTY routing table while
+      # someguy_dht_crawl_snapshot_restored_peers reads 15k+. Gate on
       # someguy_dht_accelerated_ready, never on that gauge.
-      # - SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h
+      - SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h
 
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 21Gi and get

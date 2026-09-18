@@ -100,9 +100,16 @@ someguy_rollout_wait_warm: "{{ production_rollout | default(false) }}"
 # together and a rollout is over in a couple of minutes.
 someguy_rollout_serial: "{{ production_rollout | default(false) }}"
 
-# Peers in the cached address book that count as warm. A settled box on this
-# fleet holds 23k-26k; 15k is comfortably past the painful phase without
+# Peers in the cached address book that count as warm. A settled instance on
+# this fleet holds 23k-26k; 15k is comfortably past the painful phase without
 # waiting for the last slow arrivals.
+#
+# Not every instance restores that much. On sing-1 (2026-09-18) someguy,
+# someguy-c and someguy-d restored 25507/25190/25295 peers and were over this
+# line on the gate's first poll, while someguy-b restored 7798 and had to wait -
+# its snapshot is genuinely smaller (6.8 MB against 17 MB on disk), not
+# mis-restored. So this poll still does real work and is not dead weight even
+# when the snapshots are in place.
 someguy_warm_min_peers: 15000
 
 # How long to wait for that, and how often to look. The whole gate is skipped
@@ -113,3 +120,29 @@ someguy_warm_poll_seconds: 60
 # Fail the play when a box does not warm up in time, rather than rolling the
 # next box on the assumption that this one recovered.
 someguy_warm_fail_on_timeout: true
+
+# ---------------------------------------------------------------------------
+# What "warm" means, computed from the gate's one scrape
+# ---------------------------------------------------------------------------
+# roles/someguy/tasks/wait_warm.yml curls the instance's metrics ONCE per poll
+# and reduces it to "<address-book-peers> <accelerated-ready>", where the second
+# field is 1, 0, or the literal `absent` on a build that does not export
+# someguy_dht_accelerated_ready. These three parse that line; they are internal
+# to the gate and are not meant to be overridden.
+#
+# Computed here rather than with set_fact because `until:` re-evaluates them on
+# every retry, and because they have to survive being evaluated before the
+# first poll has registered anything.
+someguy_warm_fields: >-
+  {{ ((someguy_warm | default({})).stdout | default('', true)
+      | trim | default('0 absent', true)).split() }}
+someguy_warm_peers: "{{ someguy_warm_fields[0] | int }}"
+someguy_warm_accelerated: "{{ someguy_warm_fields[1] }}"
+
+# An absent accelerated-ready metric counts as satisfied: the older builds on
+# the rest of the fleet cannot report it, and holding them to a metric they do
+# not have would hang the gate for the full timeout. They stay on the address
+# book gate exactly as before.
+someguy_warm_is_warm: >-
+  {{ (someguy_warm_peers | int) >= (someguy_warm_min_peers | int)
+     and someguy_warm_accelerated in ['1', 'absent'] }}

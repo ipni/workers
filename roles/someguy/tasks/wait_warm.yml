@@ -1,38 +1,70 @@
 ---
-# Wait until one instance's cached address book holds someguy_warm_min_peers.
-# Included with someguy_warm_instance set. See roles/someguy/defaults/main.yml
-# for the measurements behind the threshold.
+# Wait until one instance is warm enough to roll the next. Included with
+# someguy_warm_instance set. See roles/someguy/defaults/main.yml for the
+# measurements behind the threshold.
 #
-# A restarted instance answers within a minute but serves badly for about an
-# hour: with four instances the other three cover it, so this gate is about not
-# rolling the NEXT instance (or the next box) into the same state.
+# A restarted instance answers within a minute but, without the snapshots,
+# serves badly for about an hour: with four instances the other three cover it,
+# so this gate is about not rolling the NEXT instance (or the next box) into the
+# same state.
+#
+# TWO conditions, both from a single scrape:
+#
+#   1. the cached address book holds someguy_warm_min_peers. This is the
+#      original gate and it stays, because it is the one that still does real
+#      work: an instance whose snapshot was small, stale or lost rebuilds the
+#      address book only by serving traffic. Measured on sing-1 2026-09-18,
+#      seconds after a restart, three instances restored 25190-25507 peers and
+#      passed on the first poll, while someguy-b restored 7798 and did not -
+#      its address book is genuinely smaller, not mis-restored.
+#
+#   2. someguy_dht_accelerated_ready is 1 - the accelerated DHT client is
+#      actually serving. The crawl snapshot makes this reachable in seconds
+#      (11.4s on sing-1 2026-09-18, against a 1m35s cold crawl), so it costs
+#      nothing on a warm start, and it is the condition that a restored routing
+#      table is being USED rather than merely reported. Never gate on
+#      someguy_dht_crawl_snapshot_restored_peers: it counts what the replay
+#      reported before the routing table filter decides what to keep, so on an
+#      image without the kad-dht fork it reads thousands while the table is
+#      empty.
+#
+# The metric is ABSENT on someguy builds that predate it, and the fleet is
+# deliberately mixed while the fork image is local (see
+# k8s/someguy/kustomization.yaml). An absent metric therefore satisfies
+# condition 2 rather than hanging the gate for an hour on a box that can never
+# report it: those builds are held to the address book gate exactly as before.
 
-- name: "Poll {{ someguy_warm_instance.name }} until it holds {{ someguy_warm_min_peers }} peers"
+- name: "Poll {{ someguy_warm_instance.name }} until it is warm"
   ansible.builtin.shell:
     cmd: >-
       set -o pipefail;
       curl -sf --max-time 10 http://127.0.0.1:{{ someguy_warm_instance.api }}/debug/metrics/prometheus
-      | awk '/^someguy_cached_addr_book_peer_state_size/ {print int($2); found = 1}
-             END {if (!found) print 0}'
+      | awk '/^someguy_cached_addr_book_peer_state_size[ {]/ {peers = int($2); gotpeers = 1}
+             /^someguy_dht_accelerated_ready[ {]/           {accel = int($2); gotaccel = 1}
+             END {printf "%d %s\n", (gotpeers ? peers : 0), (gotaccel ? accel : "absent")}'
     executable: /bin/bash
   register: someguy_warm
   changed_when: false
   failed_when: false
   retries: "{{ (someguy_warm_timeout_seconds | int // (someguy_warm_poll_seconds | int)) | int }}"
   delay: "{{ someguy_warm_poll_seconds | int }}"
-  until: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+  until: someguy_warm_is_warm
 
 - name: "Report whether {{ someguy_warm_instance.name }} warmed up in time"
   ansible.builtin.assert:
-    that: (someguy_warm.stdout | trim | default('0', true) | int) >= (someguy_warm_min_peers | int)
+    that: someguy_warm_is_warm
     fail_msg: >-
-      {{ inventory_hostname }} {{ someguy_warm_instance.name }} still holds only
-      {{ someguy_warm.stdout | trim | default('0', true) }} cached peers after
-      {{ someguy_warm_timeout_seconds }}s (wanted {{ someguy_warm_min_peers }}).
+      {{ inventory_hostname }} {{ someguy_warm_instance.name }} is still not warm
+      after {{ someguy_warm_timeout_seconds }}s: address book holds
+      {{ someguy_warm_peers }} cached peers (wanted {{ someguy_warm_min_peers }})
+      and someguy_dht_accelerated_ready is {{ someguy_warm_accelerated }}
+      (wanted 1, or absent on a build without the metric).
       Not rolling the next instance or box on the assumption that this one
       recovered. Re-run with -e someguy_rollout_wait_warm=false to skip this gate.
     success_msg: >-
       {{ inventory_hostname }} {{ someguy_warm_instance.name }}: address book holds
-      {{ someguy_warm.stdout | trim }} peers; safe to roll the next.
+      {{ someguy_warm_peers }} peers and the accelerated client is
+      {{ 'serving' if someguy_warm_accelerated == '1' else 'not reporting readiness (older build)' }};
+      safe to roll the next.
     quiet: true
   when: someguy_warm_fail_on_timeout | bool
