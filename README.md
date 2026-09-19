@@ -744,6 +744,184 @@ below still stand on their own merits:
   for a marginal hit-rate change. More retained connections cost more to
   maintain than the dials they saved.
 
+### Unloaded latency against delegated-ipfs.dev, cache-free
+
+The fleet run above shows how much the boxes can carry. This section answers
+a different question: is a user better or worse off than on
+`delegated-ipfs.dev`, which loses its operator on 2026-09-30 and cannot be
+measured after that. `scripts/routing-latency-vs-baseline.sh` measures it
+unloaded (one request at a time, never concurrent) and cold on both sides.
+
+**How it avoids caches.**
+- **Every fixture is used once per endpoint.** A unique query parameter gets
+  past Cloudflare's URL-keyed cache, but not past anything keyed on the ID
+  behind the URL. So a repeat measurement needs a new fixture.
+  `routing-compare.sh --runs 3` does not do this, and must not be used for
+  latency.
+- **The script refuses to run** on a fixture file that contains a duplicate,
+  or on any (endpoint, fixture) pair already in its ledger
+  (`~/.cache/ipni-routing-latency/issued.tsv` on the box).
+- **The fixtures are disjoint across boxes**, so the baseline never sees an ID
+  twice.
+- **The script calibrates first.** Before measuring, it queries one fresh
+  fixture per class twice on each endpoint. The baseline's second answer was a
+  Cloudflare `HIT` in 26-79ms, 5-44x faster, in every class on every box. Ours
+  never showed a hit: the second answer was 0.7-2x the first, which is shared
+  upstream and connection warmth, not a cache. The build's source agrees: it
+  has no CID-keyed provider cache and no CID negative cache (the negative TTL
+  is per peer).
+- **Suspects are flagged, not assumed away.** A measured sample is suspect if
+  `cf-cache-status` says it came from cache, or if it answered within 1.5x of
+  the fastest confirmed hit. Suspects are dropped from the numbers below and
+  counted.
+- **The order alternates on every fixture.** Both sides share upstreams
+  (cid.contact), so whichever asks second finds them warm: on every box and
+  both sides, the second request's p50 was 130-290ms faster. Alternating
+  splits that evenly.
+
+**Fixtures (2026-09-18).**
+- **Source:** cid.contact CloudFront chunk
+  `E2SDJP70JWJ4IR.2026-05-11-16.424d3feb`, 2026-05-11 16:36:48-16:42:41 UTC,
+  100,605 routing requests. No fixture file or box had used it before.
+- **Deduplicated, then filtered.** Every ID that appears in the replayed
+  2026-09-13 chunk, its replay fixture, `routing-compare-cids.txt`, or any
+  fixture, per-request or result file in `/tmp` and `/data/fixtures` on the
+  three boxes was removed. That was 53 found, 2,912 not-found, 16 peer and 8
+  IPNS IDs.
+- **Per box:** 100 found, 100 not-found and 100 peers, drawn from the chunk,
+  plus its 7-8 IPNS names and 40 unprovided CIDs generated offline (CIDv1,
+  raw, sha2-256 over
+  `ipni-workers/routing-latency-vs-baseline/<seed>/<box>/<n>`).
+- **Reproducible:** the generator is the script's `--generate` mode, and each
+  run's JSON records the exact list it used.
+- **Classes:** "found" had records at cid.contact in May, "notfound" was 404
+  there, "unprovided" is synthetic.
+
+**Class mix of that chunk, by request:** not-found 78.6%, found 7.0%, providers
+the client gave up on before an answer 12.0%, peers 1.7%, IPNS 0.6%. That is
+not the 33/66 split of the 2026-09-13 chunk. Traffic mixes differ from hour to
+hour, so weight the tables by the mix you expect.
+
+**The three boxes are not configured alike.** Each is a valid comparison
+against the baseline, but the boxes are not comparable to each other. All
+three run four instances with the same flags:
+`SOMEGUY_DHT=accelerated`, `SOMEGUY_DHT_TAIL_BUDGET=500ms`,
+`SOMEGUY_RECORDS_LIMIT=50`, `SOMEGUY_CACHED_ADDR_BOOK_NEGATIVE_TTL=1m`,
+`SOMEGUY_CACHED_ADDR_BOOK_MAX_CONCURRENT_FIND_PEERS=2048`,
+`SOMEGUY_CACHED_ADDR_BOOK_SNAPSHOT_INTERVAL=15m`,
+`SOMEGUY_DHT_CRAWL_SNAPSHOT_MAX_AGE=2h`, `SOMEGUY_PPROF=true`,
+`SOMEGUY_LIBP2P_MAX_MEMORY=16GiB`, `GOGC=400`, `GOMAXPROCS=8`,
+`GOMEMLIMIT=20GiB`, and endpoints `auto`. Where they differ:
+
+| Box | Image (`/version`) | Instances | Differs | Address book at start (per instance) | Suspects | Run |
+|-----|--------------------|-----------|---------|--------------------------------------|----------|-----|
+| sing-1 | v0.16.0-ipni.2 (`sha256:51950a7a…`) | 4 | `SOMEGUY_DHT_TAIL_MIN_RESULTS=1` | 34,594 / 27,650 / 34,471 / 34,590 | 17 | **invalid by the >5 rule** (see below) |
+| lith-1 | v0.16.0-ipni.1 (`sha256:723094f7…`) | 4 | - | 28,094 / 29,503 / 25,933 / 28,068 | 2 | valid |
+| chic-1 | v0.16.0-ipni.2 (`sha256:51950a7a…`) | 4 | `SOMEGUY_DHT_TAIL_MIN_RESULTS=1` | 33,908 / 32,836 / 30,568 / 30,230 | 4 | valid |
+
+**Every suspect is a peers lookup, and the rule flagged them wrongly.**
+- **Which lookups:** all 23 are identity-keyed peer IDs (`bafzaajaiaejc…`)
+  that both sides answered with one record in 27-90ms.
+- **Baseline (14):** every one carries `cf-cache-status: MISS`, so it was not
+  an edge hit. It was their origin answering from its peerstore, about as fast
+  as the edge.
+- **Ours (9):** our address book already held those peers from the box's own
+  operation. No fixture was queried before, so no earlier measurement could
+  have put them there.
+- **Effect on the numbers:** found, not-found, unprovided and IPNS had zero
+  suspects on every box. Only the peers rows lose a few of their fastest
+  samples, on both sides.
+- **The rule stands anyway.** sing-1 fails the ">5 suspects is invalid" rule
+  set for this measurement, and it is marked invalid rather than redefined
+  after the fact.
+
+**PoPs reached** (the `cf-ray` suffix for the Cloudflare PoP, `x-ipfs-pop` for
+their origin):
+- **sing-1:** they came from SIN, then `someguy-sgp-164-134`; we came from SIN.
+- **lith-1:** they came from VNO, then `someguy-waw-220-91`; we came from WAW.
+- **chic-1:** they came from ORD, then three `someguy-bhs-*` origins;
+  we came mostly from YYZ (292 of 357), then ATL, EWR, DFW, ORD and BOS.
+
+**Anycast caveat.** `delegated-ipfs.dev` is anycast, so each box is compared
+with whichever PoP and origin served it. That is what a user in that region
+gets, not a like-for-like origin comparison, and no correction is made for
+it. Every run went from the box itself (`ansible <box> -m script`), so all
+four endpoints saw the same client path. Error rate was 0% for every endpoint
+in every class. Our counts are capped at 50 (`SOMEGUY_RECORDS_LIMIT`), but no
+median came near the cap.
+
+p50 / p95 per class. The delta is ours minus theirs, so negative means we are
+faster. Suspects are excluded.
+
+**found** (7.0% of traffic)
+
+| Box | delegated-ipfs.dev | ours | delta p50 | Errors | Median results (theirs / ours) | Non-empty |
+|-----|--------------------|------|-----------|--------|--------------------------------|-----------|
+| sing-1 | 1131 / 1512ms | 980 / 1373ms | **-151ms** | 0% / 0% | 0 / 0 | 41% / 41% |
+| lith-1 | 505 / 938ms | 616 / 908ms | **+111ms** | 0% / 0% | 1 / 1 | 57% / 57% |
+| chic-1 | 499 / 748ms | 562 / 755ms | **+63ms** | 0% / 0% | 1 / 1 | 51% / 51% |
+
+**notfound** (78.6% of traffic)
+
+| Box | delegated-ipfs.dev | ours | delta p50 | Errors | Median results | Non-empty |
+|-----|--------------------|------|-----------|--------|----------------|-----------|
+| sing-1 | 1129 / 1463ms | 1068 / 1480ms | **-61ms** | 0% / 0% | 0 / 0 | 12% / 12% |
+| lith-1 | 568 / 964ms | 604 / 890ms | **+36ms** | 0% / 0% | 0 / 0 | 10% / 10% |
+| chic-1 | 501 / 713ms | 579 / 829ms | **+78ms** | 0% / 0% | 0 / 0 | 22% / 22% |
+
+**unprovided** (synthetic; the worst case for a not-found lookup)
+
+| Box | delegated-ipfs.dev | ours | delta p50 | Errors | Median results | Non-empty |
+|-----|--------------------|------|-----------|--------|----------------|-----------|
+| sing-1 | 1116 / 1639ms | 1067 / 1375ms | **-49ms** | 0% / 0% | 0 / 0 | 0% / 0% |
+| lith-1 | 451 / 815ms | 626 / 887ms | **+175ms** | 0% / 0% | 0 / 0 | 0% / 0% |
+| chic-1 | 500 / 791ms | 582 / 846ms | **+82ms** | 0% / 0% | 0 / 0 | 0% / 0% |
+
+**peers** (1.7% of traffic)
+
+| Box | delegated-ipfs.dev | ours | delta p50 | Errors | Median results | Non-empty |
+|-----|--------------------|------|-----------|--------|----------------|-----------|
+| sing-1 | 755 / 1009ms | 628 / 1074ms | **-127ms** | 0% / 0% | 0 / 0 | 4% / 4% |
+| lith-1 | 363 / 708ms | 379 / 694ms | **+16ms** | 0% / 0% | 0 / 0 | 13% / 18% |
+| chic-1 | 385 / 533ms | 408 / 587ms | **+23ms** | 0% / 0% | 0 / 0 | 6% / 9% |
+
+**ipns** (0.6% of traffic; only 7-8 names per box, so read p95 loosely)
+
+| Box | delegated-ipfs.dev | ours | delta p50 | Errors | Median results | Non-empty |
+|-----|--------------------|------|-----------|--------|----------------|-----------|
+| sing-1 | 745 / 938ms | 756 / 946ms | **+11ms** | 0% / 0% | 0.5 / 0.5 | 50% / 50% |
+| lith-1 | 394 / 733ms | 278 / 479ms | **-116ms** | 0% / 0% | 1 / 1 | 57% / 57% |
+| chic-1 | 387 / 577ms | 448 / 860ms | **+61ms** | 0% / 0% | 1 / 1 | 71% / 71% |
+
+**Verdict: users would get the same answers, but in Europe and North America
+they would get them slower.**
+- **Near lith-1 and chic-1** our p50 is worse on every provider class: +36 to
+  +111ms on real traffic, +175ms on unprovided CIDs. Not-found alone is 79% of
+  traffic, so this gap is the one that counts.
+- **Near sing-1** we are 49-151ms faster on everything except IPNS. That run
+  is invalid by its suspect count, although the provider classes in it had no
+  suspects.
+- **Results match.** Both sides returned the same share of non-empty answers
+  on every provider class, and we found more peers on lith-1 and chic-1. No
+  endpoint returned an error.
+- **p95 is mixed.** On sing-1 we are better or level (unprovided -264ms).
+  On lith-1 we are level or better (unprovided +72ms). On chic-1 we are worse
+  by 7-116ms on every class, and by 283ms on IPNS, where n=7.
+
+Re-run with fresh fixtures, never the same ones:
+
+```bash
+./scripts/routing-latency-vs-baseline.sh --generate <unreplayed chunk>.gz \
+    --exclude <every chunk, fixture and per-request output already used> \
+    --split sing-1,lith-1,chic-1 --out-dir /tmp/rlb
+# one box at a time; parallel boxes would put concurrent load on the baseline
+ansible sing-1 -u ipni -m copy -a 'src=/tmp/rlb/sing-1.fixtures dest=/tmp/rlb.fixtures'
+ansible sing-1 -u ipni -m script -a \
+    'scripts/routing-latency-vs-baseline.sh --candidate route-sing-1.ipni.io --fixtures /tmp/rlb.fixtures --out /tmp/rlb.json'
+ansible sing-1 -u ipni -m fetch -a 'src=/tmp/rlb.json dest=results/sing-1.json flat=yes'
+./scripts/routing-latency-vs-baseline.sh --report results/*.json   # also checks no shared fixture, no overlap
+```
+
 ## Bootstrap nodes: bootstrap.ipni.io
 
 Each box runs a public IPFS/libp2p **bootstrap peer**: a kubo node that new
@@ -1433,6 +1611,7 @@ scripts/routing-load.sh     closed-loop load test, run from anywhere
 scripts/routing-rate-test.sh  open-loop load test with box-side metrics, run ON the box
 scripts/routing-compare.sh          our route-<box>.ipni.io vs delegated-ipfs.dev (results, latency, errors)
 scripts/routing-compare-cids.txt    fixtures for routing-compare.sh
+scripts/routing-latency-vs-baseline.sh  unloaded, cache-free latency vs delegated-ipfs.dev (fixtures single-use)
 scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
 scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used by the preflight)
 scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
