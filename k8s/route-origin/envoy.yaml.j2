@@ -125,12 +125,20 @@ static_resources:
                       # zone that rewrites Host can still get past it, which is
                       # what Authenticated Origin Pulls addresses.
                       #
-                      # Add the live Cloudflare router's hostname here if it
-                      # forwards a different Host.
+                      # The live Cloudflare router (the delegated-ipfs.dev load
+                      # balancer) forwards the -origin names below as its Host.
                       domains:
                         - route-sing-1.ipni.io
                         - route-lith-1.ipni.io
                         - route-chic-1.ipni.io
+                        # DNS-only names pointing straight at each box, used as
+                        # the per-origin Host override by the delegated-ipfs.dev
+                        # load balancer: Cloudflare requires the override to
+                        # resolve to the origin IP, and the proxied names above
+                        # resolve to Cloudflare.
+                        - route-sing-1-origin.ipni.io
+                        - route-lith-1-origin.ipni.io
+                        - route-chic-1-origin.ipni.io
                       # ALLOWLIST, not a blocklist. needle serves Prometheus
                       # metrics on the same port as the API (/debug/...);
                       # anything not listed here - including endpoints a future

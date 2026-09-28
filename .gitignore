@@ -1,5 +1,6 @@
 # Plaintext credentials — never commit
 servers.txt
+secrets.txt
 *.plaintext
 .vault_pass
 *.vault_pass

@@ -267,6 +267,21 @@ pinset:
     upstream_other_cids:
       - QmdhYERxeB8qdbcFby1ptnRLY9r5Y7nwKgkwFevZBWpUMH
 
+  # --- Local files (added by hand, not from the upstream pinset) ---
+  - name: ipni-tech-federation-design
+    cid: bafybeigzdltpxuzppmmpkxhjnrghswkjixft6oakz5fb63as2vrpsuq5y4
+    description: >-
+      IPNI Technical Federation Design (ipni-tech-federation-design.pdf), added
+      2026-09-23 to serve a shareable link from the content cluster. Pinned as a
+      wrapped directory so the URL is /ipfs/<dir-cid>/<filename>.pdf; the file's
+      own CID (bafkreigpd7dlfooe3rqxz3q3dbkodsupknznwfv5kdnh4wujyp7wltdto4)
+      differs from this pinned directory CID. We are the only holder of this
+      content, so a missing root is real loss.
+    source: local
+    file_cid: bafkreigpd7dlfooe3rqxz3q3dbkodsupknznwfv5kdnh4wujyp7wltdto4
+    filename: ipni-tech-federation-design.pdf
+    added_on: "2026-09-23"
+
   - name: awesome.ipfs.io
     cid: bafybeiev3bmfma5ed7ak4msbz7xyntjwnivpbupu74ff64u73yd5u7tc7u
     description: >-

@@ -356,7 +356,7 @@
               {%- set _ = r.excluded.append(name) -%}
             {%- elif not cid -%}
               {%- set _ = r.pending.append({'name': name, 'reason': 'in pinset without a cid'}) -%}
-            {%- elif source not in ['dnslink', 'upstream-cluster'] -%}
+             {%- elif source not in ['dnslink', 'upstream-cluster', 'local'] -%}
               {%- set _ = r.invalid.append({'name': name, 'reason': 'unrecognised source: ' ~ source}) -%}
             {%- else -%}
               {%- set _ = r.pinnable.append({'name': name, 'cid': cid, 'source': source}) -%}
@@ -510,11 +510,11 @@
         {%- set l = [] -%}
         {%- for r in content_pin_estimate.results | default([])
               if not r.skipped | default(false) and r.rc | default(1) != 0
-              and r.item.source == 'upstream-cluster' -%}
-          {%- set _ = l.append({'name': r.item.name, 'cid': r.item.cid,
-                                'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
-        {%- endfor -%}
-        {{ l }}
+               and r.item.source in ['upstream-cluster', 'local'] -%}
+           {%- set _ = l.append({'name': r.item.name, 'cid': r.item.cid,
+                                 'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
+         {%- endfor -%}
+         {{ l }}
       loop_control:
         label: "{{ item.name }}"
       ignore_errors: true
@@ -555,7 +555,7 @@
         {%- set l = [] -%}
         {%- for r in content_pin_dagstat.results | default([])
               if not r.skipped | default(false) and r.rc | default(1) != 0
-              and r.item.item.source == 'upstream-cluster' -%}
+               and r.item.item.source in ['upstream-cluster', 'local'] -%}
           {%- set _ = l.append({'name': r.item.item.name, 'cid': r.item.item.cid,
                                 'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
         {%- endfor -%}

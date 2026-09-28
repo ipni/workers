@@ -46,6 +46,8 @@
       - { path: /routing/v1/..%2fdebug/metrics/prometheus, status: 400 }
       # Any other Host is misdirected.
       - { path: /version, host: evil.example.com, status: 421 }
+      # The delegated-ipfs.dev load balancer's Host override is served.
+      - { path: /version, host: "route-{{ inventory_hostname }}-origin.ipni.io", status: 200 }
     # AOP only: without the origin-pull client certificate the TLS handshake
     # is refused, so no HTTP status at all (curl reports 000).
     origin_aop_checks:

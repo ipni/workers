@@ -188,14 +188,16 @@ applies them, waits for the rollout and checks `/version` on the box.
 **Version:** `ghcr.io/ipni/needle:v1.0.0`, pinned by index digest in
 `k8s/needle/kustomization.yaml`. To upgrade, change the digest.
 
-That is IPNI's fork of someguy, not upstream `ghcr.io/ipfs/someguy`. It is
-upstream v0.16.0 plus eight changes measured on this fleet - pprof, per-router
-timing metrics, the cached address book snapshot, the negative TTL with
-singleflight, the DHT tail budget, the DHT crawl snapshot, the
-accelerated-ready gauge, and the FindPeer grace and dial timeout - and is built
-against `github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2`. Each change is off
-unless the matching `NEEDLE_*` variable in the kustomization turns it on. See
-that repo's `FORK.md` for what the kad-dht fork carries and why.
+At v1.0.0 the fork was renamed to needle: module `github.com/ipni/needle`,
+image `ghcr.io/ipni/needle`, `NEEDLE_` env prefix and `needle_` metric prefix
+(no `someguy_` aliases). It is a hard fork, not a re-tag of upstream
+`ghcr.io/ipfs/someguy`; the build carries everything the earlier ipni builds
+did - pprof, per-router timing metrics, the cached address book snapshot, the
+negative TTL with singleflight, the DHT tail budget, the DHT crawl snapshot,
+the accelerated-ready gauge, and the FindPeer grace and dial timeout - and is
+built against `github.com/ipni/go-libp2p-kad-dht v0.42.2-ipni.2`. Each change
+is off unless the matching `NEEDLE_*` variable in the kustomization turns it on.
+See that repo's `FORK.md` for what the kad-dht fork carries and why.
 
 **Design points, and why**
 
@@ -294,6 +296,17 @@ client -> Cloudflare (proxied, Full strict) -> :443 Envoy on the box -> 127.0.0.
 | lith-1 | route-lith-1.ipni.io |
 | chic-1 | route-chic-1.ipni.io |
 
+Each box also has a DNS-only (unproxied) `-origin` name pointing straight at its
+IP. These are used only as the Host override of the `delegated-ipfs.dev` load
+balancer, because Cloudflare refuses an override that does not resolve to the
+origin IP; the proxied names above resolve to Cloudflare.
+
+| Box    | Origin hostname             | IP             |
+|--------|-----------------------------|----------------|
+| sing-1 | route-sing-1-origin.ipni.io | 5.199.165.77   |
+| lith-1 | route-lith-1-origin.ipni.io | 46.166.169.131 |
+| chic-1 | route-chic-1-origin.ipni.io | 84.32.48.211   |
+
 Envoy (`k8s/route-origin`, `roles/route_origin`, v1.39.1 pinned by digest)
 terminates TLS with a **Cloudflare Origin CA certificate**.
 
@@ -305,9 +318,10 @@ terminates TLS with a **Cloudflare Origin CA certificate**.
   `/routing/v1/../debug/...` matched the allowlisted prefix and was forwarded
   unchanged. `/debug` stayed hidden only because needle happened to redirect
   unclean paths.
-- **Host allowlist.** Only the three `route-<box>.ipni.io` names are served; any
-  other Host gets **421**. If the live Cloudflare router sends a different Host,
-  add it to `domains` in `k8s/route-origin/envoy.yaml.j2`.
+- **Host allowlist.** Only the three `route-<box>.ipni.io` names and the three
+  `route-<box>-origin.ipni.io` load balancer Host overrides are served, on every
+  box; any other Host gets **421**. The list is `domains` in
+  `k8s/route-origin/envoy.yaml.j2`.
 - **The Cloudflare IP allowlist is not authentication.** ufw allows 443 only
   from Cloudflare's published ranges (pinned in
   `roles/route_origin/defaults/main.yml`). But *any* Cloudflare account can
@@ -1320,6 +1334,22 @@ turn an unrelated pull request red.
 
 ## Outstanding manual steps
 
+- [x] ~~Cutover from `someguy` to `needle`~~ — done 2026-09-18. Deployed
+      `ghcr.io/ipni/needle:v1.0.0` (index digest
+      `sha256:65cfdabeb5eb1a616960ac9aab1e2c4663802c8fabb3ae84fb87151006b6ada6`,
+      amd64 manifest `sha256:f31bd19df98216b6418cb6c007fe5ce2559c7ed430d60bf18c0929e74d5671f3`)
+      to all three boxes via `routing.yml -e production_rollout=true`. The old
+      `someguy` namespace and its four PVCs (`someguy-data`, `someguy-b-data`,
+      `someguy-c-data`, `someguy-d-data`) were deleted on each box; the
+      corresponding `local-path` PVs were released with them. All four needle
+      pods run per box, Envoy proxies to 127.0.0.1:8190-8193, and public
+      lookups return provider records on every site. The warm gate was skipped
+      for lith-1 and chic-1 (`-e needle_rollout_wait_warm=false`): all boxes
+      started cold with no address-book snapshot to restore, and
+      `needle_cached_addr_book_peer_state_size` plateaued at ~4000 (gate wants
+      15000) while `needle_dht_accelerated_ready` was already 1. The gate
+      measures the cached address book, not the DHT routing table; re-verify
+      the three gauges on each box before treating the fleet as fully warm.
 - [ ] **Store the vault files and `.vault_pass` in the operators' secret
       store.** They are no longer in git; until then this machine holds the
       only copy.
@@ -1345,12 +1375,15 @@ turn an unrelated pull request red.
 - [ ] **WSS for the bootstrappers:** add `vault_cloudflare_dns_token` to
       `group_vars/ipfs_nodes/vault.yml`, run `bootstrap.yml`, then import the
       `tcp/4443/wss` records from `dns.txt`.
-- [ ] **Before putting these boxes behind the live Cloudflare router:**
-  - find out which Host it sends and which zone it lives in;
-  - add that Host to `domains` in `k8s/route-origin/envoy.yaml.j2` (otherwise 421);
-  - point the router's health check at `/version`.
+- [x] ~~Before putting these boxes behind the live Cloudflare router~~ — the
+      router is the `delegated-ipfs.dev` load balancer in the "IPFS Public
+      Utilities" Cloudflare account (Enterprise). It sends the
+      `route-<box>-origin.ipni.io` names as its per-origin Host override; they
+      are in `domains` in `k8s/route-origin/envoy.yaml.j2`. Its health checks
+      use `/version`, expecting `Client: needle`.
 - [ ] **Enable Authenticated Origin Pulls** once the zones are known (see
-      "Deferred: Authenticated Origin Pulls").
+      "Deferred: Authenticated Origin Pulls"). The `delegated-ipfs.dev` zone
+      must also get the client certificate.
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
 - [ ] Tune needle resources and Envoy's rate limits against real traffic metrics.
 - [ ] **Three sites have no CID anywhere:** `docs.libp2p.io`, `ipld.io` and

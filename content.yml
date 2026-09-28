@@ -219,7 +219,7 @@
     status: "{{ content_pin_status_report | default({}) }}"
     pending_names: "{{ report.pending | default([]) | map(attribute='name') | list }}"
     # Content that should be pinned and is not: fails the run (last task).
-    upstream_unretrievable: "{{ report.unretrievable | default([]) | selectattr('source', 'eq', 'upstream-cluster') | list }}"
+    unretrievable_fatal: "{{ report.unretrievable | default([]) | selectattr('source', 'in', ['upstream-cluster', 'local']) | list }}"
     status_failed: "{{ status.read | default(false) and status.full_run and not status.complete and not report.check_mode }}"
   tasks:
     - name: Summarise the pinset
@@ -293,12 +293,12 @@
       run_once: true
       ansible.builtin.assert:
         that:
-          - upstream_unretrievable | length == 0
+          - unretrievable_fatal | length == 0
           - report.pin_errors | default([]) | length == 0
           - not status_failed | bool
         fail_msg: >-
-          {{ ('UNRETRIEVABLE upstream-cluster content (the only copy): '
-              ~ upstream_unretrievable | map(attribute='name') | join(', ') ~ '. ') if upstream_unretrievable else '' }}
+          {{ ('UNRETRIEVABLE content we hold the only copy of (upstream-cluster, local): '
+              ~ unretrievable_fatal | map(attribute='name') | join(', ') ~ '. ') if unretrievable_fatal else '' }}
           {{- ('pin add failed: ' ~ report.pin_errors | map(attribute='name') | join(', ') ~ '. ') if report.pin_errors | default([]) else '' }}
           {{- ('not PINNED on every peer after ' ~ content_pin_timeout ~ 's: '
               ~ status.not_pinned | join('; ')) if status_failed | bool else '' }}
