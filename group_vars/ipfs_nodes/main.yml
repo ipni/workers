@@ -59,9 +59,11 @@ firewall_allowed_udp: []
 # 11 minutes in, p95 2904ms with 2937 rejected lookups and 3x the CPU; by 69
 # minutes, p95 588-691ms, no rejections, warm CPU.
 #
-# Flip this to true when the boxes go live. A production rollout then takes
-# roughly an hour per box, which is the real cost of restarting needle.
-production_rollout: false
+# The boxes are live (delegated-ipfs.dev load-balances onto them), so this is
+# true: a plain run rolls one box at a time and waits for each to warm up,
+# roughly an hour per box, which is the real cost of restarting needle. Pass
+# -e production_rollout=false only for a box that carries no traffic.
+production_rollout: true
 
 # ---------------------------------------------------------------------------
 # Storage

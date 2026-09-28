@@ -246,17 +246,18 @@ measured need - four instances serving 894 req/s held 1.2-1.5 GiB each. The CPU
 floor is measured: the same run used 4.4-4.9 cores each, 18.2 of 32.
 
 **Rolling needle.** Both the one-at-a-time order and the warm-up gate hang off
-`production_rollout`, which is **`false` today** in
-`group_vars/ipfs_nodes/main.yml`. So the default run - the one you get with no
-`-e` at all - rolls all four instances on all three boxes simultaneously. That
-is right while the boxes carry no traffic and wrong the moment they do; flip it
-in `group_vars` when they go live.
+`production_rollout`, which is **`true` today** in
+`group_vars/ipfs_nodes/main.yml`: the boxes are live behind delegated-ipfs.dev.
+So the default run - the one you get with no `-e` at all - rolls one box at a
+time, one instance at a time, each warmed up before the next is touched.
+`-e production_rollout=false` rolls all four instances on all three boxes
+simultaneously, which is a full outage now that they carry traffic.
 
 | | boxes | instances per box | warm-up gate | cost |
 |---|---|---|---|---|
-| `production_rollout=false` (today) | all at once | all four at once | no | ~5 min, fleet-wide outage |
-| `-e production_rollout=true -e needle_rollout_wait_warm=false` | one at a time | one at a time | no | ~6 min/box, no outage |
-| `production_rollout=true` | one at a time | one at a time | yes | hours/box, no outage |
+| `-e production_rollout=false` | all at once | all four at once | no | ~5 min, fleet-wide outage |
+| `-e needle_rollout_wait_warm=false` | one at a time | one at a time | no | ~6 min/box, no outage |
+| `production_rollout=true` (today, the default) | one at a time | one at a time | yes | hours/box, no outage |
 
 With the gate on, each instance waits for its address book to reach
 `needle_warm_min_peers` before the next instance - or the next box - is
