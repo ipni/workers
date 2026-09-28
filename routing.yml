@@ -4,13 +4,13 @@
 #                  libp2p on 4004-4007, HTTP API on 127.0.0.1:8190-8193)
 #   route_origin   Envoy on :443 as the Cloudflare origin for route-<box>.ipni.io
 #
-#   ansible-playbook routing.yml                     # all three boxes at once (dev)
+#   ansible-playbook routing.yml                     # one box at a time, warmed (production_rollout)
 #   ansible-playbook routing.yml -l chic-1           # one box
 #   ansible-playbook routing.yml --tags origin       # only the origin
 #   ansible-playbook routing.yml --check --diff      # dry run
 #
-#   # production: one box at a time, each warmed up before the next is touched
-#   ansible-playbook routing.yml -e production_rollout=true
+#   # all boxes at once: a full outage now that the boxes carry traffic
+#   ansible-playbook routing.yml -e production_rollout=false
 #
 # Requires site.yml to have run first: this connects as the hardened admin
 # user and expects k3s to be up.
@@ -21,17 +21,22 @@
 # after a restart, long after the pod reports Ready (see
 # roles/needle/defaults/main.yml for the measurements).
 #
-#   production_rollout: false (default, dev)  all boxes at once, no warm-up wait
-#   production_rollout: true                  one box at a time, each warmed up
+#   production_rollout: false                 all boxes at once, no warm-up wait
+#   production_rollout: true (default, live)  one box at a time, each warmed up
 #                                             before the next is touched
 #
-# Flip it in group_vars/ipfs_nodes/main.yml when these boxes start serving real
-# traffic. `rollout_serial` overrides the batch size on its own if needed.
+# Set in group_vars/ipfs_nodes/main.yml; true since the boxes went live behind
+# delegated-ipfs.dev. `rollout_serial` overrides the batch size on its own.
 
 - name: Deploy the routing service
   hosts: ipfs_nodes
+  # serial is templated before any host is chosen, so inventory group_vars are
+  # not visible here: read production_rollout from its group_vars file
+  # directly. -e production_rollout and -e rollout_serial still override.
   serial: >-
-    {{ rollout_serial | default(1 if (production_rollout | default(false) | bool)
+    {{ rollout_serial | default(1 if (production_rollout
+       | default((lookup('ansible.builtin.file', playbook_dir ~ '/group_vars/ipfs_nodes/main.yml')
+                  | from_yaml).production_rollout | default(false)) | bool)
        else (groups['ipfs_nodes'] | length)) }}
   remote_user: "{{ admin_user }}"
   become: true

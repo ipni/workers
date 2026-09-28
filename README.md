@@ -53,13 +53,13 @@ reason). Once hardening has run, every later connection is key-based and
 `sshpass` is no longer used.
 
 **Rollout mode.** `production_rollout` in `group_vars/ipfs_nodes/main.yml` is
-`false`, so playbooks roll every box at once, which is what you want while
-iterating. Set it to `true` - or pass `-e production_rollout=true` for one
-deploy - once these boxes serve real traffic: `routing.yml`, `bootstrap.yml`,
-`content.yml` and `k3s-upgrade.yml` then roll one box at a time, and
-`routing.yml` additionally waits for each box to rebuild the state a needle
-restart throws away, about an hour per box (see "Capacity: four needle
-instances per box"). Every box is a whole site with no failover between them,
+`true`: these boxes serve real traffic behind delegated-ipfs.dev. `-e
+production_rollout=false` rolls every box at once, for a box or fleet that
+carries no traffic. With it true, `routing.yml`, `bootstrap.yml`,
+`content.yml` and `k3s-upgrade.yml` roll one box at a time, and `routing.yml`
+additionally gates each needle instance on its warm-up: seconds when it
+restores its address book and routing table snapshots, up to an hour on a
+cold start (see "Capacity: four needle instances per box"). Every box is a whole site with no failover between them,
 so a simultaneous rollout in production is a full outage. `site.yml` is the
 exception: it is not serialised, so re-run it against a live fleet one box at
 a time with `-l`.

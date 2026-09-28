@@ -82,14 +82,15 @@ ansible sing-1 -u ipni -m shell -a \
 
 ## Rolling out without causing an outage
 
-`production_rollout` is `false` in `group_vars/ipfs_nodes/main.yml`, so a plain
-run rolls **all three boxes at once**. That is fine while the fleet carries no
-traffic and an outage otherwise.
+`production_rollout` is `true` in `group_vars/ipfs_nodes/main.yml` (the boxes
+are live behind delegated-ipfs.dev), so a plain run rolls **one box at a time**,
+one instance at a time, each warmed up first. `-e production_rollout=false`
+rolls all three boxes at once, which is now an outage.
 
 ```bash
 ansible-playbook routing.yml --check --diff -l sing-1   # always dry-run first
 ansible-playbook routing.yml -l sing-1                  # one box
-ansible-playbook routing.yml -e production_rollout=true # one box at a time, warmed
+ansible-playbook routing.yml                            # one box at a time, warmed (default)
 ```
 
 needle stays degraded for tens of minutes after a restart, long after the pod

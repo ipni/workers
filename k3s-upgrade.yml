@@ -15,8 +15,13 @@
 
 - name: Upgrade k3s
   hosts: ipfs_nodes
+  # serial is templated before any host is chosen, so inventory group_vars are
+  # not visible here: read production_rollout from its group_vars file
+  # directly. -e production_rollout and -e rollout_serial still override.
   serial: >-
-    {{ rollout_serial | default(1 if (production_rollout | default(false) | bool)
+    {{ rollout_serial | default(1 if (production_rollout
+       | default((lookup('ansible.builtin.file', playbook_dir ~ '/group_vars/ipfs_nodes/main.yml')
+                  | from_yaml).production_rollout | default(false)) | bool)
        else (groups['ipfs_nodes'] | length)) }}
   remote_user: "{{ admin_user }}"
   become: true
