@@ -1,22 +1,30 @@
 ---
+# ---------------------------------------------------------------------------
+# Per-instance settings. A box runs one kubo bootstrapper per entry of
+# bootstrap_instances (group_vars/ipfs_nodes/main.yml); tasks/main.yml sets
+# each of these from that instance's row of bootstrap_instance_table, so the
+# values here are the primary instance's, which is also what
+# scripts/render-manifests.yml renders. Change ports in the table, not here.
+# ---------------------------------------------------------------------------
+# Namespace, and the name of the instance: bootstrap, bootstrap-b, ...
+bootstrap_namespace: bootstrap
+
 # libp2p swarm port (TCP, and UDP for QUIC / WebTransport / WebRTC-direct).
-# Must match k8s/bootstrap/deployment.yaml and roles/bootstrap/files/kubo-config.json.
 bootstrap_swarm_port: 4001
 
 # Loopback-only RPC API (probes, metrics, `ipfs` CLI via kubectl exec).
-bootstrap_api: /ip4/127.0.0.1/tcp/5011
+bootstrap_api_port: 5011
+bootstrap_api: "/ip4/127.0.0.1/tcp/{{ bootstrap_api_port }}"
 
-# Public bootstrap peers this node dials to join the network: kubo v0.43.1's
-# default list (from its built-in autoconf fallback), pinned here because the
-# kubo config disables autoconf - it is fetched from a Shipyard-operated URL
-# that may stop after 2026-09-30. The other boxes' bootstrappers are appended
-# per host by the role. These operators are also winding down; review the list.
+# Public bootstrap peers this node dials to join the network: what is left of
+# kubo v0.43.1's default list (from its built-in autoconf fallback), pinned
+# here because the kubo config disables autoconf - it is fetched from a
+# Shipyard-operated URL that may stop after 2026-09-30. The four
+# bootstrap.libp2p.io Qm identities are gone from it: this project's
+# bootstrappers now hold them, and every instance on the other boxes is
+# appended per host by the role. va1 (12D3KooWKnDd...) is dropped as well: its
+# key came with the same handover but is not deployed (README "Bootstrap nodes").
 bootstrap_public_peers:
-  - /dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN
-  - /dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa
-  - /dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb
-  - /dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt
-  - /dnsaddr/va1.bootstrap.libp2p.io/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8
   - /ip4/104.131.131.82/tcp/4001/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
   - /ip4/104.131.131.82/udp/4001/quic-v1/p2p/QmaCpDMGvV2BGHeYERUEnRQAwe3N8SzbUtfsmvsqQLuvuJ
 
@@ -30,11 +38,14 @@ bootstrap_dns_name: bootstrap.ipni.io
 # certificate they trust. Kubo cannot serve its own certificate on /ws, so
 # Envoy (k8s/bootstrap-wss) terminates TLS on the public port and forwards
 # plain /ws to kubo on loopback. Published as
-#   /dns4/<box>.bootstrap.ipni.io/tcp/4443/wss/p2p/<PeerID>
-# Must match k8s/bootstrap-wss/envoy.yaml.
+#   /dns4/<host>.bootstrap.ipni.io/tcp/<wss port>/wss/p2p/<PeerID>
+# with <host> the box name plus the instance's suffix (chic-1, chic-1-b).
 bootstrap_wss_port: 4443
 bootstrap_ws_loopback_port: 4002
-bootstrap_wss_hostname: "{{ inventory_hostname }}.{{ bootstrap_dns_name }}"
+# The WSS Envoy's admin port (loopback). 9901 is the route-origin Envoy's.
+bootstrap_wss_admin_port: 9902
+bootstrap_host: "{{ inventory_hostname }}"
+bootstrap_wss_hostname: "{{ bootstrap_host }}.{{ bootstrap_dns_name }}"
 bootstrap_ws_listen: "/ip4/127.0.0.1/tcp/{{ bootstrap_ws_loopback_port }}/ws"
 bootstrap_wss_announce: "/dns4/{{ bootstrap_wss_hostname }}/tcp/{{ bootstrap_wss_port }}/wss"
 
@@ -69,6 +80,18 @@ bootstrap_relay_max_reservations_per_ip: 128
 # The wss address is announced (and checked) only with a browser-trusted certificate.
 bootstrap_wss_announced: "{{ bootstrap_wss_issuer == 'letsencrypt-prod' }}"
 
-# kubo's uid, for the firewall rule that keeps it from dialing loopback.
-# Must match runAsUser in k8s/bootstrap/deployment.yaml.
+# kubo's uid (runAsUser), and the owner the firewall rule that keeps it from
+# dialing loopback matches on. One per instance, so each gets its own rule.
 bootstrap_kubo_uid: 10002
+
+# ---------------------------------------------------------------------------
+# Identity changes
+# ---------------------------------------------------------------------------
+# kubo sets its identity only at `ipfs init`, and the init container refuses a
+# repo whose PeerID is not the expected one, so an instance whose running
+# PeerID differs from its vaulted one (a changed identity, or a first deploy)
+# can only start from an EMPTY repo. The role stops on such an instance unless
+# this is true, in which case it deletes the instance's Deployment and its
+# kubo-repo PVC (local-path: the data goes with it) before the apply.
+#   ansible-playbook bootstrap.yml -l <box> -e bootstrap_reset_repo=true
+bootstrap_reset_repo: false

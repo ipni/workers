@@ -1,0 +1,495 @@
+---
+# One bootstrapper instance (bootstrap_namespace), included by main.yml once per
+# entry of bootstrap_instances with that instance's ports, uid, hostname and
+# identity. Everything here is per instance: namespace, firewall block, kubo
+# config, certificate, manifests.
+
+# ---------------------------------------------------------------------------
+# Identity preflight, on the controller, before anything on the box changes.
+# A vaulted key that does not derive the published PeerID would otherwise only
+# be caught after the pod started - and if DNS were already published, client
+# configs would already point at an identity no node holds.
+# New identities: scripts/new-bootstrap-identity.sh <box>; the legacy
+# bootstrap.libp2p.io ones: scripts/import-bootstrap-identities.py.
+# ---------------------------------------------------------------------------
+- name: "Fail if {{ bootstrap_namespace }} has no identity"
+  ansible.builtin.assert:
+    that:
+      - bootstrap_instance_peer_id | default('', true) | length > 0
+      - bootstrap_instance_privkey | length > 0
+      - bootstrap_instance_api_token | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} {{ bootstrap_namespace }} has no identity: it needs a
+      peer_id and {{ bootstrap_instance_vault_prefix }}_privkey and
+      {{ bootstrap_instance_vault_prefix }}_api_token in host_vars/{{ inventory_hostname }}/vault.yml.
+    quiet: true
+
+# no_log: the private key is passed on stdin. The script prints only the
+# derived PeerID or the reason for failure, which the assert below reports.
+- name: Derive the PeerID from the vaulted private key
+  ansible.builtin.command:
+    argv: [python3, "{{ playbook_dir }}/scripts/libp2p_identity.py", check, "{{ bootstrap_instance_peer_id }}"]
+    stdin: "{{ bootstrap_instance_privkey }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  register: bootstrap_identity_check
+
+- name: Fail unless the vaulted key belongs to the published PeerID
+  ansible.builtin.assert:
+    that: bootstrap_identity_check.rc == 0
+    fail_msg: "{{ inventory_hostname }} {{ bootstrap_namespace }}: {{ bootstrap_identity_check.stdout }}"
+    success_msg: "{{ inventory_hostname }} {{ bootstrap_namespace }}: vaulted key derives {{ bootstrap_instance_peer_id }}"
+    quiet: false
+
+- name: Allow bootstrapper libp2p traffic (TCP)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bootstrap_swarm_port }}"
+    proto: tcp
+    comment: "{{ bootstrap_namespace }} libp2p"
+
+- name: Allow bootstrapper libp2p traffic (UDP - QUIC, WebTransport, WebRTC-direct)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bootstrap_swarm_port }}"
+    proto: udp
+    comment: "{{ bootstrap_namespace }} libp2p"
+
+- name: Allow browser clients (libp2p WSS, via Envoy)
+  community.general.ufw:
+    rule: allow
+    port: "{{ bootstrap_wss_port }}"
+    proto: tcp
+    comment: "{{ bootstrap_namespace }} libp2p wss"
+
+# Raw iptables rules ufw has no syntax for. They go before ufw's own
+# "allow all on loopback" rules, which would otherwise accept the traffic the
+# second rule is meant to stop.
+#
+# 1. Per-IP cap on concurrent WSS connections. Behind the proxy every client
+#    is 127.0.0.1 to kubo, which exempts loopback from its per-IP limits.
+#    Envoy accepts WSS on both families, so this cap exists in before.rules AND
+#    before6.rules - a cap that covered only v4 would be no cap at all to a
+#    client with a v6 address.
+#
+# 2. Kubo may not open new loopback connections, except to its own RPC API
+#    (probes and `ipfs` CLI calls run as the same uid). The WSS proxy needs
+#    kubo to accept connections from 127.0.0.1, so the loopback entry is gone
+#    from Swarm.AddrFilters, which also stopped kubo DIALING loopback. A
+#    WSS client could otherwise hand kubo 127.0.0.1 addresses (identify accepts
+#    them from loopback peers) and make it probe the k3s API, kubelet, needle
+#    and Envoy admin ports. Replies to accepted connections are not NEW, so
+#    serving the proxy is unaffected. This one stays IPv4-only on purpose:
+#    ::1 is still in Swarm.AddrFilters, so kubo never dials v6 loopback in the
+#    first place. Kubo's DNS goes to the provider's resolvers, not loopback.
+#    Traffic to the box's own public IP also leaves on lo, so this is also why
+#    an instance cannot dial a sibling on the same box: siblings are left out
+#    of each other's Peering and Bootstrap list below.
+#
+# One block per instance (its own marker, uid, WSS and API port); the primary
+# keeps the original "bootstrap" marker.
+- name: Add the WSS firewall rules to ufw (IPv4)
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/before.rules
+    marker: "# {mark} ANSIBLE MANAGED BLOCK {{ bootstrap_namespace }}"
+    insertbefore: '^# allow all on loopback'
+    block: |
+      # Per-IP cap on concurrent libp2p WSS connections
+      -A ufw-before-input -p tcp --dport {{ bootstrap_wss_port }} --syn -m connlimit --connlimit-above {{ bootstrap_wss_max_conns_per_ip }} --connlimit-mask {{ bootstrap_wss_connlimit_mask_v4 }} -j REJECT --reject-with tcp-reset
+      # The bootstrapper (uid {{ bootstrap_kubo_uid }}) may not dial loopback, except its RPC API
+      -A ufw-before-output -o lo -p tcp -m owner --uid-owner {{ bootstrap_kubo_uid }} -m conntrack --ctstate NEW ! --dport {{ bootstrap_api_port }} -j REJECT --reject-with tcp-reset
+      -A ufw-before-output -o lo -p udp -m owner --uid-owner {{ bootstrap_kubo_uid }} -m conntrack --ctstate NEW -j REJECT
+  register: bootstrap_ufw_rules
+
+# Same cap, IPv6 side. Only rule 1: see the note above for why the egress rules
+# have no v6 counterpart.
+- name: Add the WSS firewall rules to ufw (IPv6)
+  ansible.builtin.blockinfile:
+    path: /etc/ufw/before6.rules
+    marker: "# {mark} ANSIBLE MANAGED BLOCK {{ bootstrap_namespace }}"
+    insertbefore: '^# allow all on loopback'
+    block: |
+      # Per-prefix cap on concurrent libp2p WSS connections
+      -A ufw6-before-input -p tcp --dport {{ bootstrap_wss_port }} --syn -m connlimit --connlimit-above {{ bootstrap_wss_max_conns_per_ip }} --connlimit-mask {{ bootstrap_wss_connlimit_mask_v6 }} -j REJECT --reject-with tcp-reset
+  register: bootstrap_ufw6_rules
+
+- name: Reload ufw to load the WSS firewall rules
+  ansible.builtin.command:
+    argv: [ufw, reload]
+  when: (bootstrap_ufw_rules is changed) or (bootstrap_ufw6_rules is changed)
+  changed_when: true
+
+# ---------------------------------------------------------------------------
+# kubo config. Base settings are committed in files/kubo-config.json (no
+# secrets); each instance adds its identity from the vault, its ports, the
+# bootstrap list, and permanent peering with every instance on the OTHER boxes.
+# ---------------------------------------------------------------------------
+- name: "Build the kubo config for {{ bootstrap_namespace }}"
+  vars:
+    base: "{{ lookup('ansible.builtin.file', role_path ~ '/files/kubo-config.json') | from_json }}"
+    # Loop order, not difference: difference goes through a Python set, whose
+    # order changes between Ansible runs (string hashing is randomized per
+    # process). That reordered Bootstrap/Peering, changed the Secret, and
+    # restarted every bootstrapper on every run. Inventory order is stable.
+    #
+    # Other boxes only: a same-box sibling is unreachable (the loopback rule
+    # above), and listing it would leave kubo redialing it forever.
+    peering: >-
+      {%- set peers = [] -%}
+      {%- for h in groups['ipfs_nodes'] if h != inventory_hostname -%}
+        {%- set ip = hostvars[h].ansible_host -%}
+        {%- for i in hostvars[h].bootstrap_instances -%}
+          {%- set _ = peers.append({'ID': i.peer_id,
+                                    'Addrs': ['/ip4/' ~ ip ~ '/udp/' ~ i.swarm_port ~ '/quic-v1',
+                                              '/ip4/' ~ ip ~ '/tcp/' ~ i.swarm_port]}) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ peers }}
+    # The public list, then each other instance's QUIC address + PeerID.
+    bootstrap_list: >-
+      {%- set entries = bootstrap_public_peers | list -%}
+      {%- for p in peering -%}
+        {%- set _ = entries.append(p.Addrs[0] ~ '/p2p/' ~ p.ID) -%}
+      {%- endfor -%}
+      {{ entries }}
+  ansible.builtin.set_fact:
+    # API.Authorizations: with hostNetwork, 127.0.0.1 is shared with every host
+    # process and the other hostNetwork pods (needle, Envoy), so loopback alone
+    # does not protect the admin RPC. Every /api/v0 call now needs the token.
+    # (kubo does not guard /debug/metrics or /debug/pprof with it.)
+    #
+    # WSS: kubo serves plain /ws on loopback for the Envoy TLS proxy, and the
+    # loopback entry leaves Swarm.AddrFilters so kubo accepts the proxy's
+    # 127.0.0.1 connections (the firewall still stops kubo dialing loopback).
+    # NoAnnounce keeps it, so no 127.0.0.1 address is ever published. The public
+    # wss address is announced explicitly: kubo cannot infer it, and a DNS name
+    # lets browsers verify the certificate.
+    bootstrap_kubo_config: >-
+      {{ base | combine({
+           'Identity': {'PeerID': bootstrap_instance_peer_id, 'PrivKey': bootstrap_instance_privkey},
+           'API': base.API | combine({'Authorizations': {'deploy': {
+               'AuthSecret': 'bearer:' ~ bootstrap_instance_api_token,
+               'AllowedPaths': ['/api/v0']}}}),
+           'Bootstrap': bootstrap_list,
+           'Peering': {'Peers': peering},
+           'Addresses': base.Addresses | combine({
+               'API': [bootstrap_api],
+               'Swarm': base.Addresses.Swarm
+                        | map('regex_replace', '/(tcp|udp)/[0-9]+', '/\1/' ~ bootstrap_swarm_port) | list
+                        + [bootstrap_ws_listen],
+               'AppendAnnounce': [bootstrap_wss_announce] if bootstrap_wss_announced | bool else []}),
+           'Swarm': base.Swarm | combine({
+               'AddrFilters': base.Swarm.AddrFilters | reject('equalto', '/ip4/127.0.0.0/ipcidr/8') | list,
+               'RelayService': base.Swarm.RelayService | combine({
+                   'MaxReservationsPerIP': bootstrap_relay_max_reservations_per_ip})})
+         }) }}
+  no_log: true
+
+- name: "Check whether the {{ bootstrap_namespace }} namespace exists yet"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, namespace, "{{ bootstrap_namespace }}", --ignore-not-found, -o, name]
+  register: bootstrap_ns
+  changed_when: false
+  check_mode: false
+
+- name: "Ensure the {{ bootstrap_namespace }} namespace exists"
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: Namespace
+    name: "{{ bootstrap_namespace }}"
+    state: present
+
+# ---------------------------------------------------------------------------
+# WSS certificate and TLS proxy. The certificate must exist before Envoy
+# starts (see k8s/bootstrap-wss/deployment.yaml), and the address is announced
+# only once a trusted certificate is being served.
+# ---------------------------------------------------------------------------
+- name: Check whether cert-manager is installed yet
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, crd, certificates.cert-manager.io, --ignore-not-found, -o, name]
+  register: bootstrap_cm_crd
+  changed_when: false
+  check_mode: false
+
+# On a first --check neither the namespace nor cert-manager's CRDs exist, so
+# the objects below cannot even be dry-run.
+- name: Create the WSS certificate
+  when: not ansible_check_mode or (bootstrap_ns.stdout and bootstrap_cm_crd.stdout)
+  block:
+    - name: Install the Cloudflare API token for DNS-01 challenges
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: cloudflare-api-token
+            namespace: "{{ bootstrap_namespace }}"
+          data:
+            api-token: "{{ vault_cloudflare_dns_token | b64encode }}"
+      no_log: true
+
+    # Both issuers always exist; bootstrap_wss_issuer picks one. DNS-01 because
+    # the only open port that could answer HTTP-01 (:443) is Cloudflare-only.
+    - name: Create the Let's Encrypt issuers
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ bootstrap_namespace }}"
+          spec:
+            acme: >-
+              {{ {'server': item.server,
+                  'privateKeySecretRef': {'name': item.name ~ '-account-key'},
+                  'solvers': [{'selector': {'dnsZones': [bootstrap_dns_name | regex_replace('^[^.]+[.]', '')]},
+                               'dns01': {'cloudflare': {'apiTokenSecretRef':
+                                   {'name': 'cloudflare-api-token', 'key': 'api-token'}}}}]}
+                 | combine({'email': bootstrap_acme_email} if bootstrap_acme_email else {}) }}
+      loop:
+        - { name: letsencrypt-prod, server: "https://acme-v02.api.letsencrypt.org/directory" }
+        - { name: letsencrypt-staging, server: "https://acme-staging-v02.api.letsencrypt.org/directory" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Request the WSS certificate
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: bootstrap-wss
+            namespace: "{{ bootstrap_namespace }}"
+          spec:
+            secretName: bootstrap-wss-tls
+            dnsNames: ["{{ bootstrap_wss_hostname }}"]
+            privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+            issuerRef: { group: cert-manager.io, kind: Issuer, name: "{{ bootstrap_wss_issuer }}" }
+
+    # Ready alone is not enough right after an issuer switch: the old
+    # certificate stays Ready until cert-manager notices. Also require that
+    # the Secret was issued by the selected issuer.
+    - name: Wait for the WSS certificate to be issued
+      ansible.builtin.command:
+        argv:
+          - k3s
+          - kubectl
+          - --namespace={{ bootstrap_namespace }}
+          - get
+          - certificate/bootstrap-wss
+          - secret/bootstrap-wss-tls
+          - --ignore-not-found
+          - -o
+          - >-
+            jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{.metadata.annotations.cert-manager\.io/issuer-name}{" "}{end}
+      register: bootstrap_cert_state
+      changed_when: false
+      # DNS-01: record creation, propagation checks, validation. Usually 1-2 min.
+      retries: 60
+      delay: 10
+      until: bootstrap_cert_state.stdout.split() == ['True', bootstrap_wss_issuer]
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Show why the WSS certificate is not issued
+      ansible.builtin.command:
+        argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", describe, certificate/bootstrap-wss,
+               certificaterequests, orders.acme.cert-manager.io, challenges.acme.cert-manager.io]
+      register: bootstrap_cert_describe
+      changed_when: false
+      failed_when: true
+      when:
+        - not ansible_check_mode
+        - bootstrap_cert_state.stdout.split() != ['True', bootstrap_wss_issuer]
+
+    - name: Deploy the WSS proxy
+      ansible.builtin.include_role:
+        name: kustomize_apply
+      vars:
+        kustomize_app: bootstrap-wss
+        kustomize_namespace: "{{ bootstrap_namespace }}"
+        kustomize_deployment: bootstrap-wss
+        kustomize_dest: "/etc/ipfs-workers/k8s/{{ bootstrap_namespace }}-wss"
+
+# ---------------------------------------------------------------------------
+# Identity change. The init container only sets the identity on a fresh repo
+# and refuses to start on a mismatch, so a new PeerID needs an empty kubo-repo
+# PVC. Checked BEFORE the Secret changes: a Secret naming the new PeerID next
+# to a repo holding the old one would crash-loop the pod on its next restart.
+# A missing Deployment (first deploy) counts as different: the PVC may still
+# be left from an earlier identity.
+# ---------------------------------------------------------------------------
+- name: "Read the PeerID {{ bootstrap_namespace }} is running now"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", exec, deploy/bootstrap, -c, kubo, --,
+           sh, -c, 'exec ipfs --api={{ bootstrap_api }} --api-auth="$KUBO_API_AUTH" id -f "<id>"']
+  register: bootstrap_running_id
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: "Stop unless {{ bootstrap_namespace }} runs its vaulted identity or a reset was asked for"
+  vars:
+    running: "{{ bootstrap_running_id.stdout | trim if bootstrap_running_id.rc == 0 else '' }}"
+  ansible.builtin.assert:
+    that: running == bootstrap_instance_peer_id or bootstrap_reset_repo | bool
+    fail_msg: >-
+      {{ inventory_hostname }} {{ bootstrap_namespace }} runs {{ running or 'no readable identity' }},
+      but its identity is {{ bootstrap_instance_peer_id }}. Starting it needs an empty repo:
+      run with -e bootstrap_reset_repo=true (deletes its Deployment and kubo-repo PVC).
+    success_msg: "{{ inventory_hostname }} {{ bootstrap_namespace }}: {{ running or 'not running' }}"
+  register: bootstrap_identity_gate
+  when: not ansible_check_mode
+
+- name: "Reset {{ bootstrap_namespace }} to an empty repo"
+  when:
+    - not ansible_check_mode
+    - bootstrap_reset_repo | bool
+    - (bootstrap_running_id.stdout | trim if bootstrap_running_id.rc == 0 else '') != bootstrap_instance_peer_id
+  block:
+    - name: "Delete the {{ bootstrap_namespace }} Deployment"
+      ansible.builtin.command:
+        argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", delete, deployment, bootstrap,
+               --ignore-not-found, --wait]
+      register: bootstrap_reset_deploy
+      changed_when: bootstrap_reset_deploy.stdout is search('deleted')
+
+    # The PVC cannot go while a pod still mounts it (kubernetes.io/pvc-protection).
+    - name: "Wait until no {{ bootstrap_namespace }} kubo pod remains"
+      ansible.builtin.command:
+        argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", get, pods, -l, app=bootstrap, -o, name]
+      register: bootstrap_reset_pods
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: bootstrap_reset_pods.stdout | trim == ''
+
+    - name: "Delete the {{ bootstrap_namespace }} kubo-repo PVC"
+      ansible.builtin.command:
+        argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", delete, pvc, kubo-repo,
+               --ignore-not-found, --wait]
+      register: bootstrap_reset_pvc
+      changed_when: bootstrap_reset_pvc.stdout is search('deleted')
+
+# config.json (with the private key) is used only for the first `ipfs init`;
+# config-nokey.json for every later start, because `ipfs config replace`
+# refuses a config that contains a private key. See k8s/bootstrap/deployment.yaml.
+- name: Install the kubo config as a Secret
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: kubo-config
+        namespace: "{{ bootstrap_namespace }}"
+      data:
+        config.json: "{{ bootstrap_kubo_config | to_nice_json | b64encode }}"
+        config-nokey.json: >-
+          {{ bootstrap_kubo_config | combine({'Identity': {'PeerID': bootstrap_instance_peer_id}})
+             | to_nice_json | b64encode }}
+        peer-id: "{{ bootstrap_instance_peer_id | b64encode }}"
+        # For probes and CLI calls (kubo's --api-auth). Exposed to the kubo
+        # container as $KUBO_API_AUTH.
+        api-auth: "{{ ('bearer:' ~ bootstrap_instance_api_token) | b64encode }}"
+  no_log: true
+  register: bootstrap_secret
+  # On a first --check the namespace is only simulated and a dry-run secret
+  # create would fail with "namespace not found".
+  when: not ansible_check_mode or bootstrap_ns.stdout
+
+- name: "Deploy the {{ bootstrap_namespace }} manifests"
+  ansible.builtin.include_role:
+    name: kustomize_apply
+  vars:
+    kustomize_app: bootstrap
+    kustomize_namespace: "{{ bootstrap_namespace }}"
+    kustomize_deployment: bootstrap
+    kustomize_dest: "/etc/ipfs-workers/k8s/{{ bootstrap_namespace }}"
+
+# The init container reads the Secret only at pod start. Restart for a changed
+# config unless the apply above already rolled the pod.
+- name: Restart the bootstrapper to load a changed config
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", rollout, restart, deployment/bootstrap]
+  when:
+    - not ansible_check_mode
+    - bootstrap_secret is changed
+    - not kustomize_deployment_rolled
+  register: bootstrap_restart
+  changed_when: true
+
+- name: Wait for the bootstrapper restart to complete
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", rollout, status, deployment/bootstrap, --timeout=600s]
+  when: bootstrap_restart is changed
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Verification inside the running pod.
+# ---------------------------------------------------------------------------
+- name: Read the running node's identity
+  # The token is expanded inside the container from $KUBO_API_AUTH, so it never
+  # appears in this command line on the host.
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", exec, deploy/bootstrap, -c, kubo, --,
+           sh, -c, 'exec ipfs --api={{ bootstrap_api }} --api-auth="$KUBO_API_AUTH" id']
+  register: bootstrap_id
+  changed_when: false
+  retries: 10
+  delay: 6
+  until: bootstrap_id.rc == 0
+  when: not ansible_check_mode
+
+- name: Fail unless the node is the expected, correctly configured bootstrapper
+  vars:
+    node: "{{ bootstrap_id.stdout | from_json }}"
+  ansible.builtin.assert:
+    that:
+      - node.ID == bootstrap_instance_peer_id
+      - node.AgentVersion is search('/' ~ (bootstrap_dns_name | regex_escape) ~ '$')
+      - "'/ipfs/kad/1.0.0' in node.Protocols"
+      - node.Protocols | select('search', '^/ipfs/bitswap') | list | length == 0
+      # Advertises its public address, and nothing from the k3s networks.
+      - node.Addresses | select('search', '^/ip4/' ~ (ansible_host | regex_escape) ~ '/') | list | length > 0
+      - node.Addresses | select('search', '^/ip4/10[.]4[23][.]') | list | length == 0
+      - node.Addresses | select('search', '^/ip4/127[.]') | list | length == 0
+      - (bootstrap_wss_announce ~ '/p2p/' ~ bootstrap_instance_peer_id in node.Addresses) == bootstrap_wss_announced | bool
+    fail_msg: >-
+      {{ bootstrap_namespace }} check failed. ID={{ node.ID }} agent={{ node.AgentVersion }}
+      protocols={{ node.Protocols }} addresses={{ node.Addresses }}
+    success_msg: "{{ bootstrap_namespace }} {{ node.ID }} ({{ node.AgentVersion }}) advertising {{ node.Addresses | length }} addresses"
+  when: not ansible_check_mode
+
+# From the controller, as a client would: the public WSS port must present a
+# certificate that verifies for the published name.
+- name: Check the WSS certificate as a client sees it
+  ansible.builtin.command:
+    argv: [openssl, s_client, -connect, "{{ ansible_host }}:{{ bootstrap_wss_port }}",
+           -servername, "{{ bootstrap_wss_hostname }}", -verify_hostname, "{{ bootstrap_wss_hostname }}",
+           -verify_return_error, -alpn, http/1.1]
+    stdin: ""
+  delegate_to: localhost
+  become: false
+  register: bootstrap_wss_tls
+  changed_when: false
+  failed_when: >-
+    bootstrap_wss_tls.rc != 0
+    or 'Verification: OK' not in bootstrap_wss_tls.stdout
+  when:
+    - not ansible_check_mode
+    - bootstrap_wss_announced | bool

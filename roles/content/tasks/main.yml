@@ -119,10 +119,14 @@
                                             '/ip4/' ~ ip ~ '/tcp/' ~ content_kubo_swarm_port]}) -%}
       {%- endfor -%}
       {{ peers }}
-    # This project's bootstrappers first, then the public list.
+    # This project's bootstrappers first (every instance on every box), then
+    # the public list.
     bootstrap_list: >-
-      {{ groups['ipfs_nodes'] | map('extract', hostvars, 'bootstrap_peer_id') | select('defined')
-         | map('regex_replace', '^', '/dnsaddr/bootstrap.ipni.io/p2p/') | list
+      {%- set ids = [] -%}
+      {%- for h in groups['ipfs_nodes'] if hostvars[h].bootstrap_peer_id is defined -%}
+        {%- set _ = ids.extend(hostvars[h].bootstrap_instances | map(attribute='peer_id')) -%}
+      {%- endfor -%}
+      {{ ids | map('regex_replace', '^', '/dnsaddr/bootstrap.ipni.io/p2p/') | list
          + content_public_bootstrap_peers }}
   ansible.builtin.set_fact:
     content_kubo_config: >-

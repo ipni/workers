@@ -1,5 +1,13 @@
 ---
-# Permanent libp2p identity of this box's bootstrapper. Public: it appears in
-# every /dnsaddr record and client bootstrap list, so it must never change.
-# The private key is vault_bootstrap_privkey in vault.yml next to this file.
-bootstrap_peer_id: 12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt
+# libp2p identity of this box's bootstrapper: the legacy
+# ny5.bootstrap.libp2p.io identity. Public: it appears in every /dnsaddr
+# record and client bootstrap list, so it must never change. The private key
+# is vault_bootstrap_privkey in vault.yml next to this file.
+bootstrap_peer_id: QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa
+bootstrap_legacy_name: ny5
+
+# Further kubo instances on this box, each with its own legacy identity.
+# Ports come from bootstrap_instance_table (group_vars/ipfs_nodes); the
+# key is vault_<name with - as _>_privkey in vault.yml.
+bootstrap_extra_instances:
+  - {name: bootstrap-b, peer_id: QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN, legacy_name: sv15}

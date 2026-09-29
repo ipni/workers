@@ -125,7 +125,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyyaml
+      - run: pip install pyyaml cryptography
+
+      # The bootstrappers' PeerIDs come from these derivations: an Ed25519
+      # change would silently move every published ID, and the legacy
+      # bootstrap.libp2p.io identities are RSA.
+      - name: libp2p_identity.py unit tests
+        run: python3 -m unittest scripts/test_libp2p_identity.py
 
       # dns.txt is generated but committed, and README calls it the source of
       # truth for the live records. It has drifted from its generator before.
@@ -133,6 +139,11 @@ jobs:
         run: |
           python3 scripts/bootstrap-dns.py > /tmp/dns.generated
           diff -u /tmp/dns.generated dns.txt
+
+      - name: dns-libp2p.txt matches its generator
+        run: |
+          python3 scripts/bootstrap-dns.py --libp2p > /tmp/dns-libp2p.generated
+          diff -u /tmp/dns-libp2p.generated dns-libp2p.txt
 
       # The role ignores - and reports - any pinset.yml section it does not
       # know, which is how a whole section once went unread for a week.

@@ -5,7 +5,7 @@ metadata:
   name: bootstrap
 spec:
   replicas: 1
-  # hostNetwork binds 4001 and 5011 on the node, so a second pod cannot start
+  # hostNetwork binds the swarm and API ports on the node, so a second pod cannot start
   # while the old one holds them; Recreate stops the old pod first. A restart is
   # a short outage for this bootstrapper. Clients using the shared
   # /dnsaddr/bootstrap.ipni.io name try the other nodes; peers holding only
@@ -35,9 +35,9 @@ spec:
         # A uid with no host account. The image defaults to root, and its
         # `ipfs` user is uid 1000, which several images share on these hosts.
         runAsNonRoot: true
-        runAsUser: 10002
-        runAsGroup: 10002
-        fsGroup: 10002
+        runAsUser: {{ bootstrap_kubo_uid }}
+        runAsGroup: {{ bootstrap_kubo_uid }}
+        fsGroup: {{ bootstrap_kubo_uid }}
         seccompProfile:
           type: RuntimeDefault
 
@@ -139,13 +139,13 @@ spec:
                   name: kubo-config
                   key: api-auth
           ports:
-            # 4001 carries TCP and, on UDP, QUIC, WebTransport and
+            # The swarm port carries TCP and, on UDP, QUIC, WebTransport and
             # WebRTC-direct. roles/bootstrap opens the same port in ufw.
             - name: libp2p-tcp
-              containerPort: 4001
+              containerPort: {{ bootstrap_swarm_port }}
               protocol: TCP
             - name: libp2p-udp
-              containerPort: 4001
+              containerPort: {{ bootstrap_swarm_port }}
               protocol: UDP
 
           # Shares the ~30% of each box not reserved for needle with the
@@ -169,7 +169,7 @@ spec:
           # cannot be used. Startup and readiness exec `ipfs diag healthy`.
           startupProbe:
             exec:
-              command: ["/bin/sh", "-c", 'exec ipfs --api=/ip4/127.0.0.1/tcp/5011 --api-auth="$KUBO_API_AUTH" diag healthy']
+              command: ["/bin/sh", "-c", 'exec ipfs --api={{ bootstrap_api }} --api-auth="$KUBO_API_AUTH" diag healthy']
             periodSeconds: 10
             timeoutSeconds: 5
             # Repo migrations run in the init container, before this probe
@@ -181,13 +181,13 @@ spec:
           livenessProbe:
             tcpSocket:
               host: 127.0.0.1
-              port: 5011
+              port: {{ bootstrap_api_port }}
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 5
           readinessProbe:
             exec:
-              command: ["/bin/sh", "-c", 'exec ipfs --api=/ip4/127.0.0.1/tcp/5011 --api-auth="$KUBO_API_AUTH" diag healthy']
+              command: ["/bin/sh", "-c", 'exec ipfs --api={{ bootstrap_api }} --api-auth="$KUBO_API_AUTH" diag healthy']
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 3

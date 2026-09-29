@@ -2,7 +2,8 @@
 # Deploy the IPFS/libp2p bootstrap nodes (kubo, DHT server) to the prepared boxes,
 # with cert-manager for their browser-facing WSS certificates.
 #
-#   ansible-playbook bootstrap.yml                  # all three boxes
+#   ansible-playbook bootstrap.yml                  # all three boxes, one at a time
+#   ansible-playbook bootstrap.yml -e bootstrap_reset_repo=true   # identity change (README)
 #   ansible-playbook bootstrap.yml -l chic-1        # one box
 #   ansible-playbook bootstrap.yml --check --diff   # dry run
 #
@@ -29,8 +30,10 @@
       tags: [bootstrap]
 
 # Peering is only meaningful once every box runs, so it is checked last, across
-# the whole group: each bootstrapper must be connected to the other two. With
-# -l (a partial run) the check still reports, but does not fail.
+# the whole group: each instance must be connected to every instance on the
+# other boxes. Not to a sibling on its own box - the loopback firewall rule
+# (roles/bootstrap) stops that dial, so siblings are not peered. With -l (a
+# partial run) the check still reports, but does not fail.
 - name: Verify the bootstrappers are peered with each other
   hosts: ipfs_nodes
   remote_user: "{{ admin_user }}"
@@ -39,14 +42,21 @@
   tags: [bootstrap]
   vars:
     other_peer_ids: >-
-      {{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname)
-         | map('extract', hostvars, 'bootstrap_peer_id') | list }}
+      {%- set ids = [] -%}
+      {%- for h in groups['ipfs_nodes'] if h != inventory_hostname -%}
+        {%- set _ = ids.extend(hostvars[h].bootstrap_instances | map(attribute='peer_id')) -%}
+      {%- endfor -%}
+      {{ ids }}
     full_run: "{{ ansible_play_hosts_all | length == groups['ipfs_nodes'] | length }}"
   tasks:
-    - name: Wait for connections to the other bootstrappers
+    - name: Wait for connections to the bootstrappers on the other boxes
       ansible.builtin.command:
-        argv: [k3s, kubectl, --namespace=bootstrap, exec, deploy/bootstrap, -c, kubo, --,
-               sh, -c, 'exec ipfs --api=/ip4/127.0.0.1/tcp/5011 --api-auth="$KUBO_API_AUTH" swarm peers']
+        argv: [k3s, kubectl, "--namespace={{ bs.name }}", exec, deploy/bootstrap, -c, kubo, --,
+               sh, -c, 'exec ipfs --api=/ip4/127.0.0.1/tcp/{{ bs.api_port }} --api-auth="$KUBO_API_AUTH" swarm peers']
+      loop: "{{ bootstrap_instances }}"
+      loop_control:
+        loop_var: bs
+        label: "{{ bs.name }}"
       register: bootstrap_peers
       changed_when: false
       # Peering dials in the background; allow up to two minutes.
@@ -64,12 +74,16 @@
 
     - name: Report peering
       vars:
-        missing_peer_ids: "{{ other_peer_ids | reject('in', bootstrap_peers.stdout | default('')) | list }}"
+        missing_peer_ids: "{{ other_peer_ids | reject('in', item.stdout | default('')) | list }}"
       ansible.builtin.assert:
         that: missing_peer_ids | length == 0 or not full_run
-        fail_msg: "{{ inventory_hostname }} is not connected to bootstrappers {{ missing_peer_ids }}"
+        fail_msg: "{{ inventory_hostname }} {{ item.bs.name }} is not connected to bootstrappers {{ missing_peer_ids }}"
         success_msg: >-
-          {{ inventory_hostname }}:
+          {{ inventory_hostname }} {{ item.bs.name }}:
           {{ ('peering not checked (partial run)') if not full_run | bool else
-             (bootstrap_peers.stdout_lines | length | string) ~ ' peers; connected to all other bootstrappers' }}
+             (item.stdout_lines | length | string) ~ ' peers; connected to all '
+             ~ (other_peer_ids | length | string) ~ ' bootstrappers on the other boxes' }}
+      loop: "{{ bootstrap_peers.results }}"
+      loop_control:
+        label: "{{ item.bs.name }}"
       when: not ansible_check_mode

@@ -2,10 +2,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Lives in the bootstrap namespace (created by k8s/bootstrap), next to the
-# Certificate whose Secret it mounts. A separate Deployment from kubo, so
-# proxy changes do not restart the bootstrapper.
-namespace: bootstrap
+# Lives in its bootstrapper instance's namespace (created by k8s/bootstrap),
+# next to the Certificate whose Secret it mounts. A separate Deployment from
+# kubo, so proxy changes do not restart the bootstrapper.
+namespace: {{ bootstrap_namespace }}
 
 resources:
   - deployment.yaml

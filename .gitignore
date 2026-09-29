@@ -4,6 +4,9 @@ secrets.txt
 *.plaintext
 .vault_pass
 *.vault_pass
+# Private keys of the legacy bootstrap.libp2p.io identities; read only by
+# scripts/import-bootstrap-identities.py.
+bootstrap-keys.txt
 
 # Encrypted credentials are not committed either: the repository is public.
 # They live only in the operators' secret store (see "Secrets" in README.md).

@@ -14,7 +14,9 @@
 # A relative dest is taken from the repo root, not your shell's cwd.
 #
 # The needle instance table is read straight from the role's defaults, so this
-# cannot disagree with what a deploy would render.
+# cannot disagree with what a deploy would render. The bootstrap manifests are
+# rendered for the primary instance, whose values are the bootstrap role's
+# defaults; other instances differ only in the rows of bootstrap_instance_table.
 
 - name: Render the k8s manifest templates
   hosts: localhost
@@ -22,6 +24,7 @@
   connection: local
   vars_files:
     - "{{ playbook_dir }}/../roles/needle/defaults/main.yml"
+    - "{{ playbook_dir }}/../roles/bootstrap/defaults/main.yml"
   vars:
     repo_root: "{{ (playbook_dir ~ '/..') | realpath }}"
     dest: rendered

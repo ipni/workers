@@ -118,8 +118,10 @@ sysctl_tuning:
   # explicit binds still work. Update when a host-network port is added:
   #   443 Envoy (outside the range today, kept for safety)
   #   4001 bootstrapper libp2p  4002 bootstrapper /ws (loopback)
+  #   4011 bootstrap-b libp2p   4012 bootstrap-b /ws (loopback)
   #   4004-4007 needle libp2p (four instances)  4101 content kubo libp2p
-  #   4443 bootstrapper WSS (Envoy)  5011 bootstrapper API
+  #   4443 bootstrapper WSS (Envoy)  4453 bootstrap-b WSS (Envoy)
+  #   5011 bootstrapper API  5012 bootstrap-b API
   #   5021 content kubo RPC API (loopback)
   #   6443-6444 k3s API  8190-8193 needle APIs (loopback, four instances)
   #   8472/udp flannel VXLAN
@@ -127,8 +129,9 @@ sysctl_tuning:
   #   9095 content ipfs-cluster IPFS proxy (loopback)
   #   9096 content ipfs-cluster swarm
   #   9901 route-origin Envoy admin  9902 bootstrap-wss Envoy admin
+  #   9903 bootstrap-b's bootstrap-wss Envoy admin
   #   10010 containerd  10248-10259 kubelet/kube-proxy/k3s
-  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4101,4443,5011,5021,6443-6444,8190-8193,8472,9094-9096,9901-9902,10010,10248-10259"
+  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4011-4012,4101,4443,4453,5011-5012,5021,6443-6444,8190-8193,8472,9094-9096,9901-9903,10010,10248-10259"
   net.ipv4.tcp_fin_timeout: 15
   # Must equal what k3s's kube-proxy sets on every start: max(32768 * CPUs,
   # 131072), i.e. 1048576 on these 32-core boxes. A fixed lower value both
@@ -138,3 +141,30 @@ sysctl_tuning:
   vm.max_map_count: 262144
 
 nofile_limit: 1048576
+
+# ---------------------------------------------------------------------------
+# Bootstrappers (bootstrap.yml)
+# ---------------------------------------------------------------------------
+# Every box runs the primary instance, `bootstrap`; a box whose host_vars list
+# bootstrap_extra_instances runs those too, each in its own namespace with its
+# own identity (vault_<name, - as _>_privkey and _api_token). Ports, the kubo
+# uid and the WSS hostname suffix come from the instance's row here, so every
+# consumer - the role, its manifests, the peering check, the content role and
+# scripts/bootstrap-dns.py - reads one table. A new row needs its ports added
+# to net.ipv4.ip_local_reserved_ports above. uid 10003 is the content kubo's.
+bootstrap_instance_table:
+  bootstrap: {swarm_port: 4001, ws_port: 4002, api_port: 5011, wss_port: 4443, wss_admin_port: 9902, uid: 10002, suffix: ""}
+  bootstrap-b: {swarm_port: 4011, ws_port: 4012, api_port: 5012, wss_port: 4453, wss_admin_port: 9903, uid: 10004, suffix: "-b"}
+
+# This box's instances, in order, each its table row plus name, peer_id and
+# host (the DNS label under bootstrap.ipni.io: the box name plus the suffix).
+# Read from other hosts as hostvars[h].bootstrap_instances.
+bootstrap_instances: >-
+  {%- set out = [] -%}
+  {%- for i in [{'name': 'bootstrap', 'peer_id': bootstrap_peer_id | default(none),
+                 'legacy_name': bootstrap_legacy_name | default(none)}]
+               + (bootstrap_extra_instances | default([])) -%}
+    {%- set _ = out.append(i | combine(bootstrap_instance_table[i.name],
+                                       {'host': inventory_hostname ~ bootstrap_instance_table[i.name].suffix})) -%}
+  {%- endfor -%}
+  {{ out }}

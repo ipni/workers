@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and verify libp2p Ed25519 identities in kubo's config format.
+"""Generate and verify libp2p identities in kubo's config format.
 
 The bootstrappers' PeerIDs are permanent (published in DNS, hardcoded by
 clients), so a vaulted key that does not match its published PeerID must be
@@ -11,18 +11,33 @@ caught before a deploy, not after the node starts. No kubo binary is needed.
                              exit 0, or 2 malformed key
   generate                   prints {"PeerID": ..., "PrivKey": ...} as JSON
 
+generate always makes Ed25519. check and derive also accept RSA (>= 2048 bits),
+the key type of the legacy bootstrap.libp2p.io identities.
+
 Formats (libp2p peer-id spec and kubo):
-  PrivKey  = base64(protobuf{ 1: KeyType=Ed25519(1), 2: seed[32] || pubkey[32] })
-  PeerID   = base58btc( identity-multihash( protobuf{ 1: Ed25519, 2: pubkey[32] } ) )
+  PrivKey  = base64(protobuf{ 1: KeyType, 2: data })
+               Ed25519(1): data = seed[32] || pubkey[32]
+               RSA(0):     data = PKCS#1 RSAPrivateKey DER
+  PubProto = protobuf{ 1: KeyType, 2: pubkey }
+               Ed25519: pubkey[32];  RSA: PKIX SubjectPublicKeyInfo DER
+  PeerID   = base58btc( multihash(PubProto) ): identity multihash when PubProto
+             is at most 42 bytes (Ed25519, "12D3..."), else sha2-256 (RSA, "Qm...")
 """
 import base64
+import hashlib
 import json
 import sys
 
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding, NoEncryption, PrivateFormat, PublicFormat, load_der_private_key)
 
+RSA = 0
 ED25519 = 1
+RSA_MIN_BITS = 2048
+MAX_INLINE_KEY_LENGTH = 42   # longer public key protobufs are sha2-256 hashed
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
@@ -35,6 +50,18 @@ def _varint(buf, i):
         if not b & 0x80:
             return value, i
         shift += 7
+
+
+def _encode_varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
 
 
 def _parse_key_proto(raw):
@@ -62,10 +89,20 @@ def _b58(data):
     return "1" * (len(data) - len(data.lstrip(b"\0"))) + out
 
 
-def peer_id_from_privkey(privkey_b64):
-    key_type, data = _parse_key_proto(base64.b64decode(privkey_b64, validate=True))
-    if key_type != ED25519:
-        raise ValueError(f"key type {key_type} is not Ed25519")
+def peer_id_from_pubproto(pub_proto):
+    """PeerID of a serialized libp2p PublicKey protobuf."""
+    if len(pub_proto) <= MAX_INLINE_KEY_LENGTH:
+        multihash = b"\x00" + _encode_varint(len(pub_proto)) + pub_proto   # identity
+    else:
+        multihash = b"\x12\x20" + hashlib.sha256(pub_proto).digest()       # sha2-256
+    return _b58(multihash)
+
+
+def _pub_proto(key_type, pub):
+    return bytes([0x08, key_type, 0x12]) + _encode_varint(len(pub)) + pub
+
+
+def _ed25519_pub(data):
     if data is None or len(data) != 64:
         raise ValueError("Ed25519 key data must be 64 bytes (seed || public key)")
     seed, embedded_pub = data[:32], data[32:]
@@ -74,8 +111,36 @@ def peer_id_from_privkey(privkey_b64):
         Encoding.Raw, PublicFormat.Raw)
     if derived_pub != embedded_pub:
         raise ValueError("embedded public key does not match the private seed")
-    pub_proto = bytes([0x08, ED25519, 0x12, 0x20]) + derived_pub
-    return _b58(bytes([0x00, len(pub_proto)]) + pub_proto)   # identity multihash
+    return derived_pub
+
+
+def _rsa_pub(data):
+    if not data:
+        raise ValueError("RSA key data is empty")
+    try:
+        key = load_der_private_key(data, password=None)
+    except (ValueError, TypeError, UnsupportedAlgorithm) as e:
+        raise ValueError(f"RSA key data is not a PKCS#1 private key: {e}") from None
+    if not isinstance(key, RSAPrivateKey):
+        raise ValueError("RSA key data holds a non-RSA key")
+    if key.key_size < RSA_MIN_BITS:
+        raise ValueError(f"RSA key is {key.key_size} bits, below the {RSA_MIN_BITS}-bit minimum")
+    return key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+
+
+def key_type_of(privkey_b64):
+    return _parse_key_proto(base64.b64decode(privkey_b64, validate=True))[0]
+
+
+def peer_id_from_privkey(privkey_b64):
+    key_type, data = _parse_key_proto(base64.b64decode(privkey_b64, validate=True))
+    if key_type == ED25519:
+        pub = _ed25519_pub(data)
+    elif key_type == RSA:
+        pub = _rsa_pub(data)
+    else:
+        raise ValueError(f"key type {key_type} is not Ed25519 or RSA")
+    return peer_id_from_pubproto(_pub_proto(key_type, pub))
 
 
 def generate():

@@ -2,7 +2,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: bootstrap
+# One namespace per bootstrapper instance (bootstrap_instances): each holds the
+# same objects, with the instance's ports from bootstrap_instance_table.
+namespace: {{ bootstrap_namespace }}
 
 resources:
   - namespace.yaml

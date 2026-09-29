@@ -38,10 +38,10 @@ providers bafkreib22ez2dyymmqz2yq3hqjbpekqs6tv3lgq72qnfwcltoxdpc2aamq # raw CID 
 providers bafybeifydevswkwo6aueei5qhkbfsytlqstqsa5cxbse2goypggcjzwdgq # dag-pb CID of sha256("ipni-workers/routing-compare/no-providers/dag-pb"): same miss, different codec
 
 # --- peers ---------------------------------------------------------------------
-peers 12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f # sing-1 bootstrapper (dns.txt): our own always-on node, must resolve
-peers 12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u # lith-1 bootstrapper (dns.txt): our own always-on node, must resolve
-peers 12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt # chic-1 bootstrapper (dns.txt): our own always-on node, must resolve
-peers QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN # libp2p.io bootstrapper: third-party, RSA (Qm) peer ID
+peers QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt # sing-1 bootstrapper, legacy sg1 (dns.txt): our own always-on node, RSA (Qm) peer ID, must resolve
+peers QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb # lith-1 bootstrapper, legacy am6 (dns.txt): our own always-on node, RSA (Qm) peer ID, must resolve
+peers QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa # chic-1 bootstrapper, legacy ny5 (dns.txt): our own always-on node, RSA (Qm) peer ID, must resolve
+peers QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN # chic-1 bootstrap-b, legacy sv15 (dns.txt): our own always-on node, RSA (Qm) peer ID, must resolve
 peers 12D3KooWMbhqJQNaHYyWnRkFKvJMgsoT7RCTG9bXAGcAnC54TqPv # ed25519 key from sha256("ipni-workers/routing-compare/no-such-peer"): negative peer lookup
 
 # --- ipns ----------------------------------------------------------------------

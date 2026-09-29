@@ -1,8 +1,10 @@
 ---
 # Envoy terminating TLS for the bootstrapper's libp2p WebSocket transport, so
-# browsers can dial /dns4/<box>.bootstrap.ipni.io/tcp/4443/wss.
+# browsers can dial /dns4/<box>.bootstrap.ipni.io/tcp/{{ bootstrap_wss_port }}/wss.
+{# Ports are the instance's (bootstrap_instance_table in group_vars/ipfs_nodes/main.yml);
+   a Jinja comment so the rendered config, and its ConfigMap hash, stay as they were. #}
 #
-# client -> :4443 TLS (Let's Encrypt, cert-manager) -> 127.0.0.1:4002 plain /ws (kubo)
+# client -> :{{ bootstrap_wss_port }} TLS (Let's Encrypt, cert-manager) -> 127.0.0.1:{{ bootstrap_ws_loopback_port }} plain /ws (kubo)
 #
 # Plain TCP proxying, no HTTP handling: kubo ignores request headers, so an
 # HTTP-aware proxy would add nothing but request and idle timeouts that cut
@@ -13,7 +15,7 @@
 admin:
   # Host loopback only (hostNetwork). 9901 is the route-origin Envoy's.
   address:
-    socket_address: { address: 127.0.0.1, port_value: 9902 }
+    socket_address: { address: 127.0.0.1, port_value: {{ bootstrap_wss_admin_port }} }
 
 # SDS needs a node id and cluster, even for file-based sources.
 node: { id: bootstrap-wss, cluster: bootstrap-wss }
@@ -32,10 +34,10 @@ static_resources:
       # sockets rather than one v4-mapped one. The per-IP connection cap in
       # roles/bootstrap covers both families.
       address:
-        socket_address: { address: 0.0.0.0, port_value: 4443 }
+        socket_address: { address: 0.0.0.0, port_value: {{ bootstrap_wss_port }} }
       additional_addresses:
         - address:
-            socket_address: { address: "::", port_value: 4443 }
+            socket_address: { address: "::", port_value: {{ bootstrap_wss_port }} }
       filter_chains:
         - transport_socket_connect_timeout: 10s
           transport_socket:
@@ -93,4 +95,4 @@ static_resources:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address: { address: 127.0.0.1, port_value: 4002 }
+                    socket_address: { address: 127.0.0.1, port_value: {{ bootstrap_ws_loopback_port }} }

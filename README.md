@@ -762,22 +762,57 @@ below still stand on their own merits:
 
 ## Bootstrap nodes: bootstrap.ipni.io
 
-Each box runs a public IPFS/libp2p **bootstrap peer**: a kubo node that new
-peers dial to join the network. It is a DHT server with no content exchange.
+Each box runs public IPFS/libp2p **bootstrap peers**: kubo nodes that new
+peers dial to join the network. Each is a DHT server with no content exchange.
 
 ```bash
-ansible-playbook bootstrap.yml                 # all three boxes (also checks peering)
+ansible-playbook bootstrap.yml                 # all three boxes, one at a time (also checks peering)
 ansible-playbook bootstrap.yml -l chic-1       # one box
 ansible-playbook bootstrap.yml --check --diff  # dry run
 ```
 
-| Box    | PeerID                                                 | Name                        |
-|--------|--------------------------------------------------------|-----------------------------|
-| sing-1 | `12D3KooWGS4WDuFsQeombdR6Lc196aZy4zDKyFe955ZzbMUa5X8f` | sing-1.bootstrap.ipni.io |
-| lith-1 | `12D3KooWDVMaSTaWZB15rWhbwQrPM442rqxFwPg1TzweUzJosa9u` | lith-1.bootstrap.ipni.io |
-| chic-1 | `12D3KooWPk9EGLXStosjKjJKhkhe8pFCDqNypjkZRdkCtigCHmGt` | chic-1.bootstrap.ipni.io |
+They hold four of the legacy **`bootstrap.libp2p.io`** identities, the RSA
+(`Qm...`) PeerIDs every kubo ships in its default bootstrap list, handed over
+as Shipyard winds down. Keeping the PeerIDs is what keeps those hardcoded
+entries working.
 
-Clients use `/dnsaddr/bootstrap.ipni.io/p2p/<PeerID>`, one entry per box.
+| Box    | Instance      | PeerID                                           | Legacy name                | Name                       |
+|--------|---------------|--------------------------------------------------|----------------------------|----------------------------|
+| sing-1 | `bootstrap`   | `QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt` | `sg1.bootstrap.libp2p.io`  | sing-1.bootstrap.ipni.io   |
+| lith-1 | `bootstrap`   | `QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb` | `am6.bootstrap.libp2p.io`  | lith-1.bootstrap.ipni.io   |
+| chic-1 | `bootstrap`   | `QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa` | `ny5.bootstrap.libp2p.io`  | chic-1.bootstrap.ipni.io   |
+| chic-1 | `bootstrap-b` | `QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN` | `sv15.bootstrap.libp2p.io` | chic-1-b.bootstrap.ipni.io |
+
+Clients use `/dnsaddr/bootstrap.ipni.io/p2p/<PeerID>`, one entry per instance,
+or the legacy `/dnsaddr/bootstrap.libp2p.io/p2p/<PeerID>` (`dns-libp2p.txt`).
+The fifth legacy identity, `va1` (`12D3KooWKnDd...`, Ed25519), is not deployed.
+Until 2026-09-29 each box ran its own Ed25519 identity; those keys are in the
+vault backup taken by the import (see "Changing an identity").
+
+### Instances
+
+`bootstrap_instance_table` (`group_vars/ipfs_nodes/main.yml`) holds every
+instance's ports, and `bootstrap_instances` is each box's list: `bootstrap` on
+every box, plus `bootstrap_extra_instances` from `host_vars/<box>/bootstrap.yml`.
+The role, its manifests (`k8s/bootstrap*/*.j2`), the peering check, the content
+role and `bootstrap-dns.py` all read that one table.
+
+| Instance      | Namespace     | libp2p tcp+udp | /ws (loopback) | API (loopback) | WSS  | WSS Envoy admin | uid   | Host suffix |
+|---------------|---------------|----------------|----------------|----------------|------|-----------------|-------|-------------|
+| `bootstrap`   | `bootstrap`   | 4001           | 4002           | 5011           | 4443 | 9902            | 10002 | (none)      |
+| `bootstrap-b` | `bootstrap-b` | 4011           | 4012           | 5012           | 4453 | 9903            | 10004 | `-b`        |
+
+Each instance has its own namespace (Deployments `bootstrap` and
+`bootstrap-wss`, `kubo-repo` PVC, `kubo-config` Secret, certificate), its own
+ufw block and key (`vault_<name, - as _>_privkey` and `_api_token`). A new
+instance is a table row, reserved ports in `net.ipv4.ip_local_reserved_ports`,
+and an entry in the box's `bootstrap_extra_instances`.
+
+**Same-box instances do not peer with each other.** The loopback firewall rule
+(see "Browser clients (WSS)") stops kubo opening new loopback connections, and
+traffic to the box's own public IP goes over `lo`, so a sibling is unreachable.
+Each instance is peered with, and bootstraps from, every instance on the *other*
+boxes; the peering check expects exactly that.
 
 **Why kubo, pinned.** Four of the official `bootstrap.libp2p.io` nodes run
 kubo, verified by identify: `kubo/0.43.0/.../bootstrap.libp2p.io`. It is the
@@ -793,16 +828,20 @@ kubo loses its maintainers, and the official bootstrap nodes and
 **The identity is permanent.** A PeerID is published in DNS and hardcoded by
 clients; if it changed, every bootstrap address would break.
 
-- **Key:** stored only as `vault_bootstrap_privkey` in `host_vars/<box>/vault.yml`.
-  For a new box, `scripts/new-bootstrap-identity.sh <box>` generates it and
+- **Key:** stored only in `host_vars/<box>/vault.yml`: `vault_bootstrap_privkey`
+  for the primary, `vault_bootstrap_b_privkey` for `bootstrap-b`. For a new
+  box, `scripts/new-bootstrap-identity.sh <box>` generates an Ed25519 key and
   writes both files, and it refuses to replace an existing identity.
-- **PeerID:** public, in `host_vars/<box>/bootstrap.yml`.
-- **Preflight:** before touching a box, the role derives the PeerID from the
-  vaulted key (`scripts/libp2p_identity.py`, no kubo needed) and fails on a
+- **PeerID:** public, in `host_vars/<box>/bootstrap.yml` (`bootstrap_peer_id`,
+  and `peer_id` of each `bootstrap_extra_instances` entry).
+- **Preflight:** before touching a box, the role derives each instance's PeerID
+  from its vaulted key (`scripts/libp2p_identity.py`, no kubo needed; Ed25519,
+  and RSA of at least 2048 bits for the legacy identities) and fails on a
   mismatch. A typo is caught before DNS or a node ever uses it.
-- **Config:** Ansible builds each box's full kubo config from
+- **Config:** Ansible builds each instance's full kubo config from
   `roles/bootstrap/files/kubo-config.json` (committed, no secrets), plus the
-  box's identity, the bootstrap list and peering. The result is a Secret.
+  instance's identity and ports, the bootstrap list and peering. The result is
+  a Secret.
 - **Init container, on every start:** `ipfs init` on the first start (the only
   way kubo accepts a private key). Afterwards, `ipfs repo migrate` then
   `ipfs config replace` with a key-less copy (kubo refuses a replace that
@@ -820,10 +859,11 @@ clients; if it changed, every bootstrap address would break.
 - Bitswap off and providing off, so no content is stored;
 - AutoNAT service off and relay service on, matching the official nodes;
 - AutoTLS off;
-- listens on 4001 (TCP, QUIC, WebTransport, WebRTC-direct), and on loopback
-  4002 for WSS (see "Browser clients (WSS)");
-- API on `127.0.0.1:5011` only, no gateway, and **token-protected**
-  (`API.Authorizations`, per-box `vault_bootstrap_api_token`). With
+- listens on its swarm port, 4001 for the primary (TCP, QUIC, WebTransport,
+  WebRTC-direct), and on its loopback /ws port, 4002, for WSS (see "Browser
+  clients (WSS)");
+- API on `127.0.0.1:5011` (primary) only, no gateway, and **token-protected**
+  (`API.Authorizations`, per-instance `vault_bootstrap_api_token`). With
   `hostNetwork`, loopback is shared with every host process and the other
   host-network pods, so loopback alone did not protect the admin RPC. Verified:
   without the token, `/api/v0` returns 403, including from inside needle's
@@ -833,23 +873,24 @@ clients; if it changed, every bootstrap address would break.
 - agent suffix `bootstrap.ipni.io`.
 
 The server profile keeps k3s `10.42/10.43` and other non-public addresses out of
-what the node announces. Each bootstrapper permanently peers with the other two
-and also dials kubo's default public bootstrap list (pinned in
-`roles/bootstrap/defaults/main.yml`; review it after 2026-09-30).
+what the node announces. Each instance permanently peers with every instance on
+the other boxes and also dials what is left of kubo's default public bootstrap
+list (pinned in `roles/bootstrap/defaults/main.yml`, without the
+`bootstrap.libp2p.io` identities that are now ours; review it after 2026-09-30).
 
 **Runtime.**
 
-- `hostNetwork`, `Recreate`, runs as uid 10002 (no host account), read-only root
+- `hostNetwork`, `Recreate`, runs as its instance's uid (10002, 10004; no host account), read-only root
   filesystem.
 - Repo on a 20 GiB local-path volume (DHT records, peerstore; no blocks).
 - 500m CPU / 2 GiB requested, 4 CPU / 16 GiB limit. Requests follow observed use
   (15–43m CPU, 150–260 MiB, 900–1,800 peers soon after deploy), so the
   reservation is not taken from the content node.
 - Startup and readiness exec `ipfs diag healthy` with the API token. Liveness is
-  a plain TCP check on 5011, so a busy node cannot throttle its own probe into a
+  a plain TCP check on the API port, so a busy node cannot throttle its own probe into a
   restart.
-- Ports 4001 tcp+udp and 4443/tcp are open in ufw. 4001, 4002, 4443, 5011
-  and 9902 (the WSS Envoy's admin) are reserved from the ephemeral range.
+- Each instance's swarm port (tcp+udp) and WSS port are open in ufw, and all of
+  its ports in the table above are reserved from the ephemeral range.
 
 **Upgrading kubo.** Change the digest in `k8s/bootstrap/kustomization.yaml`. The
 init container runs `ipfs repo migrate` before anything opens the repo, so a
@@ -870,29 +911,74 @@ repo created by kubo v0.36.0 (repo 16 → 18). Before upgrading:
 - (before deploy) the vaulted key derives the published PeerID;
 - it speaks Kademlia but not Bitswap;
 - it advertises its public IP and no k3s or loopback addresses;
-- it announces the wss address, and 4443 presents a certificate that verifies
-  for `<box>.bootstrap.ipni.io` (checked from the controller);
-- once all boxes run, each is connected to the other two.
+- it announces the wss address, and its WSS port presents a certificate that
+  verifies for `<host>.bootstrap.ipni.io` (checked from the controller);
+- once all boxes run, each instance is connected to every instance on the
+  other boxes.
+
+### Changing an identity (reset and rollback)
+
+kubo takes its identity only at `ipfs init`, and the init container refuses a
+repo holding another PeerID, so a changed identity needs an **empty repo**.
+Before it updates an instance's Secret, the role reads the PeerID the instance
+is running; if that differs from the vaulted one (or nothing is running, as on
+a first deploy), it stops with *run with -e bootstrap_reset_repo=true*. With the
+flag it deletes that instance's `bootstrap` Deployment, waits for the pod to go,
+deletes its `kubo-repo` PVC (local-path: the DHT records and peerstore go with
+it), and the apply recreates both.
+
+The legacy identities were imported with
+`scripts/import-bootstrap-identities.py bootstrap-keys.txt` (`--dry-run` first).
+The keys file is gitignored; the script refuses a file git does not ignore,
+matches each key to its instance by the PeerID it derives, prints only PeerIDs
+and key types, and aborts before writing anything if a key is off. It first
+copies every box's encrypted `vault.yml` and `bootstrap.yml` to
+`~/ipni-vault-backup/<UTC timestamp>/<box>/`, then writes all boxes or none and
+round-trips every vault. Put the new vaults and that backup in the operators'
+secret store.
+
+```bash
+ansible-playbook site.yml --tags common               # reserved ports for new instances
+ansible-playbook bootstrap.yml --check --diff
+ansible-playbook bootstrap.yml -e bootstrap_reset_repo=true   # one box at a time
+ansible-playbook bootstrap.yml                        # must change nothing; checks peering
+```
+
+**Rollback** to the previous identities: copy `vault.yml` and `bootstrap.yml`
+back from the backup into `host_vars/<box>/` (and restore `dns.txt` to match),
+then run `ansible-playbook bootstrap.yml -e bootstrap_reset_repo=true`. An extra
+instance the old files do not list keeps running until its namespace is deleted
+(`k3s kubectl delete namespace bootstrap-b`).
 
 ### DNS records (`ipni.io` zone, all **DNS only / grey cloud**)
 
 **`dns.txt` is the source of truth.** It is a Cloudflare-importable BIND file,
-generated from the inventory and `host_vars/<box>/bootstrap.yml`:
+generated from the inventory, `bootstrap_instance_table` and
+`host_vars/<box>/bootstrap.yml`:
 
 ```bash
-./scripts/bootstrap-dns.py > dns.txt   # then DNS > Records > Import (proxying unchecked)
+./scripts/bootstrap-dns.py > dns.txt                     # then DNS > Records > Import (proxying unchecked)
+./scripts/bootstrap-dns.py --libp2p > dns-libp2p.txt     # the bootstrap.libp2p.io zone
 ```
 
-Do not edit it by hand. The records are live: they match `dns.txt` exactly, and
-a fresh kubo client bootstraps to all three nodes from the name alone. A client
+Do not edit either by hand. Import `dns.txt` after an identity change has been
+rolled out: until then the live records name the old PeerIDs, and `content.yml`
+(whose kubo bootstraps from `/dnsaddr/bootstrap.ipni.io/p2p/<PeerID>`) should
+wait for it. A fresh kubo client bootstraps to every instance from the name
+alone.
+
+`dns-libp2p.txt` is for whoever holds the `libp2p.io` zone: each legacy name
+(`_dnsaddr.sg1.bootstrap.libp2p.io`, ...) points straight at our instance's
+`/dns4/<host>.bootstrap.ipni.io` addresses, and the shared
+`_dnsaddr.bootstrap.libp2p.io` lists the four legacy identities as before. A client
 that has never seen these nodes must *resolve* them, so the A records must stay
 unproxied: Cloudflare cannot proxy raw libp2p TCP/UDP.
 
 The layout mirrors `bootstrap.libp2p.io`:
 
 - **A shared name** listing each node.
-- **Per-box names** holding its addresses, so one box can be drained by editing
-  only its records.
+- **Per-instance names** (`chic-1`, `chic-1-b`, ...) holding its addresses, so
+  one instance can be drained by editing only its records.
 - **`/dns4` instead of literal IPs,** which keeps each record set small.
 - **No WebTransport/WebRTC certhash addresses in DNS.** The certhashes rotate.
 
@@ -906,7 +992,7 @@ identify after connecting.
 
 Browsers cannot dial raw TCP or QUIC, and may only open WebSockets to a
 certificate they trust. Each bootstrapper therefore also listens on
-**`/dns4/<box>.bootstrap.ipni.io/tcp/4443/wss`**, published in the box's
+**`/dns4/<box>.bootstrap.ipni.io/tcp/4443/wss`** (`chic-1-b` on 4453), published in its
 `_dnsaddr` records, so `/dnsaddr/bootstrap.ipni.io/p2p/<PeerID>` works in
 js-libp2p and Helia too.
 
@@ -923,7 +1009,7 @@ browser --wss--> :4443 Envoy (TLS, Let's Encrypt) --ws--> 127.0.0.1:4002 kubo
 - **Why 4443, not 443.** 443 is the routing origin, open to Cloudflare only.
   4443 is not on the browsers' blocked-port list.
 - **Certificates.** cert-manager (`k8s/cert-manager`, the pinned v1.21.2
-  release manifest) gets a Let's Encrypt certificate per box through a
+  release manifest) gets a Let's Encrypt certificate per instance through a
   **DNS-01** challenge, using a Cloudflare API token (`vault_cloudflare_dns_token`,
   Zone:DNS:Edit + Zone:Zone:Read on `ipni.io`). HTTP-01 is not possible: 80 is
   closed and 443 is Cloudflare-only. Renewal is automatic at two-thirds of the
@@ -952,11 +1038,12 @@ browser --wss--> :4443 Envoy (TLS, Let's Encrypt) --ws--> 127.0.0.1:4002 kubo
 
 **Firewall** (`/etc/ufw/before.rules`, managed block):
 
-- 4443/tcp is open; 4002 is loopback only.
+- each instance's WSS port (4443, 4453) is open; its /ws port (4002, 4012) is
+  loopback only. Every instance has its own block, uid and ports.
 - **At most 64 concurrent WSS connections per client IP.** Kubo exempts
   loopback from its per-IP connection limits, so behind the proxy this is the
   only per-client cap. Client addresses are in Envoy's access log.
-- **Kubo (uid 10002) may not open new loopback connections** except to its RPC
+- **Kubo (its instance's uid) may not open new loopback connections** except to its RPC
   API. Removing the loopback filter also let kubo *dial* loopback, and a WSS
   client (a loopback peer to kubo) could hand it 127.0.0.1 addresses to probe
   the k3s API, kubelet, needle and Envoy admin ports. Replies to the proxy's
@@ -974,7 +1061,7 @@ node browser.mjs /dnsaddr/bootstrap.ipni.io/p2p/<PeerID>   # headless Chrome ($C
 ### Keys at rest
 
 - **k3s Secret encryption is enabled** (AES-CBC, k3s's documented provider for
-  this procedure). It covers the `kubo-config` Secret (each box's permanent key
+  this procedure). It covers the `kubo-config` Secrets (each instance's permanent key
   and API token), the Envoy TLS secrets and the Cloudflare DNS token. The key lives in
   `/var/lib/rancher/k3s/server/cred/encryption-config.json` on the same disk, so
   this protects datastore copies and backups, not a compromised root.
@@ -1294,12 +1381,15 @@ DNS.
 
 | File | Variables |
 |------|-----------|
-| `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token`, `vault_content_cluster_privkey`, `vault_content_kubo_privkey` |
+| `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token`, `vault_content_cluster_privkey`, `vault_content_kubo_privkey`; on chic-1 also `vault_bootstrap_b_privkey`, `vault_bootstrap_b_api_token` |
 | `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token`, `vault_content_cluster_secret` |
 
 The per-box files were generated from a plaintext `servers.txt` by
 `scripts/bootstrap-vault.sh`; that file was never committed and has since been
-deleted. Bootstrap identities come from `scripts/new-bootstrap-identity.sh`.
+deleted. Bootstrap identities come from `scripts/new-bootstrap-identity.sh`,
+or for the legacy `bootstrap.libp2p.io` ones from
+`scripts/import-bootstrap-identities.py` (see "Changing an identity"), whose
+backups of the previous vaults belong in the secret store too.
 Edit in place with `ansible-vault edit <file>`. The playbooks fail early with
 the variable's name when one is missing.
 
@@ -1325,7 +1415,8 @@ same path a deploy takes), so what is checked is what would be applied:
 | `kubectl kustomize` on every rendered `k8s/*/` | a patch or digest pin that no longer applies |
 | rendering at `needle_instances` 1, 2 and 4 | the Deployments and Envoy's endpoint list falling out of step |
 | `sha256sum -c` on `cert-manager.yaml` | the vendored release manifest changing under its pin |
-| `bootstrap-dns.py \| diff - dns.txt` | `dns.txt` drifting from its generator |
+| `bootstrap-dns.py \| diff - dns.txt`, and `--libp2p` against `dns-libp2p.txt` | the DNS files drifting from their generator |
+| `python3 -m unittest scripts/test_libp2p_identity.py` | a change to how PeerIDs are derived (Ed25519 and RSA) |
 | every `pinset.yml` section is in the role's `known_sections` | a section the content role silently ignores |
 | `shellcheck scripts/*.sh` | the usual shell traps |
 
@@ -1469,8 +1560,10 @@ scripts/routing-rate-test.sh  open-loop load test with box-side metrics, run ON 
 scripts/routing-compare.sh          our route-<box>.ipni.io vs delegated-ipfs.dev (results, latency, errors)
 scripts/routing-compare-cids.txt    fixtures for routing-compare.sh
 scripts/new-bootstrap-identity.sh   create a box's permanent bootstrapper identity
-scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys (used by the preflight)
-scripts/bootstrap-dns.py            generate dns.txt from inventory + PeerIDs
+scripts/import-bootstrap-identities.py  import the legacy bootstrap.libp2p.io keys into the vaults
+scripts/libp2p_identity.py          derive/verify PeerIDs from kubo keys, Ed25519 and RSA (used by the preflight)
+scripts/test_libp2p_identity.py     its unit tests
+scripts/bootstrap-dns.py            generate dns.txt and dns-libp2p.txt from inventory + PeerIDs
 scripts/render-manifests.yml        render k8s/*/*.j2 the way a deploy does, to read or kustomize build
 scripts/wss-check/                  dial the bootstrappers over WSS from Node or headless Chrome
 scripts/new-content-cluster-identity.sh  create a box's content cluster and kubo identities (and the cluster secret)
@@ -1478,6 +1571,7 @@ scripts/content-pinset.sh           a box's cluster pins and per-peer status bes
 scripts/fetch-upstream-entry.sh     fetch one upstream-recovered CID straight from the upstream peers and pin it
 scripts/recover-upstream-pinset.sh  capture the upstream collab cluster's pinset as a follower (fetches no content)
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
+dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 routing.yml               routing service playbook (needle + origin)
