@@ -142,6 +142,21 @@
   failed_when: content_pin_anon.stdout != '401'
   when: not ansible_check_mode
 
+# Users are not separated: any of them could delete or replace any pin, the
+# pinset included, so the proxy refuses everything but adding and reading.
+# Envoy answers this before ipfs-cluster sees it, so no credentials are needed.
+- name: Check the pinning API refuses deletes
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20", -X, DELETE,
+           --resolve, "{{ content_pin_hostname }}:{{ content_pin_port }}:{{ ansible_host }}",
+           "https://{{ content_pin_hostname }}:{{ content_pin_port }}/pins/bafkqaaa"]
+  delegate_to: localhost
+  become: false
+  register: content_pin_delete
+  changed_when: false
+  failed_when: content_pin_delete.stdout != '403'
+  when: not ansible_check_mode
+
 # The credentials go to curl on stdin (-K -), never on its command line.
 - name: Check the first pinning user can list pins
   vars:
@@ -163,6 +178,6 @@
   ansible.builtin.debug:
     msg: >-
       https://{{ content_pin_hostname }}:{{ content_pin_port }} on {{ ansible_host }}:
-      certificate verifies, anonymous {{ content_pin_anon.stdout }},
+      certificate verifies, anonymous {{ content_pin_anon.stdout }}, DELETE {{ content_pin_delete.stdout }},
       {{ vault_content_pin_users | length }} user(s), first user {{ content_pin_auth.stdout }}
   when: not ansible_check_mode

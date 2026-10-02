@@ -1162,6 +1162,14 @@ ipfs pin remote ls --service=ipni --status=queued,pinning,pinned,failed
 
   A token is a JWT signed with the user's password. It does not expire, and it
   stops working once the user is removed (verified against ipfs-cluster 1.1.6).
+- **Users can only add and read pins.** ipfs-cluster does not separate users:
+  through its API any of them could delete or replace *any* pin, the project's
+  pinset included (verified: a user's token deleted another pin). So Envoy
+  passes only `POST /pins`, `POST /token` and `GET`, and answers everything else
+  with 403, including `DELETE /pins/<id>` and `POST /pins/<id>` (a replace,
+  which unpins the old CID). `ipfs pin remote rm` therefore fails for users;
+  the operators remove pins with `ipfs-cluster-ctl pin rm <cid>` on a box. Every
+  deploy checks that a DELETE is refused.
 - **Nothing limits the size of a pin.** Every pin lands on every box, and the
   content volume is bounded only by what is pinned (see "Size before pinning"
   below), so one large pin can fill it on all three boxes. Give access only to
