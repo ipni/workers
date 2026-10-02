@@ -1,0 +1,82 @@
+---
+# Envoy terminating TLS for ipfs-cluster's Pinning Service API, so
+# `ipfs pin remote` clients can use https://pin.ipni.io:{{ content_pin_port }}.
+#
+# client -> :{{ content_pin_port }} TLS (Let's Encrypt, cert-manager) -> 127.0.0.1:{{ content_pinsvc_port }} plain HTTP (ipfs-cluster)
+#
+# Plain TCP proxying: ipfs-cluster does the HTTP, including authentication
+# (every request needs a user's credentials or bearer token). The client
+# address is in the access log.
+
+admin:
+  # Host loopback only (hostNetwork).
+  address:
+    socket_address: { address: 127.0.0.1, port_value: {{ content_pin_admin_port }} }
+
+# SDS needs a node id and cluster, even for file-based sources.
+node: { id: content-pin, cluster: content-pin }
+
+overload_manager:
+  resource_monitors:
+    - name: envoy.resource_monitors.global_downstream_max_connections
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
+        max_active_downstream_connections: 1000
+
+static_resources:
+  listeners:
+    - name: pin_https
+      address:
+        socket_address: { address: 0.0.0.0, port_value: {{ content_pin_port }} }
+      additional_addresses:
+        - address:
+            socket_address: { address: "::", port_value: {{ content_pin_port }} }
+      filter_chains:
+        - transport_socket_connect_timeout: 10s
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                alpn_protocols: ["http/1.1"]
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_2
+                # File-based SDS: renewals are picked up without a restart.
+                tls_certificate_sds_secret_configs:
+                  - name: pin_cert
+                    sds_config:
+                      resource_api_version: V3
+                      path_config_source:
+                        path: /etc/envoy/config/sds.yaml
+                        watched_directory: { path: /etc/envoy/config }
+          filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: pin_https
+                cluster: pinsvcapi
+                idle_timeout: 300s
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          time: "%START_TIME%"
+                          client: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+                          duration_ms: "%DURATION%"
+                          rx_bytes: "%BYTES_RECEIVED%"
+                          tx_bytes: "%BYTES_SENT%"
+                          flags: "%RESPONSE_FLAGS%"
+
+  clusters:
+    - name: pinsvcapi
+      type: STATIC
+      connect_timeout: 2s
+      load_assignment:
+        cluster_name: pinsvcapi
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: {{ content_pinsvc_port }} }

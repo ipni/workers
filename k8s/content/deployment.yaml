@@ -190,11 +190,7 @@ spec:
             - |
               set -eu
               mkdir -p "$IPFS_CLUSTER_PATH"
-              # /tmp is an emptyDir, which survives container restarts. After
-              # an unclean exit (OOM kill, SIGKILL) the pinning-service socket
-              # would still exist and the daemon would fail to bind it,
-              # crash-looping until the pod was deleted. Only this container
-              # uses the path.
+              # Left over from when the pinning-service API sat on a socket here.
               rm -f /tmp/pinsvcapi.sock
               if [ ! -f "$IPFS_CLUSTER_PATH/service.json" ]; then
                 ipfs-cluster-service init --consensus crdt
@@ -255,11 +251,18 @@ spec:
               value: /ip4/127.0.0.1/tcp/9095
             - name: CLUSTER_IPFSPROXY_NODEMULTIADDRESS
               value: /ip4/127.0.0.1/tcp/5021
-            # The pinning-service API is not used. It cannot be switched off
-            # from the environment, so it listens on a socket inside this
-            # container instead of taking another host TCP port.
+            # The Pinning Service API (`ipfs pin remote`), published over TLS
+            # by Envoy (k8s/content-pin) as https://pin.ipni.io:9443. Loopback
+            # only, and never without credentials: with an empty list
+            # ipfs-cluster serves it unauthenticated, so roles/content refuses
+            # to deploy without vault_content_pin_users. "user:pass,user:pass",
+            # from the vault; a user's bearer token is signed with their
+            # password, so removing the user revokes it.
             - name: CLUSTER_PINSVCAPI_HTTPLISTENMULTIADDRESS
-              value: /unix/tmp/pinsvcapi.sock
+              value: /ip4/127.0.0.1/tcp/9097
+            - name: CLUSTER_PINSVCAPI_BASICAUTHCREDENTIALS
+              valueFrom:
+                secretKeyRef: { name: content-cluster, key: pinsvc-credentials }
           ports:
             # roles/content opens 9096/tcp in ufw, to the other boxes only.
             - name: cluster-swarm
@@ -316,8 +319,7 @@ spec:
         - name: repo
           persistentVolumeClaim:
             claimName: content-repo
-        # Per pod, shared by both containers (the pinning-service socket lives
-        # here).
+        # Per pod, shared by both containers.
         - name: tmp
           emptyDir:
             sizeLimit: 1Gi

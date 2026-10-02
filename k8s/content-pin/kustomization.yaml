@@ -1,0 +1,33 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# TLS in front of ipfs-cluster's Pinning Service API (k8s/content), in the
+# content namespace next to the Certificate whose Secret it mounts. A separate
+# Deployment from the content node, so proxy changes do not restart it.
+namespace: content
+
+resources:
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: content-pin
+      app.kubernetes.io/part-of: ipfs-workers
+
+# Same Envoy as k8s/route-origin and k8s/bootstrap-wss: envoyproxy/envoy
+# distroless-v1.39.1 (2026-08-27), pinned by index digest.
+images:
+  - name: envoy
+    newName: envoyproxy/envoy
+    digest: sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
+
+configMapGenerator:
+  - name: content-pin-envoy-config
+    behavior: create
+    files:
+      - envoy.yaml
+      - sds.yaml
+
+# The certificate Secret (content-pin-tls) is NOT here: cert-manager writes it
+# from the Certificate that roles/content creates per box.

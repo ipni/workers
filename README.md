@@ -1124,12 +1124,56 @@ ansible-playbook content.yml --check --diff   # dry run: reads DNSLink and the p
 | 9094 | ipfs-cluster REST API | loopback |
 | 9095 | ipfs-cluster IPFS proxy | loopback |
 | 9096 tcp | ipfs-cluster swarm | the other two boxes only (ufw), and the cluster secret |
+| 9097 | ipfs-cluster Pinning Service API | loopback, credentials required |
+| 9443 tcp | Envoy TLS in front of 9097 (`k8s/content-pin`) | public, credentials required |
+| 9904 | that Envoy's admin | loopback |
 
-All five are reserved from the ephemeral range. ipfs-cluster's pinning-service
-API cannot be turned off from its environment, so it listens on a Unix socket
-inside the container rather than on another host port. The start script
-removes a stale socket first: after an unclean exit it would otherwise block
-every restart of the container (verified with `kill -9`).
+All of them are reserved from the ephemeral range.
+
+### Remote pinning: pin.ipni.io
+
+Named users can pin to the cluster with kubo's standard remote pinning
+(the IPFS Pinning Service API), at **`https://pin.ipni.io:9443`**:
+
+```bash
+ipfs pin remote service add ipni https://pin.ipni.io:9443 <token>
+ipfs pin remote add --service=ipni --name=<name> <cid>
+ipfs pin remote ls --service=ipni --status=queued,pinning,pinned,failed
+```
+
+- **Every box serves it,** under one name with an A record per box, so a client
+  falls through to the next box if one is down. A pin added on any box is
+  pinned on all three (replication `-1`/`-1`, as for the pinset).
+- **ipfs-cluster does the authentication.** Its Pinning Service API listens on
+  loopback 9097, and Envoy only adds TLS (a Let's Encrypt certificate per box
+  through cert-manager and `vault_cloudflare_dns_token`, like the
+  bootstrappers' WSS). With an empty user list ipfs-cluster would serve the API
+  **unauthenticated**, so the role refuses to deploy without at least one user,
+  and checks from the controller that an anonymous request gets 401 and the
+  first user gets 200.
+- **Users** are `vault_content_pin_users` in the group vault (name: password):
+
+  ```bash
+  ./scripts/content-pin-user.py add <user>      # generates a password into the vault
+  ansible-playbook content.yml                  # one box at a time; restarts each content node once
+  ./scripts/content-pin-user.py token <user>    # the bearer token to give them
+  ./scripts/content-pin-user.py remove <user>   # then content.yml again: their tokens stop working
+  ```
+
+  A token is a JWT signed with the user's password. It does not expire, and it
+  stops working once the user is removed (verified against ipfs-cluster 1.1.6).
+- **Nothing limits the size of a pin.** Every pin lands on every box, and the
+  content volume is bounded only by what is pinned (see "Size before pinning"
+  below), so one large pin can fill it on all three boxes. Give access only to
+  people trusted with that. Their pins are not in `pinset.yml`: `content.yml`
+  never unpins them, lists them under its untracked pins, and does not wait
+  for them.
+- **DNS:** `pin.ipni.io` needs an A record per box, **DNS only** (grey cloud):
+  Cloudflare cannot proxy port 9443.
+- **Certificates:** each box issues its own for the same name, so a deploy that
+  re-issues all three spends three of Let's Encrypt's five duplicate
+  certificates per week. `-e content_pin_issuer=letsencrypt-staging` debugs
+  issuance without spending them (clients will not trust the result).
 
 **Pinning by hand.** Prefer adding the entry to `pinset.yml` and running
 `content.yml`. A pin added by hand is not in the pinset, and
@@ -1382,7 +1426,7 @@ DNS.
 | File | Variables |
 |------|-----------|
 | `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token`, `vault_content_cluster_privkey`, `vault_content_kubo_privkey`; on chic-1 also `vault_bootstrap_b_privkey`, `vault_bootstrap_b_api_token` |
-| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token`, `vault_content_cluster_secret` |
+| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token`, `vault_content_cluster_secret`, `vault_content_pin_users` (remote pinning users, see "Remote pinning") |
 
 The per-box files were generated from a plaintext `servers.txt` by
 `scripts/bootstrap-vault.sh`; that file was never committed and has since been
@@ -1540,11 +1584,12 @@ k8s/route-origin/         Envoy kustomize manifests and envoy.yaml.j2 (needle en
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
 k8s/bootstrap-wss/        Envoy TLS proxy for the bootstrappers' WSS listener
 k8s/content/              content cluster node manifests (kubo + ipfs-cluster, repo PVC)
+k8s/content-pin/          Envoy TLS proxy for the content cluster's remote pinning API (pin.ipni.io)
 roles/content/            content firewall, identity preflight, kubo config + cluster Secrets, deploy, checks, pinset loading
   files/kubo-config.json  base content kubo config (no identity)
   vars/pinset.yml         the content cluster's pinset (IPFS Project websites), source of truth
 host_vars/<box>/content.yml    the box's ipfs-cluster and content kubo PeerIDs
-k8s/cert-manager/         pinned cert-manager release manifest (WSS certificates)
+k8s/cert-manager/         pinned cert-manager release manifest (WSS and pinning certificates)
 roles/cert_manager/       cert-manager deploy and webhook readiness
 roles/bootstrap/          kubo config from base + vaulted identity, Secret, deploy, checks
   files/kubo-config.json  base kubo config (no identity)
@@ -1567,6 +1612,7 @@ scripts/bootstrap-dns.py            generate dns.txt and dns-libp2p.txt from inv
 scripts/render-manifests.yml        render k8s/*/*.j2 the way a deploy does, to read or kustomize build
 scripts/wss-check/                  dial the bootstrappers over WSS from Node or headless Chrome
 scripts/new-content-cluster-identity.sh  create a box's content cluster and kubo identities (and the cluster secret)
+scripts/content-pin-user.py         add, remove and issue tokens for remote pinning users
 scripts/content-pinset.sh           a box's cluster pins and per-peer status beside pinset.yml (pending first)
 scripts/fetch-upstream-entry.sh     fetch one upstream-recovered CID straight from the upstream peers and pin it
 scripts/recover-upstream-pinset.sh  capture the upstream collab cluster's pinset as a follower (fetches no content)

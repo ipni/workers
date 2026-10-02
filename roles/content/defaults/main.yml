@@ -5,6 +5,26 @@ content_kubo_swarm_port: 4101     # public, TCP + UDP
 content_kubo_api_port: 5021       # loopback
 content_cluster_api_port: 9094    # loopback (REST API)
 content_cluster_swarm_port: 9096  # TCP, the other boxes only
+content_pinsvc_port: 9097         # loopback (Pinning Service API, behind Envoy)
+
+# ---------------------------------------------------------------------------
+# Remote pinning: ipfs-cluster's Pinning Service API (the API `ipfs pin remote`
+# speaks), served over TLS by Envoy (k8s/content-pin) on every box under one
+# name. Users and passwords are vault_content_pin_users in
+# group_vars/ipfs_nodes/vault.yml; scripts/content-pin-token.sh turns one into
+# the bearer token a user is given. Must match k8s/content-pin.
+# ---------------------------------------------------------------------------
+content_pin_hostname: pin.ipni.io
+content_pin_port: 9443            # public, TLS
+content_pin_admin_port: 9904      # loopback, the pinning Envoy's admin
+# Let's Encrypt issuer for the pinning certificate: letsencrypt-prod, or
+# letsencrypt-staging to debug issuance without spending production limits.
+# Every box gets its own certificate for the same name, so each deploy that
+# re-issues spends three of Let's Encrypt's 5 duplicate certificates per week.
+content_pin_issuer: letsencrypt-prod
+# Shortest password accepted for a pinning user. They are generated (see the
+# README), so this only catches a hand-typed one.
+content_pin_min_password_length: 32
 
 # Public bootstrap peers the content kubo dials, after this project's own
 # bootstrappers (/dnsaddr/bootstrap.ipni.io, one entry per bootstrapper

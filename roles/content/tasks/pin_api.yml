@@ -1,0 +1,168 @@
+---
+# Remote pinning: ipfs-cluster's Pinning Service API (loopback 9097, with the
+# users of vault_content_pin_users) published by Envoy (k8s/content-pin) over
+# TLS as https://{{ content_pin_hostname }}:{{ content_pin_port }} on every box.
+# The certificate comes from cert-manager by DNS-01, the same way as the
+# bootstrappers' WSS certificates (roles/bootstrap); cert-manager itself is
+# installed by bootstrap.yml.
+
+- name: Check whether cert-manager is installed
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, crd, certificates.cert-manager.io, --ignore-not-found, -o, name]
+  register: content_cm_crd
+  changed_when: false
+  check_mode: false
+
+- name: Fail unless cert-manager and its Cloudflare token are available
+  ansible.builtin.assert:
+    that:
+      - content_cm_crd.stdout | length > 0
+      - vault_cloudflare_dns_token is defined and vault_cloudflare_dns_token | length > 0
+    fail_msg: >-
+      The pinning certificate needs cert-manager (installed by bootstrap.yml) and
+      vault_cloudflare_dns_token (group_vars/ipfs_nodes/vault.yml, Zone:DNS:Edit on ipni.io).
+    quiet: true
+
+# On a first --check the namespace does not exist yet, so nothing in it can be
+# dry-run.
+- name: Create the pinning certificate
+  when: not ansible_check_mode or content_ns.stdout
+  block:
+    - name: Install the Cloudflare API token for DNS-01 challenges
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: cloudflare-api-token
+            namespace: content
+          data:
+            api-token: "{{ vault_cloudflare_dns_token | b64encode }}"
+      no_log: true
+
+    - name: Create the Let's Encrypt issuers
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: "{{ item.name }}"
+            namespace: content
+          spec:
+            acme:
+              server: "{{ item.server }}"
+              privateKeySecretRef: { name: "{{ item.name }}-account-key" }
+              solvers:
+                - selector: { dnsZones: ["{{ content_pin_hostname | regex_replace('^[^.]+[.]', '') }}"] }
+                  dns01:
+                    cloudflare:
+                      apiTokenSecretRef: { name: cloudflare-api-token, key: api-token }
+      loop:
+        - { name: letsencrypt-prod, server: "https://acme-v02.api.letsencrypt.org/directory" }
+        - { name: letsencrypt-staging, server: "https://acme-staging-v02.api.letsencrypt.org/directory" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Request the pinning certificate
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: content-pin
+            namespace: content
+          spec:
+            secretName: content-pin-tls
+            dnsNames: ["{{ content_pin_hostname }}"]
+            privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+            issuerRef: { group: cert-manager.io, kind: Issuer, name: "{{ content_pin_issuer }}" }
+
+    # Ready alone is not enough right after an issuer switch; also require that
+    # the Secret was issued by the selected issuer.
+    - name: Wait for the pinning certificate to be issued
+      ansible.builtin.command:
+        argv:
+          - k3s
+          - kubectl
+          - --namespace=content
+          - get
+          - certificate/content-pin
+          - secret/content-pin-tls
+          - --ignore-not-found
+          - -o
+          - >-
+            jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{.metadata.annotations.cert-manager\.io/issuer-name}{" "}{end}
+      register: content_pin_cert_state
+      changed_when: false
+      retries: 60
+      delay: 10
+      until: content_pin_cert_state.stdout.split() == ['True', content_pin_issuer]
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Show why the pinning certificate is not issued
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, describe, certificate/content-pin,
+               certificaterequests, orders.acme.cert-manager.io, challenges.acme.cert-manager.io]
+      changed_when: false
+      failed_when: true
+      when:
+        - not ansible_check_mode
+        - content_pin_cert_state.stdout.split() != ['True', content_pin_issuer]
+
+    - name: Deploy the pinning API proxy
+      ansible.builtin.include_role:
+        name: kustomize_apply
+      vars:
+        kustomize_app: content-pin
+        kustomize_namespace: content
+        kustomize_deployment: content-pin
+
+# ---------------------------------------------------------------------------
+# From the controller, as a client sees it: the certificate verifies for the
+# published name, nobody gets in without credentials, and the first user does.
+# --resolve pins the request to this box, whatever DNS says.
+# ---------------------------------------------------------------------------
+- name: Check the pinning API refuses a request without credentials
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20",
+           --resolve, "{{ content_pin_hostname }}:{{ content_pin_port }}:{{ ansible_host }}",
+           "https://{{ content_pin_hostname }}:{{ content_pin_port }}/pins"]
+  delegate_to: localhost
+  become: false
+  register: content_pin_anon
+  changed_when: false
+  failed_when: content_pin_anon.stdout != '401'
+  when: not ansible_check_mode
+
+# The credentials go to curl on stdin (-K -), never on its command line.
+- name: Check the first pinning user can list pins
+  vars:
+    user: "{{ (vault_content_pin_users | dict2items | sort(attribute='key') | first) }}"
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20", -K, "-",
+           --resolve, "{{ content_pin_hostname }}:{{ content_pin_port }}:{{ ansible_host }}",
+           "https://{{ content_pin_hostname }}:{{ content_pin_port }}/pins"]
+    stdin: 'user = "{{ user.key }}:{{ user.value }}"'
+  delegate_to: localhost
+  become: false
+  register: content_pin_auth
+  changed_when: false
+  failed_when: content_pin_auth.stdout != '200'
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Report the pinning API
+  ansible.builtin.debug:
+    msg: >-
+      https://{{ content_pin_hostname }}:{{ content_pin_port }} on {{ ansible_host }}:
+      certificate verifies, anonymous {{ content_pin_anon.stdout }},
+      {{ vault_content_pin_users | length }} user(s), first user {{ content_pin_auth.stdout }}
+  when: not ansible_check_mode

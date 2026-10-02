@@ -1,0 +1,97 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: content-pin
+spec:
+  replicas: 1
+  # hostNetwork binds the pinning port on the node; Recreate avoids a bind deadlock.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: content-pin
+  template:
+    metadata:
+      labels:
+        app: content-pin
+    spec:
+      # hostNetwork: the Pinning Service API is on the host's loopback.
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532     # the distroless image's nonroot user
+        runAsGroup: 65532
+        fsGroup: 65532       # lets Envoy read the mounted certificate
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: envoy
+          image: envoy
+          args:
+            - -c
+            - /etc/envoy/config/envoy.yaml
+            - --concurrency
+            - "2"
+            - --disable-hot-restart
+          ports:
+            - name: pin-https
+              containerPort: {{ content_pin_port }}
+              protocol: TCP
+
+          # From the content node's share of the box (see k8s/content).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /ready
+              port: {{ content_pin_admin_port }}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /ready
+              port: {{ content_pin_admin_port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy/config
+              readOnly: true
+            # A whole-volume mount, never subPath: subPath mounts do not see
+            # Secret updates, so renewals would never reach Envoy.
+            - name: tls
+              mountPath: /etc/envoy/tls
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: content-pin-envoy-config
+        # Not optional: roles/content waits for the Certificate before
+        # deploying this, so Envoy never starts without it.
+        - name: tls
+          secret:
+            secretName: content-pin-tls
+            defaultMode: 0440

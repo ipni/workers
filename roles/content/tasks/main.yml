@@ -54,10 +54,41 @@
       and kubo {{ content_kubo_peer_id }}
     quiet: false
 
+# The Pinning Service API is public (through Envoy), and ipfs-cluster serves it
+# WITHOUT authentication when its credential list is empty. So no deploy goes
+# ahead without at least one user, each with a long password that cannot break
+# the "user:pass,user:pass" list. no_log: the loop items are the passwords.
+- name: Fail unless the pinning API has users with strong passwords
+  ansible.builtin.assert:
+    that:
+      - vault_content_pin_users is defined
+      - vault_content_pin_users is mapping
+      - vault_content_pin_users | length > 0
+    fail_msg: >-
+      vault_content_pin_users (group_vars/ipfs_nodes/vault.yml) must map at least one
+      user to a password: without it the Pinning Service API would be open to anyone.
+    quiet: true
+
+- name: Fail on a pinning user name or password that is unsafe
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[A-Za-z0-9_.-]+$')
+      - item.value is string
+      - item.value | length >= content_pin_min_password_length
+      - item.value is not search('[:,\s]')
+    fail_msg: >-
+      A vault_content_pin_users entry is unsafe: names are [A-Za-z0-9_.-], and passwords
+      at least {{ content_pin_min_password_length }} characters with no ':', ',' or space
+      (python3 -c 'import secrets; print(secrets.token_urlsafe(32))').
+    quiet: true
+  loop: "{{ vault_content_pin_users | dict2items }}"
+  no_log: true
+
 # ---------------------------------------------------------------------------
 # Firewall. kubo's libp2p is public. The cluster swarm only needs the other
 # two boxes, so it is opened to exactly their addresses; it is also closed to
-# anyone without the cluster secret. APIs (5021, 9094, 9095) stay on loopback.
+# anyone without the cluster secret. APIs (5021, 9094, 9095, 9097) stay on
+# loopback; the pinning API is public only through Envoy's TLS port.
 # ---------------------------------------------------------------------------
 - name: Allow content kubo libp2p traffic (TCP)
   community.general.ufw:
@@ -82,6 +113,13 @@
     comment: "content ipfs-cluster from {{ item }}"
   # reject, not difference: difference's order is not stable between runs.
   loop: "{{ groups['ipfs_nodes'] | reject('equalto', inventory_hostname) | list }}"
+
+- name: Allow remote pinning clients (Pinning Service API over TLS, via Envoy)
+  community.general.ufw:
+    rule: allow
+    port: "{{ content_pin_port }}"
+    proto: tcp
+    comment: content pinning API
 
 # ---------------------------------------------------------------------------
 # Per-box settings, as two Secrets:
@@ -203,6 +241,13 @@
         peer-name: "{{ inventory_hostname | b64encode }}"
         trusted-peers: "{{ groups['ipfs_nodes'] | map('extract', hostvars, 'content_cluster_peer_id') | join(',') | b64encode }}"
         peer-addresses: "{{ peer_addresses | join(',') | b64encode }}"
+        # CLUSTER_PINSVCAPI_BASICAUTHCREDENTIALS. Sorted, so an unchanged user
+        # list never changes the Secret (and restarts the node).
+        pinsvc-credentials: >-
+          {{ vault_content_pin_users | dict2items | sort(attribute='key')
+             | map(attribute='key') | zip(vault_content_pin_users | dict2items | sort(attribute='key')
+                                          | map(attribute='value'))
+             | map('join', ':') | join(',') | b64encode }}
   no_log: true
   register: content_secret
   when: not ansible_check_mode or content_ns.stdout
@@ -306,6 +351,9 @@
       {{ inventory_hostname }}: kubo {{ content_kubo_version.json.Version }},
       ipfs-cluster {{ peer.version }} as {{ peer.id }}, kubo peer {{ peer.ipfs.id }}
   when: not ansible_check_mode
+
+- name: Publish the pinning API over TLS
+  ansible.builtin.include_tasks: pin_api.yml
 
 # ---------------------------------------------------------------------------
 # Pinset. roles/content/vars/pinset.yml is the source of truth. It is read

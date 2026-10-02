@@ -25,6 +25,7 @@
   vars_files:
     - "{{ playbook_dir }}/../roles/needle/defaults/main.yml"
     - "{{ playbook_dir }}/../roles/bootstrap/defaults/main.yml"
+    - "{{ playbook_dir }}/../roles/content/defaults/main.yml"
   vars:
     repo_root: "{{ (playbook_dir ~ '/..') | realpath }}"
     dest: rendered
