@@ -1,0 +1,6 @@
+---
+# Addresses outside the inventory that push metrics and logs to the hub too.
+# The boxes in the inventory are always allowed. sf and sf2 (ipni/infra) go
+# here when they move off grafana.ipni.io:
+#   monitoring_ingest_extra_sources: [103.232.206.165, 103.232.206.162]
+monitoring_ingest_extra_sources: []

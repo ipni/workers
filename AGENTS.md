@@ -33,7 +33,9 @@ controller; in CI it is `echo ci > .vault_pass`.
 ## kubectl
 
 The k3s API server (6443) is deliberately closed to the internet — ufw denies
-it and there is no flag to open it. Two ways in:
+it and there is no flag to open it. The one exception is Argo CD on lith-1
+(`argocd_hub`), which `platform.yml` lets reach the other boxes' 6443 from
+lith-1's address only. Two ways in for people:
 
 ```bash
 # 1. straight through ssh, no setup
@@ -162,7 +164,7 @@ deliberately disables `line-length` and `braces` (see `.ansible-lint`). A pass
 looks like `Passed: 0 failure(s), 0 warning(s) ... profile ... 'production'`.
 
 ```bash
-for pb in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml; do
+for pb in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml platform.yml; do
   ansible-playbook --syntax-check "$pb"
 done
 ANSIBLE_STDOUT_CALLBACK=default ansible-playbook scripts/render-manifests.yml -e dest=rendered

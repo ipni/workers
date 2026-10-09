@@ -33,8 +33,9 @@ ssh_allow_users: "{{ admin_user }}"
 #
 # The k3s API server (6443) is deliberately absent from this list: it stays
 # closed to the internet and remote kubectl goes over an SSH tunnel (see
-# scripts/kubectl-tunnel.sh). This list is the only switch - there is no
-# separate "expose the API" flag.
+# scripts/kubectl-tunnel.sh). Do not add it here - this list opens a port to
+# every source. The one exception is narrower: roles/argocd opens 6443 on the
+# other boxes to argocd_hub's address only, for Argo CD (see below).
 firewall_allowed_tcp:
   - "{{ ssh_port }}"
 firewall_allowed_udp: []
@@ -124,6 +125,7 @@ sysctl_tuning:
   #   5011 bootstrapper API  5012 bootstrap-b API
   #   5021 content kubo RPC API (loopback)
   #   6443-6444 k3s API  8190-8193 needle APIs (loopback, four instances)
+  #   8000 Healthchecks (healthchecks_host only)  8443 monitoring Traefik (argocd_hub only)
   #   8472/udp flannel VXLAN
   #   9094 content ipfs-cluster REST API (loopback)
   #   9095 content ipfs-cluster IPFS proxy (loopback)
@@ -133,7 +135,7 @@ sysctl_tuning:
   #   9901 route-origin Envoy admin  9902 bootstrap-wss Envoy admin
   #   9903 bootstrap-b's bootstrap-wss Envoy admin
   #   10010 containerd  10248-10259 kubelet/kube-proxy/k3s
-  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4011-4012,4101,4443,4453,5011-5012,5021,6443-6444,8190-8193,8472,9094-9097,9443,9901-9904,10010,10248-10259"
+  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4011-4012,4101,4443,4453,5011-5012,5021,6443-6444,8000,8190-8193,8443,8472,9094-9097,9443,9901-9904,10010,10248-10259"
   net.ipv4.tcp_fin_timeout: 15
   # Must equal what k3s's kube-proxy sets on every start: max(32768 * CPUs,
   # 131072), i.e. 1048576 on these 32-core boxes. A fixed lower value both
@@ -170,3 +172,23 @@ bootstrap_instances: >-
                                        {'host': inventory_hostname ~ bootstrap_instance_table[i.name].suffix})) -%}
   {%- endfor -%}
   {{ out }}
+
+# ---------------------------------------------------------------------------
+# Argo CD and monitoring (platform.yml)
+# ---------------------------------------------------------------------------
+# One Argo CD, on argocd_hub, deploys the monitoring stack in ipni/infra to
+# every box. It reaches the other boxes' API servers directly, so roles/argocd
+# opens 6443 on them to argocd_hub's address and nothing else. The trade-off:
+# argocd_hub holds a cluster-admin token for every box, so a compromise of it
+# reaches all of them. The monitoring hub (Prometheus, Loki, Alertmanager,
+# Grafana) runs on the same box, behind Traefik on :8443.
+argocd_hub: lith-1
+
+# Runs Healthchecks, the dead-man's switch for the hub: Alertmanager on
+# argocd_hub pings it every minute, and it alerts when the pings stop. Must not
+# be argocd_hub, or it would go down with the thing it watches.
+healthchecks_host: sing-1
+
+# The name each box has in Argo CD, and so in the `cluster` label on every
+# metric and log line. ipni/infra refers to the boxes by these names.
+argocd_cluster_name: "{{ inventory_hostname | replace('-', '') }}"

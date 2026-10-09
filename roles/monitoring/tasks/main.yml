@@ -1,0 +1,12 @@
+---
+# What the monitoring stack in ipni/infra needs from the boxes and cannot
+# create itself: firewall openings and the one credential that lives in this
+# repo's vault. The stack itself is deployed by Argo CD (roles/argocd).
+
+- name: Prepare the monitoring hub
+  ansible.builtin.include_tasks: hub.yml
+  when: inventory_hostname == argocd_hub
+
+- name: Prepare the Healthchecks box
+  ansible.builtin.include_tasks: healthchecks.yml
+  when: inventory_hostname == healthchecks_host

@@ -1,0 +1,34 @@
+---
+# Argo CD's first install on the hub box, the Secrets it needs that cannot live
+# in Git, and what the monitoring stack it deploys needs from the boxes:
+# firewall openings and the Cloudflare token for its certificate. After the
+# first install Argo CD manages itself, and everything else it deploys, from
+# ipni/infra; see docs/03-monitoring.md there.
+#
+#   ansible-playbook platform.yml                  # all three boxes
+#   ansible-playbook platform.yml --check --diff   # dry run
+#
+# Requires site.yml to have run first (admin user, k3s, ufw, reserved ports),
+# and bootstrap.yml (cert-manager) for the monitoring certificate.
+#
+# Nothing here restarts a running service: it adds firewall rules and Secrets,
+# and installs Argo CD on argocd_hub if it is not there yet. So unlike the service
+# playbooks there is no production_rollout batching - and there must not be:
+# the hub registers the other boxes using what they produced earlier in this
+# same play, so every box has to be in one batch. With -l, the hub registers
+# only the boxes in the run, and leaves the others as an earlier run left them.
+
+- name: Argo CD and the monitoring stack's prerequisites
+  hosts: ipfs_nodes
+  remote_user: "{{ admin_user }}"
+  become: true
+  gather_facts: false
+  # route_origin_cloudflare_ranges: the pinned list the 8443 allowlist reuses
+  # (role defaults are not visible outside the role's play).
+  vars_files:
+    - roles/route_origin/defaults/main.yml
+  roles:
+    - role: argocd
+      tags: [argocd]
+    - role: monitoring
+      tags: [monitoring]

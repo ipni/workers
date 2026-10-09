@@ -1,0 +1,205 @@
+---
+# Argo CD's first install, and the Secrets it needs that cannot live in Git.
+#
+# Ansible installs Argo CD ONCE, with the same Helm chart and release name
+# ipni/infra uses. From then on Argo CD manages its own release from that repo
+# and this role leaves it alone: upgrades and settings go through ipni/infra.
+# The Secrets below are refreshed on every run; Argo CD does not manage them.
+
+- name: Fail if there is no age key for Argo CD
+  ansible.builtin.assert:
+    that: vault_argocd_age_key is defined and vault_argocd_age_key is search('AGE-SECRET-KEY-')
+    fail_msg: >-
+      vault_argocd_age_key is not set (group_vars/ipfs_nodes/vault.yml). Argo CD
+      needs it to decrypt the SOPS-encrypted Secrets in ipni/infra; see the README.
+    quiet: true
+
+- name: Check whether Argo CD is installed
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=argocd, get, deployment/argocd-server, --ignore-not-found, -o, name]
+  register: argocd_installed
+  changed_when: false
+  check_mode: false
+
+# Under --check there is nothing to dry-run against yet: no Helm on the box, and
+# no Argo CD CRDs for the root Application. Say so instead.
+- name: Note that a first install is not dry-run
+  ansible.builtin.debug:
+    msg: "Argo CD is not installed; a real run would install chart {{ argocd_chart_version }} and create the root Application."
+  when:
+    - ansible_check_mode
+    - not argocd_installed.stdout
+
+- name: Install Argo CD for the first time
+  when:
+    - not ansible_check_mode
+    - not argocd_installed.stdout
+  block:
+    - name: Create the Helm directory
+      ansible.builtin.file:
+        path: "{{ argocd_helm_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download Helm, checked against its pinned checksum
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-{{ argocd_helm_version }}-linux-amd64.tar.gz"
+        dest: "{{ argocd_helm_dir }}/helm.tar.gz"
+        checksum: "sha256:{{ argocd_helm_sha256 }}"
+        mode: "0644"
+
+    - name: Unpack the Helm binary
+      ansible.builtin.unarchive:
+        src: "{{ argocd_helm_dir }}/helm.tar.gz"
+        remote_src: true
+        dest: "{{ argocd_helm_dir }}"
+        extra_opts: [--strip-components=1, linux-amd64/helm]
+        creates: "{{ argocd_helm_dir }}/helm"
+
+    # Enough to start. The first sync of the argocd Application in ipni/infra
+    # replaces these with that repo's values (SOPS decryption, resources, ...).
+    - name: Install the Argo CD Helm release
+      kubernetes.core.helm:
+        binary_path: "{{ argocd_helm_dir }}/helm"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        name: argocd
+        chart_repo_url: "{{ argocd_chart_repo }}"
+        chart_ref: argo-cd
+        chart_version: "{{ argocd_chart_version }}"
+        release_namespace: argocd
+        create_namespace: true
+        wait: true
+        wait_timeout: 10m
+        values:
+          global:
+            domain: argocd.ipni.io
+          configs:
+            params:
+              server.insecure: true
+          dex:
+            enabled: false
+
+# Read by repo-server to decrypt the SOPS-encrypted Secrets in ipni/infra; its
+# values (kubernetes/argocd/values.yaml) mount it. Refreshed on every run, so
+# rotating the key is: replace it in the vault, re-encrypt, re-run.
+- name: Install Argo CD's age key
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: argocd-sops-age
+        namespace: argocd
+      data:
+        keys.txt: "{{ vault_argocd_age_key | b64encode }}"
+  no_log: true
+
+# One Secret per box, named after the box. ipni/infra targets boxes by these
+# names, and its ApplicationSets pick up every box labelled ipni.io/managed.
+# The hub talks to its own API server in-cluster. A box outside this run (-l)
+# keeps the Secret an earlier run left; none is ever deleted here.
+- name: List the boxes to register
+  ansible.builtin.set_fact:
+    argocd_clusters: >-
+      {%- set out = [{'name': argocd_cluster_name,
+                      'server': 'https://kubernetes.default.svc',
+                      'config': {'tlsClientConfig': {'insecure': false}}}] -%}
+      {%- for h in ansible_play_hosts if h != argocd_hub and hostvars[h].argocd_manager_token is defined -%}
+        {%- set _ = out.append({'name': hostvars[h].argocd_cluster_name,
+                                'server': 'https://' ~ hostvars[h].ansible_host ~ ':6443',
+                                'config': {'bearerToken': hostvars[h].argocd_manager_token,
+                                           'tlsClientConfig': {'insecure': false,
+                                                               'caData': hostvars[h].argocd_manager_ca}}}) -%}
+      {%- endfor -%}
+      {{ out }}
+  no_log: true
+
+- name: Register the boxes with Argo CD
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: "cluster-{{ item.name }}"
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: cluster
+          ipni.io/managed: "true"
+      data:
+        name: "{{ item.name | b64encode }}"
+        server: "{{ item.server | b64encode }}"
+        config: "{{ item.config | to_json | b64encode }}"
+  loop: "{{ argocd_clusters }}"
+  loop_control:
+    label: "{{ item.name }} {{ item.server }}"
+  no_log: true
+
+- name: Give Argo CD read access to the infra repository
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: repo-infra
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: repository
+      data:
+        type: "{{ 'git' | b64encode }}"
+        url: "{{ argocd_repo_url | b64encode }}"
+        sshPrivateKey: "{{ vault_argocd_repo_ssh_key | b64encode }}"
+  when: vault_argocd_repo_ssh_key is defined
+  no_log: true
+
+# The hand-off: the root Application points Argo CD at ipni/infra, whose apps
+# include Argo CD's own release. Created once, like the release; after that it
+# is ipni/infra's to change (kubernetes/argocd/root-app.yaml).
+- name: Point Argo CD at ipni/infra
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: root
+        namespace: argocd
+      spec:
+        project: default
+        source:
+          repoURL: "{{ argocd_repo_url }}"
+          targetRevision: "{{ argocd_repo_revision }}"
+          path: "{{ argocd_root_path }}"
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: argocd
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+  when:
+    - not ansible_check_mode
+    - not argocd_installed.stdout
+
+- name: Report what Argo CD manages
+  ansible.builtin.debug:
+    msg:
+      - "{{ 'installed Argo CD ' ~ argocd_chart_version ~ ' and handed it to ' ~ argocd_repo_url
+            if not argocd_installed.stdout else
+            'Argo CD already installed; it manages itself from ' ~ argocd_repo_url ~ ', so its release was left alone' }}"
+      - "registered: {{ argocd_clusters | map(attribute='name') | join(', ') }}"
+      - "repository access: {{ 'deploy key from the vault' if vault_argocd_repo_ssh_key is defined
+         else 'anonymous, so ' ~ argocd_repo_url ~ ' must be public' }}"
+      - "UI: https://argocd.ipni.io once ipni/infra's monitoring stack serves it. Before that, on the box:
+         sudo k3s kubectl -n argocd port-forward svc/argocd-server 8080:80, with ssh -L 8080:127.0.0.1:8080."

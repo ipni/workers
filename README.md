@@ -1421,6 +1421,47 @@ pending entries first, then entries with a CID the cluster does not hold, then
 the pinned entries with per-peer status and DNSLink drift, followed by the raw
 `ipfs-cluster-ctl pin ls` and `status`.
 
+## Argo CD and monitoring
+
+Monitoring (Prometheus, Loki, Alertmanager, Grafana, Alloy on every box) lives
+in [ipni/infra](https://github.com/ipni/infra) and is deployed by Argo CD,
+which runs on `argocd_hub` (lith-1). This repo does only what Argo CD cannot do
+for itself:
+
+* **First install of Argo CD**, with the same Helm chart and release name
+  ipni/infra uses, plus the root Application that hands it over. After that
+  Argo CD manages its own release from ipni/infra; `platform.yml` never touches
+  it again, so upgrades and settings go there.
+* **Registration**: on each other box, a `cluster-admin` service account for
+  Argo CD, and 6443 opened to lith-1's address only (the one exception to the
+  closed API server). lith-1 therefore holds an admin token for every box.
+* **Secrets that cannot be in Git**: Argo CD's age key, which decrypts the
+  SOPS-encrypted Secrets in ipni/infra (`vault_argocd_age_key`), the deploy key
+  for ipni/infra while it is private (`vault_argocd_repo_ssh_key`, optional),
+  and the Cloudflare DNS token for the monitoring certificate.
+* **Firewall**: 8443 on lith-1 (Traefik for Grafana, Argo CD and metrics
+  ingest) from Cloudflare's edge and the other boxes, and 8000 on sing-1
+  (`healthchecks_host`, the hub's dead-man's switch) from lith-1.
+
+```bash
+ansible-playbook platform.yml --check --diff
+ansible-playbook platform.yml
+```
+
+It restarts nothing that serves traffic, so it runs every box in one batch: the
+hub registers the others using what they produced earlier in the same run.
+
+Argo CD's age key is generated once with `age-keygen`; its public half goes in
+ipni/infra's `.sops.yaml`, the private half into the vault:
+
+```bash
+age-keygen -o argocd.agekey          # prints the public key
+ansible-vault edit group_vars/ipfs_nodes/vault.yml
+#   vault_argocd_age_key: |
+#     <the whole of argocd.agekey>
+rm argocd.agekey
+```
+
 ## Secrets
 
 **This repository is public, so no credentials are committed, not even
@@ -1434,7 +1475,7 @@ DNS.
 | File | Variables |
 |------|-----------|
 | `host_vars/<box>/vault.yml` | `vault_root_password`, `vault_console_password` (provider console), `vault_bootstrap_privkey`, `vault_bootstrap_api_token`, `vault_content_cluster_privkey`, `vault_content_kubo_privkey`; on chic-1 also `vault_bootstrap_b_privkey`, `vault_bootstrap_b_api_token` |
-| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token`, `vault_content_cluster_secret`, `vault_content_pin_users` (remote pinning users, see "Remote pinning") |
+| `group_vars/ipfs_nodes/vault.yml` | `vault_route_origin_tls_key`, `vault_origin_pull_ca_key`, `vault_origin_pull_client_key`, `vault_cloudflare_dns_token`, `vault_content_cluster_secret`, `vault_content_pin_users` (remote pinning users, see "Remote pinning"), `vault_argocd_age_key` and optionally `vault_argocd_repo_ssh_key` (see "Argo CD and monitoring") |
 
 The per-box files were generated from a plaintext `servers.txt` by
 `scripts/bootstrap-vault.sh`; that file was never committed and has since been
@@ -1462,7 +1503,7 @@ same path a deploy takes), so what is checked is what would be applied:
 
 | Check | Catches |
 | --- | --- |
-| `ansible-playbook --syntax-check` on all five playbooks | a role edit that breaks a playbook nobody ran |
+| `ansible-playbook --syntax-check` on all six playbooks | a role edit that breaks a playbook nobody ran |
 | `ansible-lint`, `yamllint` | the rest, minus the style rules in `.ansible-lint` |
 | `kubectl kustomize` on every rendered `k8s/*/` | a patch or digest pin that no longer applies |
 | rendering at `needle_instances` 1, 2 and 4 | the Deployments and Envoy's endpoint list falling out of step |
@@ -1567,7 +1608,8 @@ turn an unrelated pull request red.
       are pinned, and compare `Provide.Strategy` `roots` against `pinned`.
 - [ ] Record which HTTP gateways serve the website to browsers without an IPFS
       client, who operates them, and whether they continue after 2026-09-30.
-- [ ] Set up monitoring/alerting, and scrape `/debug/metrics/prometheus`. Include
+- [ ] Set up monitoring/alerting (in progress: `platform.yml` here, the stack in
+      ipni/infra), and scrape `/debug/metrics/prometheus`. Include
       `/data` usage: the bootstrappers' DHT record store grows with traffic, the
       content repos grow with every pin on every box, and local-path enforces
       neither the 20 GiB nor the 100 GiB claim.
@@ -1587,6 +1629,9 @@ roles/needle/            needle firewall + deploy
 roles/route_origin/       Envoy origin: cert preflight, Cloudflare allowlist, TLS secret
   tasks/verify.yml        post-deploy request checks (paths, Host, traversal; AOP when enforced)
 roles/kustomize_apply/    shared: ship, dry-run/apply, wait, prune stale ConfigMaps
+roles/ufw_allowlist/      shared: open a port to an exact source list, removing rules for dropped sources
+roles/argocd/             Argo CD's first install on argocd_hub, cluster registration, age key, 6443 to the hub
+roles/monitoring/         firewall and Cloudflare token for the monitoring stack in ipni/infra
 k8s/needle/              needle kustomize manifests; the Deployments are .j2, rendered from needle_all_instances
 k8s/route-origin/         Envoy kustomize manifests and envoy.yaml.j2 (needle endpoints rendered)
 k8s/bootstrap/            kubo bootstrapper manifests (deployment, repo PVC)
@@ -1628,6 +1673,7 @@ dns.txt                   Cloudflare-importable bootstrap DNS records (generated
 dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
+platform.yml              Argo CD (first install) and the monitoring stack's prerequisites
 routing.yml               routing service playbook (needle + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)

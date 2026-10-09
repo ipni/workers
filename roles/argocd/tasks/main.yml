@@ -1,0 +1,16 @@
+---
+# Argo CD on argocd_hub, managing every box in the play. Ansible installs it
+# once; after that it manages itself from ipni/infra (see tasks/hub.yml).
+#
+# The other boxes go first: each opens 6443 to the hub and creates the account
+# Argo CD signs in with. Only then does the hub install Argo CD if needed and
+# register them, reading what they produced. That ordering relies on every box
+# being in the same batch, which is why platform.yml sets no `serial`.
+
+- name: Prepare this box to be managed from the hub
+  ansible.builtin.include_tasks: managed.yml
+  when: inventory_hostname != argocd_hub
+
+- name: Install Argo CD on the hub and register the boxes
+  ansible.builtin.include_tasks: hub.yml
+  when: inventory_hostname == argocd_hub
