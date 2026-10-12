@@ -21,13 +21,15 @@ break-glass key and CI's own key); the hardening role removes any other.
 
 For when no operator key works (lost laptop, someone away, a bad hardening
 run). The private key exists only in 1Password: IPFS account, Compass vault,
-"IPNI boxes: break-glass SSH key (ipni user)". Use it without writing it to
-disk, through a throwaway agent:
+item "IPNI boxes: break-glass SSH key (ipni user)", ID
+`4ghgjny7l4rawld4spedu7mxz4`. The reference below uses the ID: the title's `:`
+is not allowed in a 1Password reference, and the ID survives a rename. Use it
+without writing it to disk, through a throwaway agent:
 
 ```bash
 eval "$(ssh-agent -s)"
 op read --account team-ipfs.1password.com \
-  "op://Compass/IPNI boxes: break-glass SSH key (ipni user)/private key?ssh-format=openssh" | ssh-add -
+  "op://Compass/4ghgjny7l4rawld4spedu7mxz4/private key?ssh-format=openssh" | ssh-add -
 ssh -o IdentitiesOnly=yes -o IdentityFile=keys/break-glass.pub ipni@46.166.169.131
 ssh-agent -k
 ```
