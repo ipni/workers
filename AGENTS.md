@@ -14,8 +14,29 @@ three at once is a full outage of that service.
 
 SSH is key-only as the hardened admin user `ipni`; root login is disabled and
 the provider KVM console is the out-of-band fallback. The keys that may sign in
-are the files in `keys/`, listed in `admin_pubkey_file` (takgn, nymd, and CI's
-own key); the hardening role removes any other.
+are the files in `keys/`, listed in `admin_pubkey_file` (takgn, nymd, the
+break-glass key and CI's own key); the hardening role removes any other.
+
+### Break-glass access
+
+For when no operator key works (lost laptop, someone away, a bad hardening
+run). The private key exists only in 1Password: IPFS account, Compass vault,
+"IPNI boxes: break-glass SSH key (ipni user)". Use it without writing it to
+disk, through a throwaway agent:
+
+```bash
+eval "$(ssh-agent -s)"
+op read --account team-ipfs.1password.com \
+  "op://Compass/IPNI boxes: break-glass SSH key (ipni user)/private key?ssh-format=openssh" | ssh-add -
+ssh -o IdentitiesOnly=yes -o IdentityFile=keys/break-glass.pub ipni@46.166.169.131
+ssh-agent -k
+```
+
+Then fix whatever locked people out, through the repo, not by hand. If the key
+has been used outside a real emergency or may have leaked, replace it: a new
+SSH Key item in Compass, its public half in `keys/break-glass.pub`, and a
+hardening run. Last resort if SSH itself is down: the provider's KVM console,
+with `vault_console_password`.
 
 The playbooks set `remote_user: "{{ admin_user }}"` themselves, so
 `ansible-playbook` needs no user flag. **Ad-hoc `ansible` commands do not**, and
