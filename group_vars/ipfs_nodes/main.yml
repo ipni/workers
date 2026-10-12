@@ -14,7 +14,12 @@
 #     - ~/.ssh/id_ed25519.pub
 #     - ~/.ssh/operators/molly.pub
 admin_user: ipni
-admin_pubkey_file: ~/.ssh/id_ed25519.pub
+admin_pubkey_file:
+  - ~/.ssh/id_ed25519.pub
+  # CI (.github/workflows/platform.yml). Its private key is the
+  # ANSIBLE_SSH_PRIVATE_KEY repository secret; to revoke CI's access, remove
+  # this line and re-run the hardening role.
+  - "{{ playbook_dir }}/keys/github-actions.pub"
 
 # ---------------------------------------------------------------------------
 # SSH hardening

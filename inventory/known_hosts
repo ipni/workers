@@ -1,0 +1,8 @@
+# SSH host keys of the boxes, for CI (.github/workflows/platform.yml), which
+# must refuse to connect to anything else. Public. Checked on 2026-10-12: the
+# scanned key, the key file on each box and an operator's known_hosts agreed.
+# Update when a box is reinstalled: ssh-keyscan -t ed25519 <ip>, then confirm
+# against /etc/ssh/ssh_host_ed25519_key.pub on the box itself.
+5.199.165.77 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK2+9yvOjU3tE3K7zEVHn5M30X3FHRA6mgkSvFjmH2uL
+46.166.169.131 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBbz1MWGYfe2RzaH/SV+zBctwhUNWO0336K5N5x5ATOp
+84.32.48.211 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGsaCZG1aU29AqxU84RhnxlMdYyvzz1f2hBhpaYu2gHR

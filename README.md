@@ -1443,24 +1443,36 @@ for itself:
   ingest) from Cloudflare's edge and the other boxes, and 8000 on sing-1
   (`healthchecks_host`, the hub's dead-man's switch) from lith-1.
 
-```bash
-ansible-playbook platform.yml --check --diff
-ansible-playbook platform.yml
-```
+**It runs from CI** (`.github/workflows/platform.yml`), the only playbook that
+does; the others still run from an operator's machine:
+
+| When | What |
+|---|---|
+| Pull request touching it | `--check --diff` against the boxes (forks get no secrets and are skipped) |
+| Merge to `main` | the real run, once a required reviewer approves it in the `production` environment |
+| Actions → platform → Run workflow | `check` or `apply`, optionally `--limit`ed |
 
 It restarts nothing that serves traffic, so it runs every box in one batch: the
 hub registers the others using what they produced earlier in the same run.
 
-Argo CD's age key is generated once with `age-keygen`; its public half goes in
-ipni/infra's `.sops.yaml`, the private half into the vault:
+CI has no vault files, so `platform.yml`'s vault variables come from
+repository secrets (`scripts/ci-platform.sh` maps them), and it signs in with
+its own SSH key, `keys/github-actions.pub` in `admin_pubkey_file`. It only
+connects to the host keys pinned in `inventory/known_hosts`.
 
-```bash
-age-keygen -o argocd.agekey          # prints the public key
-ansible-vault edit group_vars/ipfs_nodes/vault.yml
-#   vault_argocd_age_key: |
-#     <the whole of argocd.agekey>
-rm argocd.agekey
-```
+| Secret | Becomes |
+|---|---|
+| `ANSIBLE_SSH_PRIVATE_KEY` | CI's SSH key as the admin user |
+| `ARGOCD_AGE_KEY` | `vault_argocd_age_key`: Argo CD's age key (public half in ipni/infra's `.sops.yaml`) |
+| `CLOUDFLARE_DNS_TOKEN` | `vault_cloudflare_dns_token`: the same token cert-manager uses for WSS |
+| `ARGOCD_REPO_SSH_KEY` | `vault_argocd_repo_ssh_key`: optional, only while ipni/infra is private |
+
+Copies of all of them are in 1Password (IPFS account, Compass vault): GitHub
+cannot show them again. To revoke CI's access to the boxes, remove its line
+from `admin_pubkey_file` and re-run the hardening role.
+
+From an operator's machine it still works as usual, with the same variables
+in the vault: `ansible-playbook platform.yml --check --diff`.
 
 ## Secrets
 
@@ -1512,6 +1524,9 @@ same path a deploy takes), so what is checked is what would be applied:
 | `python3 -m unittest scripts/test_libp2p_identity.py` | a change to how PeerIDs are derived (Ed25519 and RSA) |
 | every `pinset.yml` section is in the role's `known_sections` | a section the content role silently ignores |
 | `shellcheck scripts/*.sh` | the usual shell traps |
+
+`platform.yml` also has its own workflow, which does talk to the boxes (see
+"Argo CD and monitoring").
 
 The Cloudflare range check is a separate weekly workflow rather than part of
 this one, because it reaches `api.cloudflare.com`: an outage there should not
@@ -1673,7 +1688,11 @@ dns.txt                   Cloudflare-importable bootstrap DNS records (generated
 dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities (generated)
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
-platform.yml              Argo CD (first install) and the monitoring stack's prerequisites
+platform.yml              Argo CD (first install) and the monitoring stack's prerequisites, run from CI
+.github/workflows/platform.yml  platform.yml: dry run on PRs, approved run on merge
+scripts/ci-platform.sh    CI's wrapper for platform.yml: secrets to variables, SSH key, pinned host keys
+inventory/known_hosts     the boxes' SSH host keys, pinned for CI
+keys/github-actions.pub   CI's SSH key (in admin_pubkey_file)
 routing.yml               routing service playbook (needle + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)

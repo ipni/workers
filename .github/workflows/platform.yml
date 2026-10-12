@@ -1,0 +1,115 @@
+---
+# platform.yml from CI: Argo CD's first install, registering the boxes with
+# it, and the firewall rules the monitoring stack needs (README, "Argo CD and
+# monitoring"). The service playbooks still run from an operator's machine.
+#
+#   pull request   -> dry run (--check --diff) against the boxes
+#   merge to main  -> the real run, once approved in the `production`
+#                     environment (required reviewers)
+#   manual         -> either, optionally limited to some boxes
+#
+# Pull requests from forks get no secrets and are skipped.
+name: platform
+
+on:
+  pull_request:
+    paths:
+      - platform.yml
+      - roles/argocd/**
+      - roles/monitoring/**
+      - roles/ufw_allowlist/**
+      - roles/route_origin/defaults/main.yml
+      - group_vars/**
+      - inventory/**
+      - scripts/ci-platform.sh
+      - .github/workflows/platform.yml
+  push:
+    branches: [main]
+    paths:
+      - platform.yml
+      - roles/argocd/**
+      - roles/monitoring/**
+      - roles/ufw_allowlist/**
+      - roles/route_origin/defaults/main.yml
+      - group_vars/**
+      - inventory/**
+      - scripts/ci-platform.sh
+      - .github/workflows/platform.yml
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check (dry run) or apply"
+        type: choice
+        options: [check, apply]
+        default: check
+      limit:
+        description: "Boxes to run on (ansible --limit), empty for all"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One run at a time against the boxes; never cancel one half-way.
+concurrency:
+  group: platform
+  cancel-in-progress: false
+
+env:
+  # ansible.cfg sets the yaml callback, which no installed collection provides
+  # here (see ci.yml).
+  ANSIBLE_STDOUT_CALLBACK: default
+  ANSIBLE_FORCE_COLOR: "true"
+
+jobs:
+  check:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'check')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Dry run platform.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          ARGOCD_AGE_KEY: ${{ secrets.ARGOCD_AGE_KEY }}
+          CLOUDFLARE_DNS_TOKEN: ${{ secrets.CLOUDFLARE_DNS_TOKEN }}
+          ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-platform.sh check "$LIMIT"
+
+  apply:
+    if: >-
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'apply')
+    runs-on: ubuntu-latest
+    # Required reviewers: nothing reaches the boxes until one approves.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Run platform.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          ARGOCD_AGE_KEY: ${{ secrets.ARGOCD_AGE_KEY }}
+          CLOUDFLARE_DNS_TOKEN: ${{ secrets.CLOUDFLARE_DNS_TOKEN }}
+          ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-platform.sh apply "$LIMIT"
