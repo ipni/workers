@@ -6,19 +6,18 @@
 # the ONLY way in over the network once hardening completes; the provider
 # KVM/web console is the designated out-of-band fallback.
 #
-# One path, or a list of them when more than one operator needs in. The role
-# installs them exclusively, so a key that is not listed here does not survive
-# the next run - add the second operator BEFORE the run that would lock them
-# out, not after:
-#   admin_pubkey_file:
-#     - ~/.ssh/id_ed25519.pub
-#     - ~/.ssh/operators/molly.pub
+# The role installs these keys exclusively: a key that is not listed here is
+# REMOVED on the next run. So every key is a committed public key file in
+# keys/, never "whoever runs the playbook" (~/.ssh/id_ed25519.pub), which would
+# lock out every other operator. To add someone, commit their public key here
+# BEFORE the run that would lock them out; to remove someone, delete their line
+# and re-run the hardening role (site.yml --tags hardening, one box at a time).
 admin_user: ipni
 admin_pubkey_file:
-  - ~/.ssh/id_ed25519.pub
+  - "{{ playbook_dir }}/keys/takgn.pub"
+  - "{{ playbook_dir }}/keys/nymd.pub"
   # CI (.github/workflows/platform.yml). Its private key is the
-  # ANSIBLE_SSH_PRIVATE_KEY repository secret; to revoke CI's access, remove
-  # this line and re-run the hardening role.
+  # ANSIBLE_SSH_PRIVATE_KEY repository secret.
   - "{{ playbook_dir }}/keys/github-actions.pub"
 
 # ---------------------------------------------------------------------------

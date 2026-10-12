@@ -12,8 +12,10 @@ three at once is a full outage of that service.
 
 ## Getting in
 
-SSH is key-only as the hardened admin user `ipni` (`~/.ssh/id_ed25519`); root
-login is disabled and the provider KVM console is the out-of-band fallback.
+SSH is key-only as the hardened admin user `ipni`; root login is disabled and
+the provider KVM console is the out-of-band fallback. The keys that may sign in
+are the files in `keys/`, listed in `admin_pubkey_file` (takgn, nymd, and CI's
+own key); the hardening role removes any other.
 
 The playbooks set `remote_user: "{{ admin_user }}"` themselves, so
 `ansible-playbook` needs no user flag. **Ad-hoc `ansible` commands do not**, and

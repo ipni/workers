@@ -111,16 +111,17 @@ with the OS disk.
 > `/data` existed would otherwise make the in-use data disk look blank. Once a
 > volume labelled `ipfsdata` exists, the format step is skipped outright.
 
-**`hardening`** — creates the `ipni` admin user with your ed25519 key and
+**`hardening`** — creates the `ipni` admin user with the operators' keys and
 passwordless sudo, then locks SSH down to key-only with root login disabled,
 enables ufw with a default-deny inbound policy, and configures fail2ban.
 
 > **The key files are the single source of truth.** `authorized_key` runs with
 > `exclusive: true`, so any key added to the `ipni` account by hand is removed
-> on the next run. `admin_pubkey_file` in `group_vars` takes either one path or
-> a list of them; to give a second operator access, add their key file to that
-> list rather than editing the host. Do it **before** the run that would
-> otherwise strip their key.
+> on the next run. `admin_pubkey_file` in `group_vars` lists committed public
+> key files in `keys/` (`takgn.pub`, `nymd.pub`, and CI's `github-actions.pub`),
+> so the result does not depend on who runs it. To give someone access, commit
+> their public key there and add it to the list rather than editing the host.
+> Do it **before** the run that would otherwise strip their key.
 
 fail2ban is kept mainly to cut log noise: with password authentication
 disabled there are few credential guesses left for it to ban.
@@ -1692,7 +1693,7 @@ platform.yml              Argo CD (first install) and the monitoring stack's pre
 .github/workflows/platform.yml  platform.yml: dry run on PRs, approved run on merge
 scripts/ci-platform.sh    CI's wrapper for platform.yml: secrets to variables, SSH key, pinned host keys
 inventory/known_hosts     the boxes' SSH host keys, pinned for CI
-keys/github-actions.pub   CI's SSH key (in admin_pubkey_file)
+keys/*.pub                the SSH keys allowed in as the admin user: takgn, nymd, CI (admin_pubkey_file)
 routing.yml               routing service playbook (needle + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)
