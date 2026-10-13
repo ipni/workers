@@ -8,13 +8,14 @@
 # The exception is platform.yml (Argo CD and the monitoring stack's firewall,
 # see the README), the only playbook that runs from CI:
 #
-#   pull request   -> the checks, and a dry run (--check --diff) of
+#   pull request   -> the checks, then a dry run (--check --diff) of
 #                     platform.yml against the boxes if the PR touches it
-#   merge to main  -> the checks, then, if the merge touches platform.yml and
-#                     every check passed, the real run, once a required
-#                     reviewer approves it in the `production` environment
-#   manual         -> the checks, plus optionally a dry run or an apply of
-#                     platform.yml, limited to some boxes if wanted
+#   merge to main  -> the checks, then, if the merge touches platform.yml, a
+#                     dry run of the merged commit, then the real run, once a
+#                     required reviewer has read the dry run and approved it in
+#                     the `production` environment
+#   manual         -> the checks, plus optionally a dry run, or a dry run and
+#                     an apply, of platform.yml, limited to some boxes if wanted
 #
 # One workflow, so a merge starts one run. Pull requests from forks get no
 # secrets: their platform.yml dry run is skipped.
@@ -233,19 +234,25 @@ jobs:
           fi
           echo "platform=$platform" | tee -a "$GITHUB_OUTPUT"
 
+  # What platform.yml would change, for this exact commit: on a merge, this is
+  # what the approver reads before approving the apply below. It writes a
+  # summary on the run's page. Runs only once every check has passed.
   platform-dry-run:
-    needs: changes
+    needs: [ansible, manifests, generated, shell, changes]
     if: >-
       needs.changes.outputs.platform == 'true' && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-        (github.event_name == 'workflow_dispatch' && inputs.platform == 'check'))
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.platform != 'none'))
     runs-on: ubuntu-latest
-    # A newer push to the same branch replaces its dry run. Kept apart from the
-    # apply's group: GitHub keeps one pending run per group, so a shared group
-    # let a pull request's dry run cancel an apply waiting for approval.
+    # On a pull request, a newer push to the same branch replaces its dry run,
+    # in a group of its own: GitHub keeps one pending run per group, so sharing
+    # the apply's group would let a pull request cancel an apply waiting for
+    # approval. On main (and manual runs) it queues with the apply in
+    # platform-main, so it never runs while an apply is changing the boxes.
     concurrency:
-      group: platform-check-${{ github.ref }}
-      cancel-in-progress: true
+      group: ${{ github.event_name == 'pull_request' && format('platform-check-{0}', github.ref) || 'platform-main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       # ansible.cfg sets the yaml callback, which no installed collection
       # provides here (see the manifests job).
@@ -271,19 +278,21 @@ jobs:
           LIMIT: ${{ inputs.limit }}
         run: scripts/ci-platform.sh check "$LIMIT"
 
-  # Needs every check above: a commit that fails one is never offered for
-  # approval. No status function in `if`, so GitHub adds success().
+  # Needs every check and the dry run of this same commit: a commit that fails
+  # either is never offered for approval. No status function in `if`, so
+  # GitHub adds success().
   platform-apply:
-    needs: [ansible, manifests, generated, shell, changes]
+    needs: [ansible, manifests, generated, shell, changes, platform-dry-run]
     if: >-
       needs.changes.outputs.platform == 'true' && (
         github.event_name == 'push' ||
         (github.event_name == 'workflow_dispatch' && inputs.platform == 'apply'))
     runs-on: ubuntu-latest
-    # One apply at a time, never cancelled half-way. A newer merge waiting
-    # behind it replaces an older one still waiting: the latest main wins.
+    # One at a time with main's dry runs, never cancelled half-way. A newer
+    # merge waiting behind replaces an older one still waiting for approval:
+    # the latest main wins, and its own dry run is the one the approver reads.
     concurrency:
-      group: platform-apply
+      group: platform-main
       cancel-in-progress: false
     # Required reviewers: nothing reaches the boxes until one approves.
     environment: production

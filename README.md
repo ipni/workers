@@ -1451,9 +1451,12 @@ operator's machine. It is part of the repo's one workflow
 
 | When | What |
 |---|---|
-| Pull request touching it | the checks, and `--check --diff` against the boxes (forks get no secrets and are skipped) |
-| Merge to `main` touching it | the checks, then, only if every one passes, the real run, once a required reviewer approves it in the `production` environment |
-| Actions → ci → Run workflow | the checks, plus `platform`: `check` or `apply`, optionally `--limit`ed |
+| Pull request touching it | the checks, then `--check --diff` against the boxes (forks get no secrets and are skipped) |
+| Merge to `main` touching it | the checks, then a dry run of the merged commit, then the real run, once a required reviewer has read the dry run and approved it in the `production` environment |
+| Actions → ci → Run workflow | the checks, plus `platform`: `check` (dry run) or `apply` (dry run, then the approved run), optionally `--limit`ed |
+
+Each dry run writes what it would change, per box and task, on the run's
+summary page; approve only if that is what you expect.
 
 "Touching it" means `platform.yml`, its roles (`argocd`, `monitoring`,
 `ufw_allowlist`), `group_vars/`, `inventory/`, `scripts/ci-platform.sh` or the
