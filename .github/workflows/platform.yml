@@ -52,11 +52,6 @@ on:
 permissions:
   contents: read
 
-# One run at a time against the boxes; never cancel one half-way.
-concurrency:
-  group: platform
-  cancel-in-progress: false
-
 env:
   # ansible.cfg sets the yaml callback, which no installed collection provides
   # here (see ci.yml).
@@ -79,6 +74,12 @@ jobs:
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'workflow_dispatch' && inputs.mode == 'check')
     runs-on: ubuntu-latest
+    # A newer push to the same branch replaces its dry run. Kept apart from the
+    # apply's group: GitHub keeps one pending run per group, so a shared group
+    # let a pull request's dry run cancel an apply waiting for approval.
+    concurrency:
+      group: platform-check-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,6 +108,11 @@ jobs:
       (github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && inputs.mode == 'apply')
     runs-on: ubuntu-latest
+    # One apply at a time, never cancelled half-way. A newer merge waiting
+    # behind it replaces an older one still waiting: the latest main wins.
+    concurrency:
+      group: platform-apply
+      cancel-in-progress: false
     # Required reviewers: nothing reaches the boxes until one approves.
     environment: production
     steps:
