@@ -21,7 +21,7 @@ admin_pubkey_file:
   # only in 1Password (IPFS account, Compass vault); see AGENTS.md. Never
   # remove it without putting another emergency key in its place.
   - "{{ playbook_dir }}/keys/break-glass.pub"
-  # CI (.github/workflows/platform.yml). Its private key is the
+  # CI (.github/workflows/ci.yml, platform.yml). Its private key is the
   # ANSIBLE_SSH_PRIVATE_KEY repository secret.
   - "{{ playbook_dir }}/keys/github-actions.pub"
 

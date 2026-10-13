@@ -1445,14 +1445,20 @@ for itself:
   ingest) from Cloudflare's edge and the other boxes, and 8000 on sing-1
   (`healthchecks_host`, the hub's dead-man's switch) from lith-1.
 
-**It runs from CI** (`.github/workflows/platform.yml`), the only playbook that
-does; the others still run from an operator's machine:
+**It runs from CI**, the only playbook that does; the others still run from an
+operator's machine. It is part of the repo's one workflow
+(`.github/workflows/ci.yml`), so a merge starts a single run:
 
 | When | What |
 |---|---|
-| Pull request touching it | `--check --diff` against the boxes (forks get no secrets and are skipped) |
-| Merge to `main` | the repo checks (`ci.yml`) for that commit, then, only if they all pass, the real run, once a required reviewer approves it in the `production` environment |
-| Actions → platform → Run workflow | `check` or `apply` (apply also waits for the checks), optionally `--limit`ed |
+| Pull request touching it | the checks, and `--check --diff` against the boxes (forks get no secrets and are skipped) |
+| Merge to `main` touching it | the checks, then, only if every one passes, the real run, once a required reviewer approves it in the `production` environment |
+| Actions → ci → Run workflow | the checks, plus `platform`: `check` or `apply`, optionally `--limit`ed |
+
+"Touching it" means `platform.yml`, its roles (`argocd`, `monitoring`,
+`ufw_allowlist`), `group_vars/`, `inventory/`, `scripts/ci-platform.sh` or the
+workflow itself. A `group_vars` change for another service therefore also
+offers an apply; with nothing of its own changed, it changes nothing.
 
 It restarts nothing that serves traffic, so it runs every box in one batch: the
 hub registers the others using what they produced earlier in the same run.
@@ -1527,9 +1533,9 @@ same path a deploy takes), so what is checked is what would be applied:
 | every `pinset.yml` section is in the role's `known_sections` | a section the content role silently ignores |
 | `shellcheck scripts/*.sh` | the usual shell traps |
 
-`platform.yml` also has its own workflow, which does talk to the boxes (see
-"Argo CD and monitoring"). It calls this one (`ci.yml` is also a reusable
-workflow) and only applies once every job here has passed.
+The same workflow also runs `platform.yml`, the one part that does talk to
+the boxes, and only after every check above has passed (see "Argo CD and
+monitoring").
 
 The Cloudflare range check is a separate weekly workflow rather than part of
 this one, because it reaches `api.cloudflare.com`: an outage there should not
@@ -1692,13 +1698,12 @@ dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities 
 site.yml                  base preparation playbook
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 platform.yml              Argo CD (first install) and the monitoring stack's prerequisites, run from CI
-.github/workflows/platform.yml  platform.yml: dry run on PRs, approved run on merge
 scripts/ci-platform.sh    CI's wrapper for platform.yml: secrets to variables, SSH key, pinned host keys
 inventory/known_hosts     the boxes' SSH host keys, pinned for CI
 keys/*.pub                the SSH keys allowed in as the admin user: takgn, nymd, byo, break-glass, CI (admin_pubkey_file)
 routing.yml               routing service playbook (needle + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)
-.github/workflows/ci.yml  drift checks: playbook syntax, lint, kustomize build, generated files, shellcheck
+.github/workflows/ci.yml  drift checks (playbook syntax, lint, kustomize build, generated files, shellcheck), then platform.yml: dry run on PRs, approved run on merge
 .github/workflows/cloudflare-ranges.yml  weekly pinned-vs-published Cloudflare range check
 ```

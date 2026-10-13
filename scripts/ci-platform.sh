@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run platform.yml from CI (.github/workflows/platform.yml).
+# Run platform.yml from CI (the platform-* jobs of .github/workflows/ci.yml).
 #
 #   scripts/ci-platform.sh check [limit]   dry run: --check --diff
 #   scripts/ci-platform.sh apply [limit]   the real run

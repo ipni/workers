@@ -1,18 +1,40 @@
 ---
-# The repo has no runtime tests - nothing here talks to a box. What it does
-# catch is DRIFT: a generated file that no longer matches its generator, a
-# pinned upstream manifest that changed under its checksum, a playbook that
-# stopped parsing, a pinset section the role does not know about. Every one of
-# those has gone unnoticed here before, which is why this exists.
-name: checks
+# The repo's one workflow. Most of it never talks to a box: it catches DRIFT,
+# a generated file that no longer matches its generator, a pinned upstream
+# manifest that changed under its checksum, a playbook that stopped parsing, a
+# pinset section the role does not know about. Every one of those has gone
+# unnoticed here before, which is why this exists.
+#
+# The exception is platform.yml (Argo CD and the monitoring stack's firewall,
+# see the README), the only playbook that runs from CI:
+#
+#   pull request   -> the checks, and a dry run (--check --diff) of
+#                     platform.yml against the boxes if the PR touches it
+#   merge to main  -> the checks, then, if the merge touches platform.yml and
+#                     every check passed, the real run, once a required
+#                     reviewer approves it in the `production` environment
+#   manual         -> the checks, plus optionally a dry run or an apply of
+#                     platform.yml, limited to some boxes if wanted
+#
+# One workflow, so a merge starts one run. Pull requests from forks get no
+# secrets: their platform.yml dry run is skipped.
+name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # platform.yml runs these first and only applies if they all pass.
-  workflow_call:
+    inputs:
+      platform:
+        description: "platform.yml: none, check (dry run) or apply"
+        type: choice
+        options: [none, check, apply]
+        default: none
+      limit:
+        description: "platform.yml: boxes to run on (ansible --limit), empty for all"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -176,3 +198,114 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck scripts/*.sh
+
+  # ---------------------------------------------------------------------------
+  # platform.yml
+  # ---------------------------------------------------------------------------
+
+  # Whether this run touches what platform.yml applies. On a pull request,
+  # against where the branch left main, so other merges to main do not count.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      platform: ${{ steps.diff.outputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          RANGE: >-
+            ${{ github.event_name == 'pull_request'
+                && format('{0}...{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha)
+                || format('{0}..{1}', github.event.before, github.sha) }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT" == workflow_dispatch || "$RANGE" == 0000000000000000000000000000000000000000..* ]]; then
+            platform=true
+          elif git diff --name-only "$RANGE" | grep -qE \
+              '^(platform\.yml|roles/(argocd|monitoring|ufw_allowlist)/|roles/route_origin/defaults/main\.yml|group_vars/|inventory/|scripts/ci-platform\.sh|\.github/workflows/ci\.yml)'; then
+            platform=true
+          else
+            platform=false
+          fi
+          echo "platform=$platform" | tee -a "$GITHUB_OUTPUT"
+
+  platform-dry-run:
+    needs: changes
+    if: >-
+      needs.changes.outputs.platform == 'true' && (
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'workflow_dispatch' && inputs.platform == 'check'))
+    runs-on: ubuntu-latest
+    # A newer push to the same branch replaces its dry run. Kept apart from the
+    # apply's group: GitHub keeps one pending run per group, so a shared group
+    # let a pull request's dry run cancel an apply waiting for approval.
+    concurrency:
+      group: platform-check-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # ansible.cfg sets the yaml callback, which no installed collection
+      # provides here (see the manifests job).
+      ANSIBLE_STDOUT_CALLBACK: default
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Dry run platform.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          ARGOCD_AGE_KEY: ${{ secrets.ARGOCD_AGE_KEY }}
+          CLOUDFLARE_DNS_TOKEN: ${{ secrets.CLOUDFLARE_DNS_TOKEN }}
+          ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-platform.sh check "$LIMIT"
+
+  # Needs every check above: a commit that fails one is never offered for
+  # approval. No status function in `if`, so GitHub adds success().
+  platform-apply:
+    needs: [ansible, manifests, generated, shell, changes]
+    if: >-
+      needs.changes.outputs.platform == 'true' && (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.platform == 'apply'))
+    runs-on: ubuntu-latest
+    # One apply at a time, never cancelled half-way. A newer merge waiting
+    # behind it replaces an older one still waiting: the latest main wins.
+    concurrency:
+      group: platform-apply
+      cancel-in-progress: false
+    # Required reviewers: nothing reaches the boxes until one approves.
+    environment: production
+    env:
+      ANSIBLE_STDOUT_CALLBACK: default
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Run platform.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          ARGOCD_AGE_KEY: ${{ secrets.ARGOCD_AGE_KEY }}
+          CLOUDFLARE_DNS_TOKEN: ${{ secrets.CLOUDFLARE_DNS_TOKEN }}
+          ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-platform.sh apply "$LIMIT"
