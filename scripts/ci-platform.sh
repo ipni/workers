@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run platform.yml from CI (.github/workflows/platform.yml).
+# Run platform.yml from CI (the platform-* jobs of .github/workflows/ci.yml).
 #
 #   scripts/ci-platform.sh check [limit]   dry run: --check --diff
 #   scripts/ci-platform.sh apply [limit]   the real run
@@ -51,4 +51,51 @@ args=(platform.yml -e "@$secrets")
 [[ $mode == check ]] && args+=(--check --diff)
 [[ -n $limit ]] && args+=(--limit "$limit")
 
-ansible-playbook "${args[@]}"
+if [[ $mode == apply || -z ${GITHUB_STEP_SUMMARY:-} ]]; then
+  ansible-playbook "${args[@]}"
+  exit
+fi
+
+# A dry run in CI also writes what it would change to the run's summary page:
+# on a merge, that is what the approver reads before approving the apply.
+log=$(mktemp)
+trap 'rm -f "$secrets" "$log"' EXIT
+set +e
+ansible-playbook "${args[@]}" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+set -e
+python3 - "$log" "$status" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+import collections, re, sys
+log, status = sys.argv[1], int(sys.argv[2])
+ansi = re.compile(r"\x1b\[[0-9;]*m")
+lines = [ansi.sub("", l.rstrip("\n")) for l in open(log, errors="replace")]
+task, changes, failures, recap, in_recap = "", collections.OrderedDict(), [], [], False
+for line in lines:
+    if m := re.match(r"TASK \[(.*)\]", line):
+        task = m.group(1)
+    elif m := re.match(r"changed: \[([^\]]+)\]", line):
+        changes.setdefault((m.group(1).split(" -> ")[0], task), 0)
+        changes[(m.group(1).split(" -> ")[0], task)] += 1
+    elif m := re.match(r"fatal: \[([^\]]+)\]", line):
+        failures.append(f"{m.group(1)}: {task}")
+    elif line.startswith("PLAY RECAP"):
+        in_recap = True
+    elif in_recap:
+        if not line.strip():
+            in_recap = False
+        else:
+            recap.append(line)
+print("### platform.yml dry run (`--check --diff`)\n")
+if failures:
+    print("**Failed:** " + "; ".join(failures) + "\n")
+if changes:
+    print("Would change (approve only if this is what you expect):\n")
+    print("| Box | Task | Changes |\n|---|---|---|")
+    for (host, name), n in changes.items():
+        print(f"| {host} | {name} | {n} |")
+elif status == 0:
+    print("Nothing would change on the boxes.")
+print("\n<details><summary>PLAY RECAP</summary>\n\n```\n" + "\n".join(recap) + "\n```\n</details>\n")
+print("Full output, including the diffs: this job's log.")
+PY
+exit "$status"
