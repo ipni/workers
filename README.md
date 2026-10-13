@@ -1469,9 +1469,11 @@ in the vault: `ansible-playbook platform.yml --check --diff`.
 
 ## Running playbooks from CI
 
-`site.yml` and `platform.yml` run from CI; the others (`routing.yml`,
-`bootstrap.yml`, `content.yml`, `k3s-upgrade.yml`) still run from an
-operator's machine. Both are part of the repo's one workflow
+`site.yml` and `platform.yml` run from CI. The others (`routing.yml`,
+`bootstrap.yml`, `content.yml`, `k3s-upgrade.yml`) deliberately stay on an
+operator's machine for now: they need the vault (for `bootstrap.yml` and
+`content.yml` that includes permanent identity keys), and a `routing.yml` run
+takes about an hour per box. Both CI playbooks are part of the repo's one workflow
 (`.github/workflows/ci.yml`), so a merge starts a single run:
 
 | When | What |
