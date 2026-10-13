@@ -1451,8 +1451,8 @@ does; the others still run from an operator's machine:
 | When | What |
 |---|---|
 | Pull request touching it | `--check --diff` against the boxes (forks get no secrets and are skipped) |
-| Merge to `main` | the real run, once a required reviewer approves it in the `production` environment |
-| Actions → platform → Run workflow | `check` or `apply`, optionally `--limit`ed |
+| Merge to `main` | the repo checks (`ci.yml`) for that commit, then, only if they all pass, the real run, once a required reviewer approves it in the `production` environment |
+| Actions → platform → Run workflow | `check` or `apply` (apply also waits for the checks), optionally `--limit`ed |
 
 It restarts nothing that serves traffic, so it runs every box in one batch: the
 hub registers the others using what they produced earlier in the same run.
@@ -1528,7 +1528,8 @@ same path a deploy takes), so what is checked is what would be applied:
 | `shellcheck scripts/*.sh` | the usual shell traps |
 
 `platform.yml` also has its own workflow, which does talk to the boxes (see
-"Argo CD and monitoring").
+"Argo CD and monitoring"). It calls this one (`ci.yml` is also a reusable
+workflow) and only applies once every job here has passed.
 
 The Cloudflare range check is a separate weekly workflow rather than part of
 this one, because it reaches `api.cloudflare.com`: an outage there should not

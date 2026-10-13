@@ -11,6 +11,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # platform.yml runs these first and only applies if they all pass.
+  workflow_call:
 
 permissions:
   contents: read
