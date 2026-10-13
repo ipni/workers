@@ -1473,7 +1473,10 @@ in the vault: `ansible-playbook platform.yml --check --diff`.
 `bootstrap.yml`, `content.yml`, `k3s-upgrade.yml`) deliberately stay on an
 operator's machine for now: they need the vault (for `bootstrap.yml` and
 `content.yml` that includes permanent identity keys), and a `routing.yml` run
-takes about an hour per box. Both CI playbooks are part of the repo's one workflow
+takes about an hour per box. `routing.yml`, `content.yml` and `bootstrap.yml`
+are meant to move to Helm charts later, deployed by Argo CD like the monitoring
+stack, so CI is not given their secrets in the meantime. Both CI playbooks are
+part of the repo's one workflow
 (`.github/workflows/ci.yml`), so a merge starts a single run:
 
 | When | What |
