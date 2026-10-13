@@ -12,8 +12,33 @@ three at once is a full outage of that service.
 
 ## Getting in
 
-SSH is key-only as the hardened admin user `ipni` (`~/.ssh/id_ed25519`); root
-login is disabled and the provider KVM console is the out-of-band fallback.
+SSH is key-only as the hardened admin user `ipni`; root login is disabled and
+the provider KVM console is the out-of-band fallback. The keys that may sign in
+are the files in `keys/`, listed in `admin_pubkey_file` (takgn, nymd, byo, the
+break-glass key and CI's own key); the hardening role removes any other.
+
+### Break-glass access
+
+For when no operator key works (lost laptop, someone away, a bad hardening
+run). The private key exists only in 1Password: IPFS account, Compass vault,
+item "IPNI boxes: break-glass SSH key (ipni user)", ID
+`4ghgjny7l4rawld4spedu7mxz4`. The reference below uses the ID: the title's `:`
+is not allowed in a 1Password reference, and the ID survives a rename. Use it
+without writing it to disk, through a throwaway agent:
+
+```bash
+eval "$(ssh-agent -s)"
+op read --account team-ipfs.1password.com \
+  "op://Compass/4ghgjny7l4rawld4spedu7mxz4/private key?ssh-format=openssh" | ssh-add -
+ssh -o IdentitiesOnly=yes -o IdentityFile=keys/break-glass.pub ipni@46.166.169.131
+ssh-agent -k
+```
+
+Then fix whatever locked people out, through the repo, not by hand. If the key
+has been used outside a real emergency or may have leaked, replace it: a new
+SSH Key item in Compass, its public half in `keys/break-glass.pub`, and a
+hardening run. Last resort if SSH itself is down: the provider's KVM console,
+with `vault_console_password`.
 
 The playbooks set `remote_user: "{{ admin_user }}"` themselves, so
 `ansible-playbook` needs no user flag. **Ad-hoc `ansible` commands do not**, and
@@ -33,7 +58,9 @@ controller; in CI it is `echo ci > .vault_pass`.
 ## kubectl
 
 The k3s API server (6443) is deliberately closed to the internet — ufw denies
-it and there is no flag to open it. Two ways in:
+it and there is no flag to open it. The one exception is Argo CD on lith-1
+(`argocd_hub`), which `platform.yml` lets reach the other boxes' 6443 from
+lith-1's address only. Two ways in for people:
 
 ```bash
 # 1. straight through ssh, no setup
@@ -162,7 +189,7 @@ deliberately disables `line-length` and `braces` (see `.ansible-lint`). A pass
 looks like `Passed: 0 failure(s), 0 warning(s) ... profile ... 'production'`.
 
 ```bash
-for pb in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml; do
+for pb in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml platform.yml; do
   ansible-playbook --syntax-check "$pb"
 done
 ANSIBLE_STDOUT_CALLBACK=default ansible-playbook scripts/render-manifests.yml -e dest=rendered

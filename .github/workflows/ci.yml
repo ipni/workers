@@ -40,7 +40,7 @@ jobs:
       # others and nothing else would say so.
       - name: Syntax-check every playbook
         run: |
-          for playbook in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml; do
+          for playbook in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml platform.yml; do
             echo "== $playbook"
             ansible-playbook --syntax-check "$playbook"
           done

@@ -1,0 +1,69 @@
+---
+# A box Argo CD on argocd_hub manages from outside.
+
+# 6443 is otherwise closed to everything but the SSH tunnel; see the firewall
+# section of group_vars/ipfs_nodes/main.yml.
+- name: Allow the Argo CD hub, and only the hub, to reach the API server
+  ansible.builtin.include_role:
+    name: ufw_allowlist
+  vars:
+    ufw_allowlist_port: "6443"
+    ufw_allowlist_comment: argocd hub
+    ufw_allowlist_sources: ["{{ hostvars[argocd_hub].ansible_host }}"]
+
+# cluster-admin, because Argo CD creates namespaces, CRDs and cluster roles for
+# the charts it deploys. The token never expires; delete the Secret to revoke
+# it, and the next run issues a new one.
+- name: Create the service account Argo CD signs in with
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      - apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: argocd-manager
+          namespace: kube-system
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: argocd-manager
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: cluster-admin
+        subjects:
+          - kind: ServiceAccount
+            name: argocd-manager
+            namespace: kube-system
+      - apiVersion: v1
+        kind: Secret
+        type: kubernetes.io/service-account-token
+        metadata:
+          name: argocd-manager-token
+          namespace: kube-system
+          annotations:
+            kubernetes.io/service-account.name: argocd-manager
+
+# The token controller fills the Secret in a moment after it is created. Under
+# --check nothing was created, so there is nothing to read.
+- name: Read the Argo CD token and the cluster CA
+  kubernetes.core.k8s_info:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    kind: Secret
+    namespace: kube-system
+    name: argocd-manager-token
+  register: argocd_manager_secret
+  retries: 15
+  delay: 2
+  until: (argocd_manager_secret.resources | first | default({})).data.token is defined
+  when: not ansible_check_mode
+  no_log: true
+
+# Read back by hub.yml as hostvars[<box>].argocd_manager_*.
+- name: Keep the token and CA for the hub
+  ansible.builtin.set_fact:
+    argocd_manager_token: "{{ (argocd_manager_secret.resources | first).data.token | b64decode }}"
+    argocd_manager_ca: "{{ (argocd_manager_secret.resources | first).data['ca.crt'] }}"
+  when: not ansible_check_mode
+  no_log: true

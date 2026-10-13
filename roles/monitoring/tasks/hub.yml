@@ -1,0 +1,71 @@
+---
+# Traefik in the monitoring namespace listens on host port 8443 (443 is the
+# route-origin Envoy's). It serves three hostnames:
+#   monitoring.ipni.io, argocd.ipni.io   people, through Cloudflare's proxy
+#   ingest.monitoring.ipni.io            Alloy on the other boxes, DNS only
+
+- name: Fail if there is no Cloudflare token for the monitoring certificate
+  ansible.builtin.assert:
+    that: vault_cloudflare_dns_token is defined and vault_cloudflare_dns_token | length > 0
+    fail_msg: >-
+      vault_cloudflare_dns_token is not set (group_vars/ipfs_nodes/vault.yml).
+      cert-manager needs it for the monitoring certificate, as for the WSS one.
+    quiet: true
+
+# The same pinned list as the route-origin allowlist on 443; platform.yml reads
+# it from roles/route_origin/defaults.
+- name: Allow Cloudflare's edge to reach the monitoring hub
+  ansible.builtin.include_role:
+    name: ufw_allowlist
+  vars:
+    ufw_allowlist_port: "8443"
+    ufw_allowlist_comment: cloudflare monitoring
+    ufw_allowlist_sources: "{{ route_origin_cloudflare_ranges }}"
+
+- name: Allow the other boxes to push metrics and logs to the hub
+  ansible.builtin.include_role:
+    name: ufw_allowlist
+  vars:
+    ufw_allowlist_port: "8443"
+    ufw_allowlist_comment: monitoring ingest
+    ufw_allowlist_sources: >-
+      {{ groups['ipfs_nodes'] | reject('equalto', argocd_hub)
+         | map('extract', hostvars, 'ansible_host') | list
+         + monitoring_ingest_extra_sources }}
+
+# The Issuer in ipni/infra (kubernetes/manifests/eu/lith1/monitoring) reads
+# this Secret. Created here so the token goes from the vault straight to the
+# API server and is never in either repo. Argo CD creates the namespace too;
+# whichever runs first wins, and neither deletes it.
+- name: Check whether the monitoring namespace exists yet
+  ansible.builtin.command:
+    argv: [k3s, kubectl, get, namespace, monitoring, --ignore-not-found, -o, name]
+  register: monitoring_ns
+  changed_when: false
+  check_mode: false
+
+- name: Ensure the monitoring namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    api_version: v1
+    kind: Namespace
+    name: monitoring
+    state: present
+
+- name: Install the Cloudflare DNS token for the monitoring certificate
+  kubernetes.core.k8s:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: cloudflare-api-token
+        namespace: monitoring
+      data:
+        api-token: "{{ vault_cloudflare_dns_token | b64encode }}"
+  # Under --check on a first run the namespace above is only simulated, and a
+  # dry-run create of the Secret fails with "namespace not found".
+  when: not (ansible_check_mode and not monitoring_ns.stdout)
+  no_log: true

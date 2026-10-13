@@ -1,0 +1,8 @@
+---
+# Required, set by the including role:
+#   ufw_allowlist_port      port to open, e.g. "6443"
+#   ufw_allowlist_comment   ufw comment that marks the rules this call owns;
+#                           must be unique across the box's rules
+#   ufw_allowlist_sources   the addresses or ranges allowed to reach the port
+
+ufw_allowlist_proto: tcp

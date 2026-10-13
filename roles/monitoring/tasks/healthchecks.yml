@@ -1,0 +1,11 @@
+---
+# Healthchecks (ipni/infra, kubernetes/manifests/ap/sing1/healthchecks) listens
+# on host port 8000. Only Alertmanager on the hub sends to it; people reach the
+# UI over an SSH tunnel.
+- name: Allow the monitoring hub, and only the hub, to ping Healthchecks
+  ansible.builtin.include_role:
+    name: ufw_allowlist
+  vars:
+    ufw_allowlist_port: "8000"
+    ufw_allowlist_comment: healthchecks from hub
+    ufw_allowlist_sources: ["{{ hostvars[argocd_hub].ansible_host }}"]

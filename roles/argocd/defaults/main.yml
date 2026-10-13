@@ -1,0 +1,26 @@
+---
+# Argo CD's first install. After it, Argo CD manages itself from ipni/infra
+# (kubernetes/argocd/apps/argocd.yaml), which is where upgrades and settings
+# change. This role never touches the release again once it exists, so keep
+# the chart version here in step with that file only for new boxes.
+argocd_chart_repo: https://argoproj.github.io/argo-helm
+argocd_chart_version: 10.10.0
+
+# Helm, only for that first install, kept out of PATH.
+argocd_helm_version: v3.22.0
+argocd_helm_sha256: 1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
+argocd_helm_dir: "/usr/local/lib/ipfs-workers/helm-{{ argocd_helm_version }}"
+
+# Where Argo CD deploys from: the root Application created on first install
+# points here, and ipni/infra takes it from there.
+argocd_repo_url: git@github.com:ipni/infra.git
+argocd_repo_revision: main
+argocd_root_path: kubernetes/argocd/apps
+
+# While argocd_repo_url is private, Argo CD reads it with a deploy key: set
+# vault_argocd_repo_ssh_key in group_vars/ipfs_nodes/vault.yml. Once the repo
+# is public, leave it unset and Argo CD reads it anonymously.
+#
+# vault_argocd_age_key (same file) is Argo CD's age private key, which decrypts
+# the SOPS-encrypted Secrets in ipni/infra. Its public half is in that repo's
+# .sops.yaml.

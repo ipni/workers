@@ -1,0 +1,40 @@
+---
+# Open one port to an exact list of sources, and keep ufw in step with that
+# list in BOTH directions: a source dropped from the list loses its rule, so
+# the port never stays open to an address nobody asked for. Only rules carrying
+# ufw_allowlist_comment are considered, which is why it must be unique.
+#
+# The same approach as the Cloudflare allowlist in roles/route_origin, for the
+# ports roles/argocd and roles/monitoring open to a handful of addresses.
+
+- name: "Allow {{ ufw_allowlist_port }}/{{ ufw_allowlist_proto }} from each source ({{ ufw_allowlist_comment }})"
+  community.general.ufw:
+    rule: allow
+    proto: "{{ ufw_allowlist_proto }}"
+    port: "{{ ufw_allowlist_port }}"
+    from_ip: "{{ item }}"
+    comment: "{{ ufw_allowlist_comment }}"
+  loop: "{{ ufw_allowlist_sources }}"
+
+# `ufw status` prints each rule as `<port>/<proto>  ALLOW  <source>  # <comment>`.
+- name: "Read the {{ ufw_allowlist_comment }} rules currently in ufw"
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      ufw status | grep -F -- {{ ('# ' ~ ufw_allowlist_comment) | quote }} |
+      awk '{for (i = 1; i <= NF; i++) if ($i == "ALLOW") print $(i + 1)}'
+    executable: /bin/bash
+  register: ufw_allowlist_current
+  changed_when: false
+  check_mode: false
+  # grep exits 1 when there are no such rules yet, which is not an error.
+  failed_when: ufw_allowlist_current.rc not in [0, 1]
+
+- name: "Remove {{ ufw_allowlist_comment }} rules for sources no longer on the list"
+  community.general.ufw:
+    rule: allow
+    proto: "{{ ufw_allowlist_proto }}"
+    port: "{{ ufw_allowlist_port }}"
+    from_ip: "{{ item }}"
+    delete: true
+  loop: "{{ ufw_allowlist_current.stdout_lines | difference(ufw_allowlist_sources) }}"
