@@ -16,6 +16,7 @@ admin_user: ipni
 admin_pubkey_file:
   - "{{ playbook_dir }}/keys/takgn.pub"
   - "{{ playbook_dir }}/keys/nymd.pub"
+  - "{{ playbook_dir }}/keys/byo.pub"
   # Break-glass: only for when no operator key works. Its private half exists
   # only in 1Password (IPFS account, Compass vault); see AGENTS.md. Never
   # remove it without putting another emergency key in its place.

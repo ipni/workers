@@ -14,7 +14,7 @@ three at once is a full outage of that service.
 
 SSH is key-only as the hardened admin user `ipni`; root login is disabled and
 the provider KVM console is the out-of-band fallback. The keys that may sign in
-are the files in `keys/`, listed in `admin_pubkey_file` (takgn, nymd, the
+are the files in `keys/`, listed in `admin_pubkey_file` (takgn, nymd, byo, the
 break-glass key and CI's own key); the hardening role removes any other.
 
 ### Break-glass access
