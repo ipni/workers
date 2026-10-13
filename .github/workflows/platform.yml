@@ -4,9 +4,11 @@
 # monitoring"). The service playbooks still run from an operator's machine.
 #
 #   pull request   -> dry run (--check --diff) against the boxes
-#   merge to main  -> the real run, once approved in the `production`
+#   merge to main  -> the repo checks (ci.yml), then, only if they all pass,
+#                     the real run, once approved in the `production`
 #                     environment (required reviewers)
-#   manual         -> either, optionally limited to some boxes
+#   manual         -> either, optionally limited to some boxes; apply also
+#                     waits for the checks
 #
 # Pull requests from forks get no secrets and are skipped.
 name: platform
@@ -62,6 +64,16 @@ env:
   ANSIBLE_FORCE_COLOR: "true"
 
 jobs:
+  # The same checks as ci.yml (lint, syntax, manifests, generated files,
+  # shellcheck), for this commit. The apply needs them, so a commit that fails
+  # them is never offered for approval. They run a second time on a merge,
+  # alongside ci.yml's own run: jobs cannot wait on another workflow.
+  checks:
+    if: >-
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'apply')
+    uses: ./.github/workflows/ci.yml
+
   check:
     if: >-
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
@@ -88,6 +100,9 @@ jobs:
         run: scripts/ci-platform.sh check "$LIMIT"
 
   apply:
+    needs: checks
+    # No status function here, so GitHub adds success(): every job of the
+    # checks must have passed.
     if: >-
       (github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && inputs.mode == 'apply')
