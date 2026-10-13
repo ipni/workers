@@ -23,9 +23,14 @@
 
 # Under --check there is nothing to dry-run against yet: no Helm on the box, and
 # no Argo CD CRDs for the root Application. Say so instead.
+# The argocd namespace only exists once the Helm release does, so the Secrets
+# below cannot be dry-run either (the API server rejects them: namespace not
+# found). Say so instead, like route_origin's TLS secret.
 - name: Note that a first install is not dry-run
   ansible.builtin.debug:
-    msg: "Argo CD is not installed; a real run would install chart {{ argocd_chart_version }} and create the root Application."
+    msg: >-
+      Argo CD is not installed; a real run would install chart {{ argocd_chart_version }},
+      then its age key, the cluster and repository Secrets, and the root Application.
   when:
     - ansible_check_mode
     - not argocd_installed.stdout
@@ -97,6 +102,7 @@
         namespace: argocd
       data:
         keys.txt: "{{ vault_argocd_age_key | b64encode }}"
+  when: not (ansible_check_mode and not argocd_installed.stdout)
   no_log: true
 
 # One Secret per box, named after the box. ipni/infra targets boxes by these
@@ -140,6 +146,7 @@
   loop: "{{ argocd_clusters }}"
   loop_control:
     label: "{{ item.name }} {{ item.server }}"
+  when: not (ansible_check_mode and not argocd_installed.stdout)
   no_log: true
 
 - name: Give Argo CD read access to the infra repository
@@ -159,7 +166,9 @@
         type: "{{ 'git' | b64encode }}"
         url: "{{ argocd_repo_url | b64encode }}"
         sshPrivateKey: "{{ vault_argocd_repo_ssh_key | b64encode }}"
-  when: vault_argocd_repo_ssh_key is defined
+  when:
+    - vault_argocd_repo_ssh_key is defined
+    - not (ansible_check_mode and not argocd_installed.stdout)
   no_log: true
 
 # The hand-off: the root Application points Argo CD at ipni/infra, whose apps
