@@ -5,20 +5,25 @@
 # pinset section the role does not know about. Every one of those has gone
 # unnoticed here before, which is why this exists.
 #
-# The exception is platform.yml (Argo CD and the monitoring stack's firewall,
-# see the README), the only playbook that runs from CI:
+# The exception is the playbooks that run from CI: site.yml (the boxes' base:
+# packages, sysctls, SSH, firewall, k3s) and platform.yml (Argo CD and the
+# monitoring stack's firewall, see the README). For each of them:
 #
-#   pull request   -> the checks, then a dry run (--check --diff) of
-#                     platform.yml against the boxes if the PR touches it
-#   merge to main  -> the checks, then, if the merge touches platform.yml, a
-#                     dry run of the merged commit, then the real run, once a
-#                     required reviewer has read the dry run and approved it in
-#                     the `production` environment
+#   pull request   -> the checks, then a dry run (--check --diff) against the
+#                     boxes if the PR touches that playbook
+#   merge to main  -> the checks, then, if the merge touches it, a dry run of
+#                     the merged commit, then the real run, once a required
+#                     reviewer has read the dry run and approved it in the
+#                     `production` environment
 #   manual         -> the checks, plus optionally a dry run, or a dry run and
-#                     an apply, of platform.yml, limited to some boxes if wanted
+#                     an apply, of one playbook, limited to some boxes if wanted
+#
+# site.yml goes first: platform.yml relies on what it sets up, so when a merge
+# touches both, platform.yml's dry run starts only once site.yml's apply is
+# done, and shows what is left to change after it.
 #
 # One workflow, so a merge starts one run. Pull requests from forks get no
-# secrets: their platform.yml dry run is skipped.
+# secrets: their dry runs are skipped.
 name: ci
 
 on:
@@ -27,13 +32,18 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      platform:
-        description: "platform.yml: none, check (dry run) or apply"
+      playbook:
+        description: "Playbook to run against the boxes"
+        type: choice
+        options: [site, platform]
+        default: site
+      run:
+        description: "none (checks only), check (dry run) or apply (dry run, then the approved run)"
         type: choice
         options: [none, check, apply]
         default: none
       limit:
-        description: "platform.yml: boxes to run on (ansible --limit), empty for all"
+        description: "Boxes to run on (ansible --limit), empty for all"
         type: string
         default: ""
 
@@ -201,14 +211,16 @@ jobs:
           shellcheck scripts/*.sh
 
   # ---------------------------------------------------------------------------
-  # platform.yml
+  # Playbooks run from CI: site.yml, then platform.yml
   # ---------------------------------------------------------------------------
 
-  # Whether this run touches what platform.yml applies. On a pull request,
+  # Whether this run touches what each playbook applies. On a pull request,
   # against where the branch left main, so other merges to main do not count.
+  # A manual run picks its playbook itself.
   changes:
     runs-on: ubuntu-latest
     outputs:
+      site: ${{ steps.diff.outputs.site }}
       platform: ${{ steps.diff.outputs.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -218,44 +230,148 @@ jobs:
       - id: diff
         env:
           EVENT: ${{ github.event_name }}
+          PLAYBOOK: ${{ inputs.playbook }}
           RANGE: >-
             ${{ github.event_name == 'pull_request'
                 && format('{0}...{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha)
                 || format('{0}..{1}', github.event.before, github.sha) }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT" == workflow_dispatch || "$RANGE" == 0000000000000000000000000000000000000000..* ]]; then
-            platform=true
-          elif git diff --name-only "$RANGE" | grep -qE \
-              '^(platform\.yml|roles/(argocd|monitoring|ufw_allowlist)/|roles/route_origin/defaults/main\.yml|group_vars/|inventory/|scripts/ci-platform\.sh|\.github/workflows/ci\.yml)'; then
-            platform=true
-          else
-            platform=false
+          shared='group_vars/|inventory/|ansible\.cfg|scripts/ci-playbook\.sh|\.github/workflows/ci\.yml'
+          declare -A paths=(
+            [site]="^(site\.yml|roles/(common|hardening|k3s|storage)/|host_vars/|keys/|$shared)"
+            [platform]="^(platform\.yml|roles/(argocd|monitoring|ufw_allowlist)/|roles/route_origin/defaults/main\.yml|$shared)"
+          )
+          if [[ "$EVENT" != workflow_dispatch && "$RANGE" != 0000000000000000000000000000000000000000..* ]]; then
+            changed=$(git diff --name-only "$RANGE")
           fi
-          echo "platform=$platform" | tee -a "$GITHUB_OUTPUT"
+          for playbook in site platform; do
+            if [[ "$EVENT" == workflow_dispatch ]]; then
+              hit=$([[ "$PLAYBOOK" == "$playbook" ]] && echo true || echo false)
+            elif [[ "$RANGE" == 0000000000000000000000000000000000000000..* ]]; then
+              hit=true
+            elif grep -qE "${paths[$playbook]}" <<< "$changed"; then
+              hit=true
+            else
+              hit=false
+            fi
+            echo "$playbook=$hit" | tee -a "$GITHUB_OUTPUT"
+          done
 
-  # What platform.yml would change, for this exact commit: on a merge, this is
-  # what the approver reads before approving the apply below. It writes a
-  # summary on the run's page. Runs only once every check has passed.
-  platform-dry-run:
+  # --- site.yml --------------------------------------------------------------
+
+  # What site.yml would change, for this exact commit: on a merge, this is what
+  # the approver reads before approving the apply below. It writes a summary on
+  # the run's page. Runs only once every check has passed.
+  site-dry-run:
     needs: [ansible, manifests, generated, shell, changes]
     if: >-
-      needs.changes.outputs.platform == 'true' && (
+      needs.changes.outputs.site == 'true' && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
         github.event_name == 'push' ||
-        (github.event_name == 'workflow_dispatch' && inputs.platform != 'none'))
+        (github.event_name == 'workflow_dispatch' && inputs.run != 'none'))
     runs-on: ubuntu-latest
     # On a pull request, a newer push to the same branch replaces its dry run,
     # in a group of its own: GitHub keeps one pending run per group, so sharing
     # the apply's group would let a pull request cancel an apply waiting for
     # approval. On main (and manual runs) it queues with the apply in
-    # platform-main, so it never runs while an apply is changing the boxes.
+    # site-main, so it never runs while an apply is changing the boxes.
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('platform-check-{0}', github.ref) || 'platform-main' }}
+      group: ${{ github.event_name == 'pull_request' && format('site-check-{0}', github.ref) || 'site-main' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     env:
       # ansible.cfg sets the yaml callback, which no installed collection
       # provides here (see the manifests job).
+      ANSIBLE_STDOUT_CALLBACK: default
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Dry run site.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-playbook.sh site check "$LIMIT"
+
+  # Needs every check and the dry run of this same commit: a commit that fails
+  # either is never offered for approval. No status function in `if`, so
+  # GitHub adds success().
+  #
+  # site.yml can lock everyone out (sshd, ufw, the admin keys) or stop k3s, so
+  # besides the approval it rolls one box at a time (production_rollout), and
+  # after each box proves a fresh SSH login with sudo still works, every key in
+  # admin_pubkey_file is still installed and sshd's config is valid. The first
+  # box that fails any of that ends the run with the others untouched.
+  site-apply:
+    needs: [ansible, manifests, generated, shell, changes, site-dry-run]
+    if: >-
+      needs.changes.outputs.site == 'true' && (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.run == 'apply'))
+    runs-on: ubuntu-latest
+    # One at a time with main's dry runs, never cancelled half-way. A newer
+    # merge waiting behind replaces an older one still waiting for approval:
+    # the latest main wins, and its own dry run is the one the approver reads.
+    concurrency:
+      group: site-main
+      cancel-in-progress: false
+    # Required reviewers: nothing reaches the boxes until one approves.
+    environment: production
+    env:
+      ANSIBLE_STDOUT_CALLBACK: default
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Run site.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-playbook.sh site apply "$LIMIT"
+
+  # --- platform.yml ----------------------------------------------------------
+
+  # As site-dry-run, for platform.yml. It waits for site.yml in the same run:
+  # a failed or rejected site.yml stops it, since platform.yml relies on what
+  # site.yml sets up. Skipped is fine (nothing of site.yml's changed), and so
+  # is cancelled: with the run itself not cancelled (!cancelled()), that means
+  # a newer merge's site.yml took this one's place in site-main, and this
+  # merge's platform.yml change would otherwise never be applied. !cancelled()
+  # also means GitHub no longer adds success(), so every check is named.
+  platform-dry-run:
+    needs: [ansible, manifests, generated, shell, changes, site-dry-run, site-apply]
+    if: >-
+      !cancelled() &&
+      needs.ansible.result == 'success' && needs.manifests.result == 'success' &&
+      needs.generated.result == 'success' && needs.shell.result == 'success' &&
+      needs.changes.result == 'success' &&
+      contains(fromJSON('["success", "skipped", "cancelled"]'), needs.site-dry-run.result) &&
+      contains(fromJSON('["success", "skipped", "cancelled"]'), needs.site-apply.result) &&
+      needs.changes.outputs.platform == 'true' && (
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.run != 'none'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('platform-check-{0}', github.ref) || 'platform-main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
       ANSIBLE_STDOUT_CALLBACK: default
       ANSIBLE_FORCE_COLOR: "true"
     steps:
@@ -276,25 +392,20 @@ jobs:
           CLOUDFLARE_DNS_TOKEN: ${{ secrets.CLOUDFLARE_DNS_TOKEN }}
           ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
           LIMIT: ${{ inputs.limit }}
-        run: scripts/ci-platform.sh check "$LIMIT"
+        run: scripts/ci-playbook.sh platform check "$LIMIT"
 
-  # Needs every check and the dry run of this same commit: a commit that fails
-  # either is never offered for approval. No status function in `if`, so
-  # GitHub adds success().
+  # As site-apply, for platform.yml. Its dry run has already waited for
+  # site.yml, so this needs only that dry run; GitHub adds success().
   platform-apply:
     needs: [ansible, manifests, generated, shell, changes, platform-dry-run]
     if: >-
       needs.changes.outputs.platform == 'true' && (
         github.event_name == 'push' ||
-        (github.event_name == 'workflow_dispatch' && inputs.platform == 'apply'))
+        (github.event_name == 'workflow_dispatch' && inputs.run == 'apply'))
     runs-on: ubuntu-latest
-    # One at a time with main's dry runs, never cancelled half-way. A newer
-    # merge waiting behind replaces an older one still waiting for approval:
-    # the latest main wins, and its own dry run is the one the approver reads.
     concurrency:
       group: platform-main
       cancel-in-progress: false
-    # Required reviewers: nothing reaches the boxes until one approves.
     environment: production
     env:
       ANSIBLE_STDOUT_CALLBACK: default
@@ -317,4 +428,4 @@ jobs:
           CLOUDFLARE_DNS_TOKEN: ${{ secrets.CLOUDFLARE_DNS_TOKEN }}
           ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
           LIMIT: ${{ inputs.limit }}
-        run: scripts/ci-platform.sh apply "$LIMIT"
+        run: scripts/ci-playbook.sh platform apply "$LIMIT"

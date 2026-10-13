@@ -405,10 +405,14 @@
   changed_when: false
   failed_when: false
 
+# The local kubeconfig is for an operator's tunnel. CI sets
+# k3s_write_local_kubeconfig to false: a runner has no use for cluster-admin
+# credentials, and a file it never had would show as a change in every dry run.
 - name: Read the generated kubeconfig
   ansible.builtin.slurp:
     src: /etc/rancher/k3s/k3s.yaml
   register: kubeconfig_raw
+  when: k3s_write_local_kubeconfig | default(true) | bool
 
 - name: Ensure the local kubeconfig directory exists
   ansible.builtin.file:
@@ -418,6 +422,7 @@
   delegate_to: localhost
   become: false
   run_once: true
+  when: k3s_write_local_kubeconfig | default(true) | bool
 
 # The server URL is rewritten to localhost because access is via SSH tunnel:
 #   ssh -L 6443:127.0.0.1:6443 {{ admin_user }}@{{ ansible_host }}
@@ -453,3 +458,4 @@
     mode: "0600"
   delegate_to: localhost
   become: false
+  when: k3s_write_local_kubeconfig | default(true) | bool

@@ -60,9 +60,10 @@ carries no traffic. With it true, `routing.yml`, `bootstrap.yml`,
 additionally gates each needle instance on its warm-up: seconds when it
 restores its address book and routing table snapshots, up to an hour on a
 cold start (see "Capacity: four needle instances per box"). Every box is a whole site with no failover between them,
-so a simultaneous rollout in production is a full outage. `site.yml` is the
-exception: it is not serialised, so re-run it against a live fleet one box at
-a time with `-l`.
+so a simultaneous rollout in production is a full outage. `site.yml` has no
+warm-up, but it also goes one box at a time, and stops at the first box that
+fails or where the admin user can no longer get in (see "Running playbooks
+from CI").
 
 ## Accessing the clusters
 
@@ -1445,21 +1446,9 @@ for itself:
   ingest) from Cloudflare's edge and the other boxes, and 8000 on sing-1
   (`healthchecks_host`, the hub's dead-man's switch) from lith-1.
 
-**It runs from CI**, the only playbook that does; the others still run from an
-operator's machine. It is part of the repo's one workflow
-(`.github/workflows/ci.yml`), so a merge starts a single run:
-
-| When | What |
-|---|---|
-| Pull request touching it | the checks, then `--check --diff` against the boxes (forks get no secrets and are skipped) |
-| Merge to `main` touching it | the checks, then a dry run of the merged commit, then the real run, once a required reviewer has read the dry run and approved it in the `production` environment |
-| Actions → ci → Run workflow | the checks, plus `platform`: `check` (dry run) or `apply` (dry run, then the approved run), optionally `--limit`ed |
-
-Each dry run writes what it would change, per box and task, on the run's
-summary page; approve only if that is what you expect.
-
-"Touching it" means `platform.yml`, its roles (`argocd`, `monitoring`,
-`ufw_allowlist`), `group_vars/`, `inventory/`, `scripts/ci-platform.sh` or the
+**It runs from CI** (see "Running playbooks from CI"). "Touching it" means
+`platform.yml`, its roles (`argocd`, `monitoring`, `ufw_allowlist`),
+`group_vars/`, `inventory/`, `ansible.cfg`, `scripts/ci-playbook.sh` or the
 workflow itself. A `group_vars` change for another service therefore also
 offers an apply; with nothing of its own changed, it changes nothing.
 
@@ -1467,23 +1456,77 @@ It restarts nothing that serves traffic, so it runs every box in one batch: the
 hub registers the others using what they produced earlier in the same run.
 
 CI has no vault files, so `platform.yml`'s vault variables come from
-repository secrets (`scripts/ci-platform.sh` maps them), and it signs in with
-its own SSH key, `keys/github-actions.pub` in `admin_pubkey_file`. It only
-connects to the host keys pinned in `inventory/known_hosts`.
+repository secrets (`scripts/ci-playbook.sh` maps them):
 
 | Secret | Becomes |
 |---|---|
-| `ANSIBLE_SSH_PRIVATE_KEY` | CI's SSH key as the admin user |
 | `ARGOCD_AGE_KEY` | `vault_argocd_age_key`: Argo CD's age key (public half in ipni/infra's `.sops.yaml`) |
 | `CLOUDFLARE_DNS_TOKEN` | `vault_cloudflare_dns_token`: the same token cert-manager uses for WSS |
 | `ARGOCD_REPO_SSH_KEY` | `vault_argocd_repo_ssh_key`: optional, only while ipni/infra is private |
 
-Copies of all of them are in 1Password (IPFS account, Compass vault): GitHub
-cannot show them again. To revoke CI's access to the boxes, remove its line
-from `admin_pubkey_file` and re-run the hardening role.
-
 From an operator's machine it still works as usual, with the same variables
 in the vault: `ansible-playbook platform.yml --check --diff`.
+
+## Running playbooks from CI
+
+`site.yml` and `platform.yml` run from CI. The others (`routing.yml`,
+`bootstrap.yml`, `content.yml`, `k3s-upgrade.yml`) deliberately stay on an
+operator's machine for now: they need the vault (for `bootstrap.yml` and
+`content.yml` that includes permanent identity keys), and a `routing.yml` run
+takes about an hour per box. `routing.yml`, `content.yml` and `bootstrap.yml`
+are meant to move to Helm charts later, deployed by Argo CD like the monitoring
+stack, so CI is not given their secrets in the meantime. Both CI playbooks are
+part of the repo's one workflow
+(`.github/workflows/ci.yml`), so a merge starts a single run:
+
+| When | What |
+|---|---|
+| Pull request touching a playbook | the checks, then `--check --diff` of it against the boxes (forks get no secrets and are skipped) |
+| Merge to `main` touching a playbook | the checks, then a dry run of the merged commit, then the real run, once a required reviewer has read the dry run and approved it in the `production` environment |
+| Actions → ci → Run workflow | the checks, plus for the chosen `playbook`: `check` (dry run) or `apply` (dry run, then the approved run), optionally `--limit`ed |
+
+Each dry run writes what it would change, per box and task, on the run's
+summary page; approve only if that is what you expect. Each playbook needs its
+own approval. When a merge touches both, `site.yml` goes first, and
+`platform.yml`'s dry run starts only once `site.yml` is applied (and not at
+all if it failed or was rejected).
+
+On `main`, each playbook queues in its own concurrency group (`site-main`,
+`platform-main`): never two runs of one playbook at once, and a newer merge
+replaces an older one still waiting for approval, so the latest `main` is what
+gets applied. The two groups are separate, so a `site.yml` and a
+`platform.yml` apply from *different* merges can overlap; approve one at a
+time if that matters.
+
+CI signs in with its own SSH key, `keys/github-actions.pub` in
+`admin_pubkey_file` (secret `ANSIBLE_SSH_PRIVATE_KEY`), and only connects to
+the host keys pinned in `inventory/known_hosts`. Copies of every CI secret are
+in 1Password (IPFS account, Compass vault): GitHub cannot show them again. To
+revoke CI's access to the boxes, remove its line from `admin_pubkey_file` and
+re-run the hardening role.
+
+**site.yml.** "Touching it" means `site.yml`, its roles (`common`,
+`hardening`, `k3s`, `storage`), `group_vars/`, `host_vars/`, `keys/`,
+`inventory/`, `ansible.cfg`, `scripts/ci-playbook.sh` or the workflow. It needs
+no secrets beyond CI's SSH key. It can lock everyone out (sshd, ufw, the admin
+keys) or restart k3s, so:
+
+* CI only maintains boxes that are already hardened: it sets
+  `site_require_hardened`, and a box that does not accept the admin key fails
+  the run instead of falling back to root. Building a new box (bootstrap mode,
+  `vault_root_password`) stays an operator's job.
+* With `production_rollout` it goes one box at a time. After each box it
+  proves a fresh SSH login as the admin user with `sudo` still works, that
+  every key in `admin_pubkey_file` is still in `authorized_keys`, and that
+  `sshd -t` accepts the configuration sshd would load on its next start. The
+  first box that fails anything ends the run, leaving the others untouched.
+  These checks run with any `--tags`, and in dry runs too.
+* It does not run `apt upgrade` on a hardened box (`common_apt_upgrade`), so a
+  merge never pulls in a whole-system upgrade.
+
+If CI does lock itself out, an operator's key or the break-glass key (AGENTS.md)
+still gets in, unless the change removed those too, which the key check above
+stops after the first box.
 
 ## Secrets
 
@@ -1698,15 +1741,15 @@ scripts/fetch-upstream-entry.sh     fetch one upstream-recovered CID straight fr
 scripts/recover-upstream-pinset.sh  capture the upstream collab cluster's pinset as a follower (fetches no content)
 dns.txt                   Cloudflare-importable bootstrap DNS records (generated)
 dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities (generated)
-site.yml                  base preparation playbook
+site.yml                  base preparation playbook, run from CI
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
 platform.yml              Argo CD (first install) and the monitoring stack's prerequisites, run from CI
-scripts/ci-platform.sh    CI's wrapper for platform.yml: secrets to variables, SSH key, pinned host keys
+scripts/ci-playbook.sh    CI's wrapper for site.yml and platform.yml: secrets to variables, SSH key, pinned host keys
 inventory/known_hosts     the boxes' SSH host keys, pinned for CI
 keys/*.pub                the SSH keys allowed in as the admin user: takgn, nymd, byo, break-glass, CI (admin_pubkey_file)
 routing.yml               routing service playbook (needle + origin)
 bootstrap.yml             bootstrap node playbook (with cert-manager)
 content.yml               content cluster node playbook (deploy, load the pinset, wait for PINNED, summary)
-.github/workflows/ci.yml  drift checks (playbook syntax, lint, kustomize build, generated files, shellcheck), then platform.yml: dry run on PRs, approved run on merge
+.github/workflows/ci.yml  drift checks (playbook syntax, lint, kustomize build, generated files, shellcheck), then site.yml and platform.yml: dry run on PRs, approved run on merge
 .github/workflows/cloudflare-ranges.yml  weekly pinned-vs-published Cloudflare range check
 ```

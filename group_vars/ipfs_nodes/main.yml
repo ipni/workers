@@ -56,11 +56,11 @@ firewall_allowed_udp: []
 # true (production): one box at a time, and needle's rollout waits for each box
 # to rebuild the state a restart throws away before the next one is touched.
 #
-# This governs routing.yml, bootstrap.yml, content.yml and k3s-upgrade.yml, via
-# the `serial:` expression each of them carries. site.yml is deliberately left
-# out: it is the build-the-box playbook, and re-running it against a live fleet
-# is an -l-one-box-at-a-time job whatever this is set to. `rollout_serial`
-# overrides the batch size on its own if needed.
+# This governs site.yml, routing.yml, bootstrap.yml, content.yml and
+# k3s-upgrade.yml, via the `serial:` expression each of them carries. site.yml
+# has no warm-up to wait for, but it does touch sshd, ufw and k3s, so it goes
+# one box at a time and stops at the first box that fails or loses SSH access.
+# `rollout_serial` overrides the batch size on its own if needed.
 #
 # Every box is a whole site behind its own hostname with no failover between
 # them, so once these are the only boxes serving traffic, a simultaneous
