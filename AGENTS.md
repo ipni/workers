@@ -120,6 +120,15 @@ ansible-playbook routing.yml -l sing-1                  # one box
 ansible-playbook routing.yml                            # one box at a time, warmed (default)
 ```
 
+`site.yml` and `platform.yml` apply from CI: a merge that touches one gets a
+dry run on the run's summary page, then waits for a required reviewer to
+approve the real run in the `production` environment (README, "Running
+playbooks from CI"). Prefer that to running them from a controller, so what
+the boxes run is what is on `main`. site.yml also follows `production_rollout`:
+one box at a time, stopping at the first box that fails or loses admin SSH
+access. CI refuses to build a box (no root fallback), so a fresh box is still
+an operator's `site.yml -l <box>`.
+
 needle stays degraded for tens of minutes after a restart, long after the pod
 reports Ready — measured at 200 req/s: 11 minutes in, p95 2904 ms with 2937
 rejected lookups; by 69 minutes, p95 588–691 ms. That is what

@@ -7,12 +7,24 @@
 #
 # Safe to re-run: it detects whether hardening has already happened and picks
 # the right credentials automatically.
+#
+# With production_rollout (group_vars/ipfs_nodes/main.yml) it prepares one box
+# at a time and stops at the first box that fails, so a change that breaks SSH
+# or k3s takes down one site, not three. After each box it proves the admin
+# user can still get in and every listed key is still installed, before the
+# next box is touched. It also runs from CI (.github/workflows/ci.yml), which
+# sets site_require_hardened: CI only maintains boxes that are already built.
 
 - name: Detect which credentials work for each host
   hosts: ipfs_nodes
   gather_facts: false
   connection: local
   tags: always
+  vars:
+    # Interpreter discovery on this controller-side play would otherwise be
+    # cached as the BOX's interpreter, and the next play would look for, say,
+    # a Homebrew python on an Ubuntu box.
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
   tasks:
     - name: Probe key-based login as the admin user
       ansible.builtin.command:
@@ -42,6 +54,19 @@
         bootstrap_mode: false
       when: admin_probe.rc == 0
 
+    # CI has no root password and must never build a box: a hardened box that
+    # stops accepting the admin key is an incident to look at, not a reason
+    # to try root.
+    - name: Refuse to fall back to root when only hardened boxes are expected
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }}: key login as {{ admin_user }} failed
+          ({{ admin_probe.stderr | default('') | trim }}), and
+          site_require_hardened is set, so this run will not try root.
+      when:
+        - admin_probe.rc != 0
+        - site_require_hardened | default(false) | bool
+
     # no_log: set_fact echoes its arguments, so at -v or through any callback
     # plugin the vaulted root password would be printed in cleartext.
     - name: Fall back to root password auth on a freshly provisioned host
@@ -62,7 +87,20 @@
 - name: Prepare IPFS hosts
   hosts: ipfs_nodes
   gather_facts: true
-  any_errors_fatal: false   # one host failing must not abandon the other two
+  # serial is templated before any host is chosen, so inventory group_vars are
+  # not visible here: read production_rollout from its group_vars file
+  # directly. -e production_rollout and -e rollout_serial still override.
+  #
+  # One box per batch, and a batch whose only box fails ends the play, so the
+  # boxes after it are left untouched. With production_rollout false (building
+  # a fleet that carries no traffic) they all go at once, and one failing must
+  # not abandon the others.
+  serial: >-
+    {{ rollout_serial | default(1 if (production_rollout
+       | default((lookup('ansible.builtin.file', playbook_dir ~ '/group_vars/ipfs_nodes/main.yml')
+                  | from_yaml).production_rollout | default(false)) | bool)
+       else (groups['ipfs_nodes'] | length)) }}
+  any_errors_fatal: false
   roles:
     - role: common
       tags: [common, base]
@@ -74,6 +112,78 @@
       tags: [k3s, kubernetes]
 
   post_tasks:
+    # The hardening role checks access while it runs; these check it once the
+    # whole box is done, whatever --tags ran, and before the next box starts.
+    # A failure here fails this box's batch, which ends the run.
+    - name: Prove a fresh SSH login as the admin user still works, with sudo
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=10
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - PasswordAuthentication=no
+          # A new connection, not one multiplexed over a socket opened before
+          # sshd changed.
+          - -o
+          - ControlMaster=no
+          - -o
+          - ControlPath=none
+          - -p
+          - "{{ ssh_port }}"
+          - "{{ admin_user }}@{{ hostvars[inventory_hostname].ansible_host }}"
+          - "sudo -n true && echo SITE_ACCESS_OK"
+      delegate_to: localhost
+      become: false
+      register: site_access
+      check_mode: false
+      changed_when: false
+      retries: 3
+      delay: 5
+      until: "'SITE_ACCESS_OK' in (site_access.stdout | default(''))"
+      failed_when: "'SITE_ACCESS_OK' not in (site_access.stdout | default(''))"
+      tags: always
+
+    # The login above is whoever runs this (CI's key, in CI). Every other key
+    # in admin_pubkey_file must still be there too, or the run that kept CI in
+    # has locked an operator - or the break-glass key - out.
+    - name: Read the admin user's authorized keys
+      ansible.builtin.slurp:
+        src: "/home/{{ admin_user }}/.ssh/authorized_keys"
+      register: site_authorized_keys
+      check_mode: false
+      tags: always
+
+    - name: Check every key in admin_pubkey_file is still authorized
+      vars:
+        installed: >-
+          {{ (site_authorized_keys.content | b64decode).splitlines()
+             | map('split') | select | map(attribute=1) | list }}
+        pubkey_files: "{{ [admin_pubkey_file] if admin_pubkey_file is string else admin_pubkey_file }}"
+        expected: >-
+          {{ query('ansible.builtin.file', *pubkey_files)
+             | map('split') | map(attribute=1) | list }}
+      ansible.builtin.assert:
+        that: expected | difference(installed) | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: {{ expected | difference(installed) | length }}
+          key(s) in admin_pubkey_file are not in authorized_keys.
+        quiet: true
+      tags: always
+
+    # sshd only reads its configuration on a restart. A broken one would not
+    # show until the next reboot, when it would lock everyone out at once.
+    - name: Check the sshd configuration sshd would load on its next start
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -t]
+      check_mode: false
+      changed_when: false
+      tags: always
+
     # Read live state rather than ansible_mounts: facts are cached for an hour
     # (see ansible.cfg), so a cached fact set gathered before the data volume
     # existed would report it missing on a later run.

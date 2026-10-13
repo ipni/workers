@@ -23,10 +23,13 @@
   when: current_tz.stdout | trim != 'UTC'
   changed_when: true
 
+# Refreshing the package lists changes nothing installed. Reported as a change,
+# it would be one on every run, and in every dry run an approver reads.
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
+  changed_when: false
 
 # Gated: see common_apt_upgrade in defaults/main.yml for why this does not run
 # unprompted on a box that is already carrying traffic.
