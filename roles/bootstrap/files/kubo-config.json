@@ -194,8 +194,8 @@
     ],
     "ConnMgr": {
       "GracePeriod": "1m",
-      "HighWater": 8000,
-      "LowWater": 4000,
+      "HighWater": 32000,
+      "LowWater": 16000,
       "Type": "basic"
     },
     "DisableBandwidthMetrics": false,
@@ -206,7 +206,7 @@
     },
     "ResourceMgr": {
       "Enabled": true,
-      "MaxFileDescriptors": 65536,
+      "MaxFileDescriptors": 131072,
       "MaxMemory": "8GiB"
     },
     "Transports": {
