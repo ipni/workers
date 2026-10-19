@@ -1124,6 +1124,7 @@ ansible-playbook content.yml --check --diff   # dry run: reads DNSLink and the p
 |------|----------|----------|
 | 4101 tcp+udp | kubo libp2p (TCP, QUIC, WebTransport, WebRTC-direct) | public |
 | 5021 | kubo RPC API | loopback |
+| 8888 | ipfs-cluster Prometheus metrics (scraped through ipni/infra's metrics proxy) | loopback |
 | 9094 | ipfs-cluster REST API | loopback |
 | 9095 | ipfs-cluster IPFS proxy | loopback |
 | 9096 tcp | ipfs-cluster swarm | the other two boxes only (ufw), and the cluster secret |

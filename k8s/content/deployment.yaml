@@ -5,7 +5,7 @@ metadata:
   name: content
 spec:
   replicas: 1
-  # hostNetwork binds 4101/5021/9094-9096 on the node, so a second pod cannot
+  # hostNetwork binds 4101/5021/8888/9094-9096 on the node, so a second pod cannot
   # start while the old one holds them; Recreate stops the old pod first.
   strategy:
     type: Recreate
@@ -263,6 +263,14 @@ spec:
             - name: CLUSTER_PINSVCAPI_BASICAUTHCREDENTIALS
               valueFrom:
                 secretKeyRef: { name: content-cluster, key: pinsvc-credentials }
+            # Prometheus metrics (pins, pins in error, pin queue) on loopback,
+            # scraped through the metrics proxy in ipni/infra
+            # (kubernetes/platform/metrics-proxy). 8888 is reserved in
+            # group_vars/ipfs_nodes/main.yml.
+            - name: CLUSTER_METRICS_ENABLESTATS
+              value: "true"
+            - name: CLUSTER_METRICS_PROMETHEUSENDPOINT
+              value: /ip4/127.0.0.1/tcp/8888
           ports:
             # roles/content opens 9096/tcp in ufw, to the other boxes only.
             - name: cluster-swarm
