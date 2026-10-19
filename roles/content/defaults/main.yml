@@ -3,6 +3,7 @@
 # net.ipv4.ip_local_reserved_ports in group_vars/ipfs_nodes/main.yml.
 content_kubo_swarm_port: 4101     # public, TCP + UDP
 content_kubo_api_port: 5021       # loopback
+content_cluster_metrics_port: 8888  # loopback (Prometheus metrics)
 content_cluster_api_port: 9094    # loopback (REST API)
 content_cluster_swarm_port: 9096  # TCP, the other boxes only
 content_pinsvc_port: 9097         # loopback (Pinning Service API, behind Envoy)
