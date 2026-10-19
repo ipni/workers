@@ -80,12 +80,16 @@ spec:
                 ipfs repo migrate
                 ipfs config replace - < /config/config-nokey.json
               fi
+              # Resource manager limits that kubo would otherwise derive (see
+              # roles/content); kubo reads this file from the repo at start.
+              cat /config/libp2p-resource-limit-overrides.json > "$IPFS_PATH/libp2p-resource-limit-overrides.json"
               actual="$(ipfs config Identity.PeerID)"
               if [ "$actual" != "$expected" ]; then
                 echo "IDENTITY MISMATCH: repo has $actual, expected $expected - refusing to start" >&2
                 exit 1
               fi
               echo "identity OK: $actual; Provide.Strategy=$(ipfs config Provide.Strategy)"
+              echo "resource manager overrides: $(tr -d ' \n' < "$IPFS_PATH/libp2p-resource-limit-overrides.json")"
           env:
             - name: IPFS_PATH
               value: /repo/ipfs
@@ -116,8 +120,9 @@ spec:
               value: /repo/ipfs
             - name: HOME
               value: /tmp
+            # Matches Swarm.ResourceMgr.MaxFileDescriptors (roles/content).
             - name: IPFS_FD_MAX
-              value: "65536"
+              value: "131072"
             # Soft heap target below the 8Gi limit.
             - name: GOMEMLIMIT
               value: 6GiB

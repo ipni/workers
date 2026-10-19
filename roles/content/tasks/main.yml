@@ -139,6 +139,18 @@
 #     off - no dependency on Shipyard-operated services.
 #   Addresses.Gateway null - no HTTP gateway. API on 127.0.0.1:5021, swarm 4101.
 #   Datastore.StorageMax 90GB - only the GC threshold (GC is not enabled).
+#   Swarm.ConnMgr 600/200 - what this node really uses (about 300 conns).
+#   Resource manager: System.ConnsInbound 65536, set in
+#     files/libp2p-resource-limit-overrides.json (kubo dropped
+#     Swarm.ResourceMgr.Limits; this file in the repo replaced it). Left to
+#     kubo it is the larger of MaxMemory in MiB (4096) and 2 x HighWater
+#     (1200). kubo 0.43.1 leaks inbound TCP connection reservations: on
+#     2026-10-19 every box held all 4096 slots and ~4100 FD slots for ~150
+#     live inbound conns, so it refused new peers while ConnMgr, below
+#     HighWater, had nothing to trim. A leaked slot is accounting only (no
+#     socket, no memory) and a restart clears them, so the limit is headroom
+#     until restarts, not capacity. MaxFileDescriptors 131072 (and
+#     IPFS_FD_MAX) for the same reason: each leaked slot also holds an FD.
 - name: Build this box's kubo config
   vars:
     base: "{{ lookup('ansible.builtin.file', role_path ~ '/files/kubo-config.json') | from_json }}"
@@ -210,6 +222,9 @@
           {{ content_kubo_config | combine({'Identity': {'PeerID': content_kubo_peer_id}})
              | to_nice_json | b64encode }}
         peer-id: "{{ content_kubo_peer_id | b64encode }}"
+        libp2p-resource-limit-overrides.json: >-
+          {{ lookup('ansible.builtin.file', role_path ~ '/files/libp2p-resource-limit-overrides.json')
+             | from_json | to_nice_json | b64encode }}
   no_log: true
   register: content_kubo_secret
   # On a first --check the namespace is only simulated and a dry-run secret
@@ -335,6 +350,25 @@
   changed_when: false
   register: content_kubo_config_diff
   failed_when: content_kubo_config_diff.rc != 0
+  when: not ansible_check_mode
+
+# The overrides file is read only at start; prove the running node uses it.
+- name: Read the running kubo's resource manager limits
+  ansible.builtin.command:
+    argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --, ipfs, swarm, resources, --enc=json]
+  register: content_kubo_resources
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Fail unless the resource manager limits match the overrides
+  vars:
+    want: "{{ lookup('ansible.builtin.file', role_path ~ '/files/libp2p-resource-limit-overrides.json') | from_json }}"
+    live: "{{ (content_kubo_resources.stdout | from_json).System }}"
+  ansible.builtin.assert:
+    that:
+      - live.ConnsInbound | int == want.System.ConnsInbound | int
+    fail_msg: "System.ConnsInbound is {{ live.ConnsInbound }}, want {{ want.System.ConnsInbound }}"
+    quiet: true
   when: not ansible_check_mode
 
 - name: Fail unless the cluster peer runs the vaulted identity and sees kubo
