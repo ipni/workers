@@ -127,6 +127,23 @@
 # kubo config. Base settings are committed in files/kubo-config.json (no
 # secrets); each instance adds its identity from the vault, its ports, the
 # bootstrap list, and permanent peering with every instance on the OTHER boxes.
+#
+# Resource manager: System.ConnsInbound 262144, set in
+# files/libp2p-resource-limit-overrides.json (kubo dropped
+# Swarm.ResourceMgr.Limits; this file in the repo replaced it). Left to kubo it
+# is the larger of MaxMemory in MiB (8192) and 2 x ConnMgr.HighWater (64000).
+# kubo 0.43.1 leaks inbound TCP/WS connection reservations: in the three days
+# after the 2026-10-16 restart each instance gained 5,400-9,000 inbound slots
+# more than its live inbound connections (24,619 against 15,632 on sing-1),
+# about 2,000-3,200 a day. A leaked slot is accounting only (no socket, no
+# memory) and a restart clears them, so the limit is headroom until the next
+# restart, not capacity: (262144 - ~16000 live) / 3,200 a day is about 75 days.
+# Real connections stay capped by ConnMgr (32000/16000, which also keeps the
+# derived 64000 as the fallback if the overrides file is ever missing).
+# MaxFileDescriptors 524288 (and IPFS_FD_MAX) because each leaked slot also
+# holds an FD slot: 2 x ConnsInbound, as before. These are caps, not use (real
+# FDs are about the live TCP connections); the rlimits of chic-1's two
+# instances and content together are about 1.2M, under fs.file-max 2097152.
 # ---------------------------------------------------------------------------
 - name: "Build the kubo config for {{ bootstrap_namespace }}"
   vars:
@@ -406,6 +423,9 @@
         # For probes and CLI calls (kubo's --api-auth). Exposed to the kubo
         # container as $KUBO_API_AUTH.
         api-auth: "{{ ('bearer:' ~ bootstrap_instance_api_token) | b64encode }}"
+        libp2p-resource-limit-overrides.json: >-
+          {{ lookup('ansible.builtin.file', role_path ~ '/files/libp2p-resource-limit-overrides.json')
+             | from_json | to_nice_json | b64encode }}
   no_log: true
   register: bootstrap_secret
   # On a first --check the namespace is only simulated and a dry-run secret
@@ -473,6 +493,34 @@
       {{ bootstrap_namespace }} check failed. ID={{ node.ID }} agent={{ node.AgentVersion }}
       protocols={{ node.Protocols }} addresses={{ node.Addresses }}
     success_msg: "{{ bootstrap_namespace }} {{ node.ID }} ({{ node.AgentVersion }}) advertising {{ node.Addresses | length }} addresses"
+  when: not ansible_check_mode
+
+# The overrides file is read only at start; prove the running node uses it, and
+# the FD limit from the config.
+- name: "Read the resource manager limits {{ bootstrap_namespace }} runs with"
+  ansible.builtin.command:
+    argv: [k3s, kubectl, "--namespace={{ bootstrap_namespace }}", exec, deploy/bootstrap, -c, kubo, --,
+           sh, -c, 'exec ipfs --api={{ bootstrap_api }} --api-auth="$KUBO_API_AUTH" swarm resources --enc=json']
+  register: bootstrap_resources
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Fail unless the resource manager limits match the overrides and the config
+  vars:
+    want: "{{ lookup('ansible.builtin.file', role_path ~ '/files/libp2p-resource-limit-overrides.json') | from_json }}"
+    want_fd: "{{ bootstrap_kubo_config.Swarm.ResourceMgr.MaxFileDescriptors }}"
+    live: "{{ (bootstrap_resources.stdout | from_json).System }}"
+  ansible.builtin.assert:
+    that:
+      - live.ConnsInbound | int == want.System.ConnsInbound | int
+      - live.FD | int == want_fd | int
+    fail_msg: >-
+      {{ bootstrap_namespace }}: System.ConnsInbound is {{ live.ConnsInbound }}, want {{ want.System.ConnsInbound }};
+      System.FD is {{ live.FD }}, want {{ want_fd }}
+    success_msg: >-
+      {{ bootstrap_namespace }}: System.ConnsInbound {{ live.ConnsInbound }} ({{ live.ConnsInboundUsage }} in use),
+      FD {{ live.FD }} ({{ live.FDUsage }} in use)
+    quiet: false
   when: not ansible_check_mode
 
 # From the controller, as a client would: the public WSS port must present a

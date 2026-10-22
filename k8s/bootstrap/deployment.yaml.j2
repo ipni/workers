@@ -84,12 +84,16 @@ spec:
                 ipfs repo migrate
                 ipfs config replace - < /config/config-nokey.json
               fi
+              # Resource manager limits that kubo would otherwise derive (see
+              # roles/bootstrap); kubo reads this file from the repo at start.
+              cat /config/libp2p-resource-limit-overrides.json > "$IPFS_PATH/libp2p-resource-limit-overrides.json"
               actual="$(ipfs config Identity.PeerID)"
               if [ "$actual" != "$expected" ]; then
                 echo "IDENTITY MISMATCH: repo has $actual, expected $expected - refusing to start" >&2
                 exit 1
               fi
               echo "identity OK: $actual"
+              echo "resource manager overrides: $(tr -d ' \n' < "$IPFS_PATH/libp2p-resource-limit-overrides.json")"
           env:
             - name: IPFS_PATH
               value: /data/ipfs
@@ -121,8 +125,11 @@ spec:
             - name: HOME
               value: /tmp
             # kubo raises its own fd soft limit only to 8192 unless told.
+            # Matches Swarm.ResourceMgr.MaxFileDescriptors (roles/bootstrap),
+            # so the resource manager refuses a connection before an open
+            # would fail with EMFILE.
             - name: IPFS_FD_MAX
-              value: "65536"
+              value: "524288"
             # Soft heap target below the 16Gi limit; the libp2p resource
             # manager is capped separately at 8GiB in the kubo config.
             - name: GOMEMLIMIT
