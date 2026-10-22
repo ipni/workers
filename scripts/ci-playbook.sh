@@ -81,4 +81,14 @@ ansible-playbook "${args[@]}" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 set -e
 python3 scripts/ci-summary.py "$playbook" "$mode" "$log" "$status" >> "$GITHUB_STEP_SUMMARY"
+
+# Whether the dry run would change anything (any `changed=` above 0 in the
+# PLAY RECAP). On a merge, the apply jobs are skipped when it would not.
+if [[ $mode == check && -n ${GITHUB_OUTPUT:-} ]]; then
+  if sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -qE '^[^ ]+ +: ok=[0-9]+ +changed=[1-9]'; then
+    echo "changes=true" >> "$GITHUB_OUTPUT"
+  else
+    echo "changes=false" >> "$GITHUB_OUTPUT"
+  fi
+fi
 exit "$status"

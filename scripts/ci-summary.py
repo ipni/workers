@@ -98,7 +98,10 @@ if changes:
             print(f"{more} more lines in this job's log.\n")
         print("</details>\n")
 elif status == 0:
-    print("Nothing would change on the boxes.\n" if check else "Nothing changed on the boxes.\n")
+    if check:
+        print("Nothing would change on the boxes, so on a merge the apply is skipped.\n")
+    else:
+        print("Nothing changed on the boxes.\n")
 
 if recap:
     print("<details><summary>PLAY RECAP</summary>\n\n```\n" + "\n".join(recap) + "\n```\n</details>\n")
