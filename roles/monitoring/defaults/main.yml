@@ -4,5 +4,5 @@
 # Alloy next to their old agents while they move off grafana.ipni.io
 # (ipni/infra#166, #188).
 monitoring_ingest_extra_sources:
-  - 103.232.206.165  # sf (debian-ipni-fmt-2)
-  - 103.232.206.162  # sf2 (debian-ipni-fmt-1)
+  - 103.232.206.165  # sf
+  - 103.232.206.162  # sf2
