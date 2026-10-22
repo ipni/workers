@@ -227,17 +227,23 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Also writes "What this run does" to the run's summary page: for each
+      # playbook, the files that made this run touch it, and whether it gets a
+      # dry run, an apply or nothing. Skipped jobs on the run page say no more.
       - id: diff
         env:
           EVENT: ${{ github.event_name }}
           PLAYBOOK: ${{ inputs.playbook }}
+          RUN: ${{ inputs.run }}
+          LIMIT: ${{ inputs.limit }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
           RANGE: >-
             ${{ github.event_name == 'pull_request'
                 && format('{0}...{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha)
                 || format('{0}..{1}', github.event.before, github.sha) }}
         run: |
           set -euo pipefail
-          shared='group_vars/|inventory/|ansible\.cfg|scripts/ci-playbook\.sh|\.github/workflows/ci\.yml'
+          shared='group_vars/|inventory/|ansible\.cfg|scripts/ci-(playbook\.sh|summary\.py)|\.github/workflows/ci\.yml'
           declare -A paths=(
             [site]="^(site\.yml|roles/(common|hardening|k3s|storage)/|host_vars/|keys/|$shared)"
             [platform]="^(platform\.yml|roles/(argocd|monitoring|ufw_allowlist)/|roles/route_origin/defaults/main\.yml|$shared)"
@@ -245,6 +251,7 @@ jobs:
           if [[ "$EVENT" != workflow_dispatch && "$RANGE" != 0000000000000000000000000000000000000000..* ]]; then
             changed=$(git diff --name-only "$RANGE")
           fi
+          rows=""
           for playbook in site platform; do
             if [[ "$EVENT" == workflow_dispatch ]]; then
               hit=$([[ "$PLAYBOOK" == "$playbook" ]] && echo true || echo false)
@@ -256,7 +263,47 @@ jobs:
               hit=false
             fi
             echo "$playbook=$hit" | tee -a "$GITHUB_OUTPUT"
+
+            if [[ "$EVENT" == workflow_dispatch ]]; then
+              why=$([[ "$hit" == true ]] && echo "Chosen in a manual run" || echo "Not chosen")
+            elif [[ "$RANGE" == 0000000000000000000000000000000000000000..* ]]; then
+              why="First push of the branch: everything"
+            else
+              files=$(grep -E "${paths[$playbook]}" <<< "${changed:-}" || true)
+              why=$(head -n 10 <<< "$files" | awk 'NF { printf "%s`%s`", (n++ ? "<br>" : ""), $0 }')
+              count=$(grep -c . <<< "$files" || true)
+              if (( count > 10 )); then why+="<br>and $(( count - 10 )) more"; fi
+              if [[ -z "$why" ]]; then why="None"; fi
+            fi
+            if [[ "$hit" != true ]]; then
+              does="Nothing"
+            elif [[ "$EVENT" == pull_request && "$FORK" == true ]]; then
+              does="Nothing: pull requests from forks get no secrets"
+            elif [[ "$EVENT" == pull_request ]]; then
+              does="Dry run only. Nothing is applied from a pull request"
+            elif [[ "$EVENT" == push ]]; then
+              does="Dry run, then **the apply, once a required reviewer approves it** in \`production\`"
+            elif [[ "$RUN" == check ]]; then
+              does="Dry run only"
+            elif [[ "$RUN" == apply ]]; then
+              does="Dry run, then **the apply, once a required reviewer approves it** in \`production\`"
+            else
+              does="Nothing: checks only (run: none)"
+            fi
+            [[ "$hit" == true && -n "$LIMIT" ]] && does+=", limited to \`$LIMIT\`"
+            rows+="| \`$playbook.yml\` | $why | $does |"$'\n'
           done
+
+          {
+            echo "### What this run does"
+            echo
+            echo "| Playbook | Changed files it applies | This run |"
+            echo "|---|---|---|"
+            printf '%s' "$rows"
+            echo
+            echo "Dry runs start once every check has passed, and site.yml goes before platform.yml."
+            echo "Each dry run's summary below lists exactly what it would change."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # --- site.yml --------------------------------------------------------------
 

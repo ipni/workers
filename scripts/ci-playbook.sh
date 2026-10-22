@@ -66,51 +66,19 @@ args=("$playbook.yml" -e "@$secrets")
 [[ $mode == check ]] && args+=(--check --diff)
 [[ -n $limit ]] && args+=(--limit "$limit")
 
-if [[ $mode == apply || -z ${GITHUB_STEP_SUMMARY:-} ]]; then
+if [[ -z ${GITHUB_STEP_SUMMARY:-} ]]; then
   ansible-playbook "${args[@]}"
   exit
 fi
 
-# A dry run in CI also writes what it would change to the run's summary page:
-# on a merge, that is what the approver reads before approving the apply.
+# In CI, both modes also write what they change to the run's summary page:
+# each box, task, loop item and diff. On a merge, the dry run's summary is what
+# the approver reads before approving the apply; the apply's says what it did.
 log=$(mktemp)
 trap 'rm -f "$secrets" "$log"' EXIT
 set +e
 ansible-playbook "${args[@]}" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 set -e
-python3 - "$playbook" "$log" "$status" >> "$GITHUB_STEP_SUMMARY" <<'PY'
-import collections, re, sys
-playbook, log, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
-ansi = re.compile(r"\x1b\[[0-9;]*m")
-lines = [ansi.sub("", l.rstrip("\n")) for l in open(log, errors="replace")]
-task, changes, failures, recap, in_recap = "", collections.OrderedDict(), [], [], False
-for line in lines:
-    if m := re.match(r"TASK \[(.*)\]", line):
-        task = m.group(1)
-    elif m := re.match(r"changed: \[([^\]]+)\]", line):
-        changes.setdefault((m.group(1).split(" -> ")[0], task), 0)
-        changes[(m.group(1).split(" -> ")[0], task)] += 1
-    elif m := re.match(r"fatal: \[([^\]]+)\]", line):
-        failures.append(f"{m.group(1)}: {task}")
-    elif line.startswith("PLAY RECAP"):
-        in_recap = True
-    elif in_recap:
-        if not line.strip():
-            in_recap = False
-        else:
-            recap.append(line)
-print(f"### {playbook}.yml dry run (`--check --diff`)\n")
-if failures:
-    print("**Failed:** " + "; ".join(failures) + "\n")
-if changes:
-    print("Would change (approve only if this is what you expect):\n")
-    print("| Box | Task | Changes |\n|---|---|---|")
-    for (host, name), n in changes.items():
-        print(f"| {host} | {name} | {n} |")
-elif status == 0:
-    print("Nothing would change on the boxes.")
-print("\n<details><summary>PLAY RECAP</summary>\n\n```\n" + "\n".join(recap) + "\n```\n</details>\n")
-print("Full output, including the diffs: this job's log.")
-PY
+python3 scripts/ci-summary.py "$playbook" "$mode" "$log" "$status" >> "$GITHUB_STEP_SUMMARY"
 exit "$status"
