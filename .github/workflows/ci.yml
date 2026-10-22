@@ -395,10 +395,15 @@ jobs:
         run: scripts/ci-playbook.sh platform check "$LIMIT"
 
   # As site-apply, for platform.yml. Its dry run has already waited for
-  # site.yml, so this needs only that dry run; GitHub adds success().
+  # site.yml, so this needs only that dry run. Not GitHub's implicit
+  # success(): that also counts the dry run's own needs, and site-dry-run and
+  # site-apply are skipped on every merge that leaves site.yml alone, which
+  # skipped this job too. !cancelled() and the dry run's result instead.
   platform-apply:
     needs: [ansible, manifests, generated, shell, changes, platform-dry-run]
     if: >-
+      !cancelled() &&
+      needs.platform-dry-run.result == 'success' &&
       needs.changes.outputs.platform == 'true' && (
         github.event_name == 'push' ||
         (github.event_name == 'workflow_dispatch' && inputs.run == 'apply'))
