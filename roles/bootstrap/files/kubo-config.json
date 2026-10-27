@@ -206,7 +206,7 @@
     },
     "ResourceMgr": {
       "Enabled": true,
-      "MaxFileDescriptors": 131072,
+      "MaxFileDescriptors": 524288,
       "MaxMemory": "8GiB"
     },
     "Transports": {
