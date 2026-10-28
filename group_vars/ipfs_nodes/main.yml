@@ -141,6 +141,9 @@ sysctl_tuning:
   #   ipni/infra kubernetes/platform/node-exporter)
   #   9810 metrics proxy (Traefik), 9811 its ping (every box, host network:
   #   ipni/infra kubernetes/platform/metrics-proxy/values.yaml)
+  #   4317-4318 trace collector OTLP gRPC and HTTP, 9812 its HTTP server
+  #   (loopback, every box, host network: ipni/infra
+  #   kubernetes/platform/alloy-traces/values.yaml)
   #   8472/udp flannel VXLAN
   #   8888 content ipfs-cluster Prometheus metrics (loopback; reserved ahead of
   #   enabling them in k8s/content, scraped through the metrics proxy)
@@ -152,7 +155,7 @@ sysctl_tuning:
   #   9901 route-origin Envoy admin  9902 bootstrap-wss Envoy admin
   #   9903 bootstrap-b's bootstrap-wss Envoy admin
   #   10010 containerd  10248-10259 kubelet/kube-proxy/k3s
-  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4011-4012,4101,4443,4453,5011-5012,5021,6443-6444,8000,8190-8193,8443,8472,8888,9094-9097,9100,9443,9800-9801,9810-9811,9901-9904,10010,10248-10259"
+  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4011-4012,4101,4317-4318,4443,4453,5011-5012,5021,6443-6444,8000,8190-8193,8443,8472,8888,9094-9097,9100,9443,9800-9801,9810-9812,9901-9904,10010,10248-10259"
   net.ipv4.tcp_fin_timeout: 15
   # Must equal what k3s's kube-proxy sets on every start: max(32768 * CPUs,
   # 131072), i.e. 1048576 on these 32-core boxes. A fixed lower value both
