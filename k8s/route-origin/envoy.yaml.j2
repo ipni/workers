@@ -78,6 +78,44 @@ static_resources:
                 common_http_protocol_options:
                   idle_timeout: 300s
                   headers_with_underscores_action: REJECT_REQUEST
+                # Traces (ipni/infra#163), to the trace collector on the box's
+                # loopback (ipni/infra kubernetes/platform/alloy-traces,
+                # 127.0.0.1:4317), which turns them into latency metrics, keeps
+                # the failed and slow ones and a tenth of the rest, and sends
+                # those to Tempo on lith-1. 5% of requests: ~7 traces/s per box
+                # at the fleet's ~424 req/s. Each trace is Envoy's span for the
+                # request and, with spawn_upstream_span, one for the call to
+                # needle (which instance, how long). The span names are the
+                # route decorators below, never the path: a path carries a CID,
+                # and every span name becomes a metric series. needle does not
+                # join these traces yet: v1.0.0 drops the traceparent Envoy
+                # sends (NEEDLE_TRACING_AUTH is unset), and its own sampling
+                # never fires (ipni/infra#163).
+                #
+                # Only this sampling decides. A client cannot ask to be traced:
+                # client_sampling ignores x-client-trace-id, and the early
+                # header mutation drops a traceparent or tracestate from the
+                # request before Envoy reads it, so an outside trace cannot
+                # be continued (or force a sample) here either.
+                tracing:
+                  random_sampling: { value: 5 }
+                  client_sampling: { value: 0 }
+                  spawn_upstream_span: true
+                  provider:
+                    name: envoy.tracers.opentelemetry
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.config.trace.v3.OpenTelemetryConfig
+                      service_name: route-origin
+                      grpc_service:
+                        envoy_grpc: { cluster_name: otel_collector }
+                        timeout: 1s
+                early_header_mutation_extensions:
+                  - name: envoy.http.early_header_mutation.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.http.early_header_mutation.header_mutation.v3.HeaderMutation
+                      mutations:
+                        - remove: traceparent
+                        - remove: tracestate
                 access_log:
                   - name: envoy.access_loggers.stdout
                     typed_config:
@@ -100,6 +138,10 @@ static_resources:
                           # instance after a rollout looks exactly like a slow
                           # box until you can group by this.
                           upstream: "%UPSTREAM_HOST%"
+                          # The request's trace in Tempo; Grafana's Loki data
+                          # source links it. Set on every request, but only
+                          # the sampled ones (see tracing above) are stored.
+                          trace_id: "%TRACE_ID%"
                 http_filters:
                   # Per-box backstop behind Cloudflare's own rate limiting rule.
                   # No bucket is configured here: it only acts on routes that
@@ -156,6 +198,7 @@ static_resources:
                           route:
                             cluster: needle
                             timeout: 60s
+                          decorator: { operation: ipns-put }
                           typed_per_filter_config:
                             envoy.filters.http.local_ratelimit:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
@@ -196,6 +239,7 @@ static_resources:
                             # Above the 25s routing timeout, below Cloudflare's
                             # 100s proxy read timeout.
                             timeout: 60s
+                          decorator: { operation: lookup }
                           typed_per_filter_config:
                             envoy.filters.http.local_ratelimit:
                               "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
@@ -214,10 +258,12 @@ static_resources:
                           route:
                             cluster: needle
                             timeout: 5s
+                          decorator: { operation: version }
                         - match: { prefix: "/" }
                           direct_response:
                             status: 404
                             body: { inline_string: "not found\n" }
+                          decorator: { operation: not-found }
 
                     # Every other Host. 421 Misdirected Request tells a
                     # misconfigured caller exactly what is wrong.
@@ -228,8 +274,27 @@ static_resources:
                           direct_response:
                             status: 421
                             body: { inline_string: "misdirected request\n" }
+                          decorator: { operation: misdirected }
 
   clusters:
+    # The trace collector (see tracing above). OTLP/gRPC, so HTTP/2. If it is
+    # down, Envoy drops the spans; requests are not affected.
+    - name: otel_collector
+      type: STATIC
+      connect_timeout: 1s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: otel_collector
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 4317 }
+
     - name: needle
       type: STATIC
       connect_timeout: 2s
