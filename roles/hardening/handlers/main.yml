@@ -29,3 +29,12 @@
   ansible.builtin.systemd:
     name: fail2ban
     state: restarted
+
+# A reload re-runs `nft -f`, which replaces the table in one transaction.
+- name: Reload the CVE-2026-98432 filter
+  ansible.builtin.systemd:
+    name: cve-2026-98432-filter
+    state: reloaded
+    daemon_reload: true
+  # As the start task: a dry run on a box without the unit has nothing to ask.
+  when: not (ansible_check_mode and cve_2026_98432_unit_file is changed)

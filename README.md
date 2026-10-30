@@ -128,6 +128,37 @@ enables ufw with a default-deny inbound policy, and configures fail2ban.
 fail2ban is kept mainly to cut log noise: with password authentication
 disabled there are few credential guesses left for it to ban.
 
+**CVE-2026-98432.** Until the boxes run a kernel with the fix, an nft table of
+its own, `inet cve_2026_98432`, drops IPv4 TCP that carries IP options (the
+bug's trigger is a SYN with them) and strips the MPTCP option from SYNs, so
+MPTCP clients fall back to plain TCP. It hooks prerouting at raw priority,
+ahead of conntrack and kube-proxy, so it covers pods as well as the host. It
+is loaded by `cve-2026-98432-filter.service`, not `nftables.service`: Ubuntu's
+`/etc/nftables.conf` starts with `flush ruleset`, which would wipe the rules
+k3s, ufw and fail2ban keep in nf_tables.
+
+`cve_2026_98432_mode` in `group_vars` picks what it does: `count` matches and
+counts only, `enforce` drops and strips, `off` removes it. Loading it changes
+no other table and restarts nothing, so there is no needle warm-up. Roll it
+out as:
+
+1. `count` everywhere, then read the counters for an hour or so:
+   `sudo nft list table inet cve_2026_98432`. Anything counted is an attack
+   attempt or traffic that `enforce` would drop; know which before going on.
+2. `enforce` on one box first (`cve_2026_98432_mode: enforce` in its
+   `host_vars`), then the group default. To prove it from outside, use a port
+   anyone can reach (22, or a needle libp2p port), not 443, which only
+   Cloudflare can reach:
+   `sudo nping --tcp -p 22 --ip-options R <ip>`. Before `enforce` it should get
+   a SYN-ACK; if it gets nothing even then, something on the path already
+   drops IP options and the test proves nothing. After, no SYN-ACK, and the
+   drop counter on the box goes up.
+
+To watch for attempts on a box:
+`sudo tcpdump -ni any 'tcp[tcpflags] & tcp-syn != 0 and ip[0] & 0xf != 5'`.
+Undo instantly with `sudo systemctl stop cve-2026-98432-filter`, which deletes
+the table; set `off` to remove it for good once the fixed kernel is in.
+
 The provider's unused **`ubuntu` account (uid 1000, in `sudo`) is removed**.
 Several container images run as uid 1000, including k3s's own
 metrics-server, and a container escape as that uid should not land in a
