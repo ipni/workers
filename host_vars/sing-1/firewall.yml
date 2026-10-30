@@ -1,6 +1,0 @@
----
-# CVE-2026-98432: sing-1 is the canary for enforce. It drops IPv4 TCP with IP
-# options and strips MPTCP from SYNs, while lith-1 and chic-1 still only count
-# (group_vars). Once sing-1 has held up, set enforce in group_vars and delete
-# this file.
-cve_2026_98432_mode: enforce
