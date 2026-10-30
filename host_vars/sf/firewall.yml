@@ -1,0 +1,7 @@
+---
+# CVE-2026-98432: sf is the canary for enforce among the ipni/infra boxes. It
+# drops IPv4 TCP with IP options and strips MPTCP from SYNs, while sf2 still
+# only counts (group_vars/infra_boxes). Both counted nothing from 2026-10-30
+# 16:09 UTC (sf) and 16:14 (sf2). Once sf has held up, set enforce in
+# group_vars/infra_boxes and delete this file.
+cve_2026_98432_mode: enforce
