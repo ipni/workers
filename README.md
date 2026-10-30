@@ -164,6 +164,18 @@ To watch for attempts on a box:
 Undo instantly with `sudo systemctl stop cve-2026-98432-filter`, which deletes
 the table; set `off` to remove it for good once the fixed kernel is in.
 
+**sf and sf2** (ipni/infra's indexers) get the same filter from `cve.yml`,
+which runs only these tasks, on the `infra_boxes` group. Those boxes are not
+ours to harden: they stay out of `ipfs_nodes`, and nothing else here targets
+them. Everyone signs in as their shared `user` account on port 5222, and sudo
+there wants its password, so it is an operator's run with `-K`, never CI's:
+`ansible-playbook cve.yml -K --check --diff -l sf`, then without `--check`.
+Their mode is `cve_2026_98432_mode` in `group_vars/infra_boxes/main.yml`,
+rolled out the same way: `count`, then `enforce` one box at a time. To test
+from outside, use 5222. Both run Debian 12 with nft 1.0.6, and both have
+loaded the enforce ruleset in a throwaway namespace. The real fix is Debian's
+`6.1.190-1` kernel and a reboot.
+
 The provider's unused **`ubuntu` account (uid 1000, in `sudo`) is removed**.
 Several container images run as uid 1000, including k3s's own
 metrics-server, and a container escape as that uid should not land in a
@@ -1780,6 +1792,7 @@ dns.txt                   Cloudflare-importable bootstrap DNS records (generated
 dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities (generated)
 site.yml                  base preparation playbook, run from CI
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
+cve.yml                   the CVE-2026-98432 filter alone, on sf and sf2 (infra_boxes), with -K
 platform.yml              Argo CD (first install) and the monitoring stack's prerequisites, run from CI
 scripts/ci-playbook.sh    CI's wrapper for site.yml and platform.yml: secrets to variables, SSH key, pinned host keys
 inventory/known_hosts     the boxes' SSH host keys, pinned for CI

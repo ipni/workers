@@ -223,10 +223,9 @@
 
 # Its own table and unit beside ufw, never through ufw or nftables.conf.
 # Tagged so it can go out on its own: site.yml --tags cve_2026_98432 -l <box>.
+# cve.yml runs the same file, alone, on sf and sf2.
 - name: Mitigate CVE-2026-98432 at the host firewall
   ansible.builtin.import_tasks: cve_2026_98432.yml
-  vars:
-    cve_2026_98432_ruleset: /etc/nftables.d/cve-2026-98432.nft
   tags: [cve_2026_98432]
 
 # ---------------------------------------------------------------------------

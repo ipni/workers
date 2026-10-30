@@ -1,0 +1,22 @@
+---
+# The CVE-2026-98432 filter on sf and sf2 (ipni/infra's indexers), and nothing
+# else: the tasks the hardening role runs on the ipfs_nodes boxes
+# (roles/hardening/tasks/cve_2026_98432.yml), without the rest of that role.
+# The mode is cve_2026_98432_mode in group_vars/infra_boxes.
+#
+#   ansible-playbook cve.yml -K --check --diff -l sf   # dry run first
+#   ansible-playbook cve.yml -K -l sf                  # one box
+#
+# -K because sudo on these boxes wants the `user` account's password: an
+# operator's run, never CI's. Loading the table restarts nothing, but these
+# are the live indexers, so one box at a time, stopping at the first failure.
+- name: Mitigate CVE-2026-98432 on the ipni/infra boxes
+  hosts: infra_boxes
+  become: true
+  gather_facts: false
+  serial: 1
+  tasks:
+    - name: Run the hardening role's CVE-2026-98432 tasks
+      ansible.builtin.include_role:
+        name: hardening
+        tasks_from: cve_2026_98432

@@ -10,6 +10,18 @@ three at once is a full outage of that service.
 | lith-1 | lithuania | 46.166.169.131  |
 | chic-1 | chicago   | 84.32.48.211    |
 
+The inventory also has **sf** (103.232.206.165) and **sf2**
+(103.232.206.162), ipni/infra's indexers, in their own group `infra_boxes`.
+They are here for `cve.yml` and nothing else. Never add them to `ipfs_nodes`
+or run another playbook on them: `site.yml`'s hardening would swap their SSH
+keys and turn on ufw. They take the shared `user` account on port 5222, and
+sudo needs its password, so runs are an operator's with `-K`:
+
+```bash
+ansible-playbook cve.yml -K --check --diff -l sf   # dry run first
+ansible infra_boxes -m ping                         # no sudo needed
+```
+
 ## Getting in
 
 SSH is key-only as the hardened admin user `ipni`; root login is disabled and
@@ -198,7 +210,7 @@ deliberately disables `line-length` and `braces` (see `.ansible-lint`). A pass
 looks like `Passed: 0 failure(s), 0 warning(s) ... profile ... 'production'`.
 
 ```bash
-for pb in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml platform.yml; do
+for pb in site.yml routing.yml bootstrap.yml content.yml k3s-upgrade.yml platform.yml cve.yml; do
   ansible-playbook --syntax-check "$pb"
 done
 ANSIBLE_STDOUT_CALLBACK=default ansible-playbook scripts/render-manifests.yml -e dest=rendered

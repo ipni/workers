@@ -1,0 +1,14 @@
+---
+# sf and sf2: ipni/infra's boxes, here only for cve.yml (see inventory/hosts.yml).
+#
+# Their gateway (a MikroTik) lets SSH through on 5222 only. Everyone signs in
+# as the shared `user` account, whose sudo wants a password, so every run is an
+# operator's with -K (--ask-become-pass); CI has neither the key nor the
+# password, and must not get them.
+ansible_user: user
+ansible_port: 5222
+
+# The same switch as group_vars/ipfs_nodes (see its comment), set separately so
+# these boxes go through count before enforce on their own schedule. Override
+# per box in host_vars to enforce one before the other.
+cve_2026_98432_mode: count
