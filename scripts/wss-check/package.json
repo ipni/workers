@@ -18,6 +18,6 @@
     "@multiformats/multiaddr-matcher": "3.0.2",
     "esbuild": "0.28.2",
     "libp2p": "3.3.11",
-    "puppeteer-core": "25.11.0"
+    "puppeteer-core": "25.16.0"
   }
 }
