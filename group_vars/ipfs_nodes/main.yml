@@ -49,6 +49,20 @@ firewall_allowed_tcp:
   - "{{ ssh_port }}"
 firewall_allowed_udp: []
 
+# CVE-2026-98432: a remote bug in the kernel's TCP handshake, triggered by a SYN
+# that carries IPv4 options. Until the boxes run a fixed kernel, an nft table
+# of its own drops IPv4 TCP with IP options, and strips the MPTCP option from
+# SYNs (roles/hardening/tasks/cve_2026_98432.yml). Nothing legitimate sends
+# IP options on TCP.
+#
+#   count    match and count, change nothing: what to run first, to see what
+#            enforce would have hit (sudo nft list table inet cve_2026_98432)
+#   enforce  drop and strip
+#   off      remove the table and its unit
+#
+# Override per box in host_vars to enforce one box before the others.
+cve_2026_98432_mode: count
+
 # ---------------------------------------------------------------------------
 # Rollout mode
 # ---------------------------------------------------------------------------

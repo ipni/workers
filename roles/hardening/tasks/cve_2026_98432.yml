@@ -1,0 +1,173 @@
+---
+# CVE-2026-98432 mitigation, until the boxes run a fixed kernel: an nft table
+# of its own at prerouting/raw (templates/cve-2026-98432.nft.j2), loaded at
+# boot by its own oneshot unit. See cve_2026_98432_mode in group_vars.
+#
+# Loading the table is one atomic nft transaction that touches no other table:
+# k3s, ufw, fail2ban and the workloads are not restarted, so there is no needle
+# warm-up to wait for. What can hurt is the rule matching real traffic, which
+# is what `count` mode is for.
+
+- name: Check cve_2026_98432_mode is one the role knows
+  ansible.builtin.assert:
+    that: cve_2026_98432_mode in ['count', 'enforce', 'off']
+    fail_msg: "cve_2026_98432_mode is {{ cve_2026_98432_mode }}; use count, enforce or off."
+    quiet: true
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+  when: cve_2026_98432_mode != 'off'
+
+- name: Create the directory for the CVE-2026-98432 ruleset
+  ansible.builtin.file:
+    path: "{{ cve_2026_98432_ruleset | dirname }}"
+    state: directory
+    mode: "0755"
+  when: cve_2026_98432_mode != 'off'
+
+# validate runs `nft -c`, which hands the whole transaction to the kernel and
+# aborts it: a rule the kernel or this nft cannot do fails here, on the box,
+# before anything is loaded.
+- name: Write the CVE-2026-98432 ruleset
+  ansible.builtin.template:
+    src: cve-2026-98432.nft.j2
+    dest: "{{ cve_2026_98432_ruleset }}"
+    mode: "0644"
+    validate: /usr/sbin/nft -c -f %s
+  register: cve_2026_98432_ruleset_file
+  when: cve_2026_98432_mode != 'off'
+
+- name: Install the CVE-2026-98432 filter unit
+  ansible.builtin.template:
+    src: cve-2026-98432-filter.service.j2
+    dest: /etc/systemd/system/cve-2026-98432-filter.service
+    mode: "0644"
+  register: cve_2026_98432_unit_file
+  when: cve_2026_98432_mode != 'off'
+
+# A dry run on a box without the unit cannot ask systemd about it: the file
+# above was only diffed, not written.
+- name: Enable and start the CVE-2026-98432 filter
+  ansible.builtin.systemd:
+    name: cve-2026-98432-filter
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not (ansible_check_mode and cve_2026_98432_unit_file is changed)
+
+# Whether to reload is decided from what the kernel holds, not from whether a
+# file changed on this run: a run that wrote the file and then died before
+# loading it would otherwise leave the old mode live, and every later run,
+# finding the file already right, would leave it there.
+#
+# The file is loaded into a throwaway network namespace and listed, so the
+# comparison is between two listings in nft's own format. Counters are
+# blanked: they are the one part that differs between equal tables.
+- name: List the CVE-2026-98432 ruleset on disk as nft would load it
+  ansible.builtin.command:
+    argv:
+      - unshare
+      - --net
+      - sh
+      - -c
+      - nft -f "$1" && nft list table inet cve_2026_98432
+      - sh
+      - "{{ cve_2026_98432_ruleset }}"
+  register: cve_2026_98432_desired
+  changed_when: false
+  check_mode: false
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not (ansible_check_mode and cve_2026_98432_ruleset_file is changed)
+
+- name: Read the live CVE-2026-98432 table
+  ansible.builtin.command:
+    argv: [nft, list, table, inet, cve_2026_98432]
+  register: cve_2026_98432_live
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: cve_2026_98432_mode != 'off'
+
+# A reload re-runs `nft -f`, which replaces the table in one transaction. It
+# zeroes the counters, so it only runs when the live table is wrong.
+- name: Reload the CVE-2026-98432 filter when the live table is not the ruleset
+  ansible.builtin.systemd:
+    name: cve-2026-98432-filter
+    state: reloaded
+    daemon_reload: true
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not (ansible_check_mode and cve_2026_98432_unit_file is changed)
+    - >-
+      cve_2026_98432_ruleset_file is changed
+      or cve_2026_98432_live.rc != 0
+      or (cve_2026_98432_live.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+      != (cve_2026_98432_desired.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+
+- name: Read the loaded CVE-2026-98432 table
+  ansible.builtin.command:
+    argv: [nft, list, table, inet, cve_2026_98432]
+  register: cve_2026_98432_table
+  changed_when: false
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not ansible_check_mode
+
+# The listing check catches a load that did not happen; the mode check catches
+# a template that renders the wrong rules for the mode.
+- name: Check the loaded table is the ruleset, in the configured mode
+  vars:
+    rules: "{{ cve_2026_98432_table.stdout_lines | select('search', 'comment \"cve-2026-98432') | list }}"
+    enforce: "{{ cve_2026_98432_mode == 'enforce' }}"
+  ansible.builtin.assert:
+    that:
+      - >-
+        (cve_2026_98432_table.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+        == (cve_2026_98432_desired.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+      - rules | length == (3 if enforce | bool else 2)
+      - (rules | select('search', ' drop ') | list | length) == (2 if enforce | bool else 0)
+      - (rules | select('search', 'reset tcp option mptcp') | list | length) == (1 if enforce | bool else 0)
+    fail_msg: >-
+      {{ inventory_hostname }}: the live cve_2026_98432 table is not the
+      ruleset on disk in mode {{ cve_2026_98432_mode }}: {{ rules }}
+    quiet: true
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not ansible_check_mode
+
+- name: Report the CVE-2026-98432 counters
+  ansible.builtin.debug:
+    msg: "{{ cve_2026_98432_table.stdout_lines | select('search', 'counter') | map('trim') | list }}"
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not ansible_check_mode
+
+- name: Look for an installed CVE-2026-98432 filter unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/cve-2026-98432-filter.service
+  register: cve_2026_98432_unit
+  when: cve_2026_98432_mode == 'off'
+
+# off: stopping the unit runs its ExecStop, which deletes the table.
+- name: Stop and disable the CVE-2026-98432 filter
+  ansible.builtin.systemd:
+    name: cve-2026-98432-filter
+    enabled: false
+    state: stopped
+  when:
+    - cve_2026_98432_mode == 'off'
+    - cve_2026_98432_unit.stat.exists
+
+- name: Remove the CVE-2026-98432 filter files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/cve-2026-98432-filter.service
+    - "{{ cve_2026_98432_ruleset }}"
+  when: cve_2026_98432_mode == 'off'
