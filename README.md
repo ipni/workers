@@ -184,8 +184,9 @@ machine it signs in as their shared `user` account on port 5222, whose sudo
 wants its password, so it takes `-K`:
 `ansible-playbook cve.yml -K --check --diff -l sf`, then without `--check`.
 Their mode is `cve_2026_98432_mode` in `group_vars/infra_boxes/main.yml`,
-rolled out the same way: `count`, then `enforce` one box at a time. To test
-from outside, use 5222. Both run Debian 12 with nft 1.0.6, and both have
+rolled out the same way: `count`, then `enforce` one box at a time; both
+enforce since 2026-10-30. To prove it, use the on-box test above as `user`
+(no sudo needed to run it). Both run Debian 12 with nft 1.0.6, and both have
 loaded the enforce ruleset in a throwaway namespace. The real fix is Debian's
 `6.1.190-1` kernel and a reboot.
 

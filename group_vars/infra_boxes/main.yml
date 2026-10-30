@@ -16,5 +16,7 @@ infra_ci_pubkey_file: "{{ playbook_dir }}/keys/github-actions.pub"
 
 # The same switch as group_vars/ipfs_nodes (see its comment), set separately so
 # these boxes go through count before enforce on their own schedule. Override
-# per box in host_vars to enforce one before the other.
-cve_2026_98432_mode: count
+# per box in host_vars to enforce one before the other. Both counted from
+# 2026-10-30 16:09 UTC (nothing matched), then sf enforced alone from 16:26
+# before this became the default.
+cve_2026_98432_mode: enforce
