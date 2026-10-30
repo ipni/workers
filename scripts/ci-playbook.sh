@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Run a playbook from CI (the site-* and platform-* jobs of
+# Run a playbook from CI (the site-*, platform-* and cve-* jobs of
 # .github/workflows/ci.yml).
 #
-#   scripts/ci-playbook.sh site|platform check [limit]   dry run: --check --diff
-#   scripts/ci-playbook.sh site|platform apply [limit]   the real run
+#   scripts/ci-playbook.sh site|platform|cve check [limit]   dry run: --check --diff
+#   scripts/ci-playbook.sh site|platform|cve apply [limit]   the real run
 #
 # SSH as the admin user comes from ANSIBLE_SSH_PRIVATE_KEY, whose public half is
-# keys/github-actions.pub. The vault files are gitignored, so CI has none: each
+# keys/github-actions.pub. On sf and sf2 (cve.yml) the same key signs in as
+# CI's own account there, infra_ci_user, instead of the operators' `user`. The vault files are gitignored, so CI has none: each
 # playbook's vault variables come from repository secrets instead, in the
 # environment. Copies of every secret are in 1Password (IPFS account, Compass
 # vault).
@@ -19,12 +20,13 @@
 #                 CLOUDFLARE_DNS_TOKEN -> vault_cloudflare_dns_token
 #                 ARGOCD_REPO_SSH_KEY  -> vault_argocd_repo_ssh_key (optional:
 #                                         only while ipni/infra is private)
+#   cve.yml       none. Its account's sudo needs no password.
 set -euo pipefail
 
-playbook=${1:?usage: $0 site|platform check|apply [limit]}
-mode=${2:?usage: $0 site|platform check|apply [limit]}
+playbook=${1:?usage: $0 site|platform|cve check|apply [limit]}
+mode=${2:?usage: $0 site|platform|cve check|apply [limit]}
 limit=${3:-}
-[[ $playbook == site || $playbook == platform ]] || { echo "playbook must be site or platform" >&2; exit 2; }
+[[ $playbook == site || $playbook == platform || $playbook == cve ]] || { echo "playbook must be site, platform or cve" >&2; exit 2; }
 [[ $mode == check || $mode == apply ]] || { echo "mode must be check or apply" >&2; exit 2; }
 : "${ANSIBLE_SSH_PRIVATE_KEY:?not set}"
 if [[ $playbook == platform ]]; then
@@ -58,6 +60,12 @@ elif playbook == "platform":
     values["vault_cloudflare_dns_token"] = os.environ["CLOUDFLARE_DNS_TOKEN"]
     if os.environ.get("ARGOCD_REPO_SSH_KEY"):
         values["vault_argocd_repo_ssh_key"] = os.environ["ARGOCD_REPO_SSH_KEY"]
+elif playbook == "cve":
+    # Never the operators' `user`, whose sudo wants a password CI does not
+    # have. Extra vars outrank group_vars' ansible_user.
+    import yaml
+    with open("group_vars/infra_boxes/main.yml") as f:
+        values["ansible_user"] = yaml.safe_load(f)["infra_ci_user"]
 with open(path, "w") as f:
     json.dump(values, f)  # JSON is YAML, which -e @file reads
 PY

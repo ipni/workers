@@ -1,12 +1,18 @@
 ---
 # sf and sf2: ipni/infra's boxes, here only for cve.yml (see inventory/hosts.yml).
 #
-# Their gateway (a MikroTik) lets SSH through on 5222 only. Everyone signs in
-# as the shared `user` account, whose sudo wants a password, so every run is an
-# operator's with -K (--ask-become-pass); CI has neither the key nor the
-# password, and must not get them.
+# Their gateway (a MikroTik) lets SSH through on 5222 only. Operators sign in
+# as the shared `user` account, whose sudo wants a password, so an operator's
+# run takes -K (--ask-become-pass).
 ansible_user: user
 ansible_port: 5222
+
+# CI signs in as an account of its own, which cve.yml creates and keeps: key
+# only (CI's key, the same one it uses on the ipfs_nodes boxes), passwordless
+# sudo. scripts/ci-playbook.sh reads the name from here. An operator's -K run
+# creates it the first time; CI cannot, since it has no way in until it exists.
+infra_ci_user: ipni-ci
+infra_ci_pubkey_file: "{{ playbook_dir }}/keys/github-actions.pub"
 
 # The same switch as group_vars/ipfs_nodes (see its comment), set separately so
 # these boxes go through count before enforce on their own schedule. Override

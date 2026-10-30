@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn an ansible-playbook log into the Markdown for the run's summary page.
 
-    scripts/ci-summary.py site|platform check|apply <log> <exit status>
+    scripts/ci-summary.py site|platform|cve check|apply <log> <exit status>
 
 Called by scripts/ci-playbook.sh in CI. For each box and task that changed (or
 would), it lists the loop items, for example the addresses a firewall rule
