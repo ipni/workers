@@ -1,0 +1,5 @@
+---
+# Where the CVE-2026-98432 ruleset is written and loaded from
+# (tasks/cve_2026_98432.yml). A default rather than a var on the import, so
+# cve.yml can run those tasks on their own with tasks_from.
+cve_2026_98432_ruleset: /etc/nftables.d/cve-2026-98432.nft

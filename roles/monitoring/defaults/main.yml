@@ -1,8 +1,8 @@
 ---
 # Addresses outside the inventory that push metrics and logs to the hub too.
-# The boxes in the inventory are always allowed. sf and sf2 are not in it:
-# ipni/infra manages them, and their Alloy pushes to the hub like the other
-# boxes' (ipni/infra#166, #188).
+# The ipfs_nodes boxes are always allowed. sf and sf2 are not among them
+# (they are in infra_boxes, for cve.yml only): ipni/infra manages them, and
+# their Alloy pushes to the hub like the other boxes' (ipni/infra#166, #188).
 monitoring_ingest_extra_sources:
   - 103.232.206.165  # sf
   - 103.232.206.162  # sf2
