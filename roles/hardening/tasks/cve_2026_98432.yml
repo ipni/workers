@@ -36,8 +36,8 @@
     dest: "{{ cve_2026_98432_ruleset }}"
     mode: "0644"
     validate: /usr/sbin/nft -c -f %s
+  register: cve_2026_98432_ruleset_file
   when: cve_2026_98432_mode != 'off'
-  notify: Reload the CVE-2026-98432 filter
 
 - name: Install the CVE-2026-98432 filter unit
   ansible.builtin.template:
@@ -46,7 +46,6 @@
     mode: "0644"
   register: cve_2026_98432_unit_file
   when: cve_2026_98432_mode != 'off'
-  notify: Reload the CVE-2026-98432 filter
 
 # A dry run on a box without the unit cannot ask systemd about it: the file
 # above was only diffed, not written.
@@ -60,10 +59,56 @@
     - cve_2026_98432_mode != 'off'
     - not (ansible_check_mode and cve_2026_98432_unit_file is changed)
 
-- name: Load the CVE-2026-98432 ruleset now
-  ansible.builtin.meta: flush_handlers
+# Whether to reload is decided from what the kernel holds, not from whether a
+# file changed on this run: a run that wrote the file and then died before
+# loading it would otherwise leave the old mode live, and every later run,
+# finding the file already right, would leave it there.
+#
+# The file is loaded into a throwaway network namespace and listed, so the
+# comparison is between two listings in nft's own format. Counters are
+# blanked: they are the one part that differs between equal tables.
+- name: List the CVE-2026-98432 ruleset on disk as nft would load it
+  ansible.builtin.command:
+    argv:
+      - unshare
+      - --net
+      - sh
+      - -c
+      - nft -f "$1" && nft list table inet cve_2026_98432
+      - sh
+      - "{{ cve_2026_98432_ruleset }}"
+  register: cve_2026_98432_desired
+  changed_when: false
+  check_mode: false
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not (ansible_check_mode and cve_2026_98432_ruleset_file is changed)
 
-# Read the live table, not the file: this is what the kernel is doing.
+- name: Read the live CVE-2026-98432 table
+  ansible.builtin.command:
+    argv: [nft, list, table, inet, cve_2026_98432]
+  register: cve_2026_98432_live
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: cve_2026_98432_mode != 'off'
+
+# A reload re-runs `nft -f`, which replaces the table in one transaction. It
+# zeroes the counters, so it only runs when the live table is wrong.
+- name: Reload the CVE-2026-98432 filter when the live table is not the ruleset
+  ansible.builtin.systemd:
+    name: cve-2026-98432-filter
+    state: reloaded
+    daemon_reload: true
+  when:
+    - cve_2026_98432_mode != 'off'
+    - not (ansible_check_mode and cve_2026_98432_unit_file is changed)
+    - >-
+      cve_2026_98432_ruleset_file is changed
+      or cve_2026_98432_live.rc != 0
+      or (cve_2026_98432_live.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+      != (cve_2026_98432_desired.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+
 - name: Read the loaded CVE-2026-98432 table
   ansible.builtin.command:
     argv: [nft, list, table, inet, cve_2026_98432]
@@ -73,17 +118,23 @@
     - cve_2026_98432_mode != 'off'
     - not ansible_check_mode
 
-- name: Check the loaded table is in the configured mode
+# The listing check catches a load that did not happen; the mode check catches
+# a template that renders the wrong rules for the mode.
+- name: Check the loaded table is the ruleset, in the configured mode
   vars:
     rules: "{{ cve_2026_98432_table.stdout_lines | select('search', 'comment \"cve-2026-98432') | list }}"
+    enforce: "{{ cve_2026_98432_mode == 'enforce' }}"
   ansible.builtin.assert:
     that:
-      - rules | length == 2
-      - (rules | select('search', ' drop ') | list | length == 1) == (cve_2026_98432_mode == 'enforce')
-      - (rules | select('search', 'reset tcp option') | list | length == 1) == (cve_2026_98432_mode == 'enforce')
+      - >-
+        (cve_2026_98432_table.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+        == (cve_2026_98432_desired.stdout | regex_replace('counter packets [0-9]+ bytes [0-9]+', 'counter'))
+      - rules | length == (3 if enforce | bool else 2)
+      - (rules | select('search', ' drop ') | list | length) == (2 if enforce | bool else 0)
+      - (rules | select('search', 'reset tcp option mptcp') | list | length) == (1 if enforce | bool else 0)
     fail_msg: >-
-      {{ inventory_hostname }}: the live cve_2026_98432 table does not match
-      mode {{ cve_2026_98432_mode }}: {{ rules }}
+      {{ inventory_hostname }}: the live cve_2026_98432 table is not the
+      ruleset on disk in mode {{ cve_2026_98432_mode }}: {{ rules }}
     quiet: true
   when:
     - cve_2026_98432_mode != 'off'

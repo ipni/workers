@@ -131,7 +131,12 @@ disabled there are few credential guesses left for it to ban.
 **CVE-2026-98432.** Until the boxes run a kernel with the fix, an nft table of
 its own, `inet cve_2026_98432`, drops IPv4 TCP that carries IP options (the
 bug's trigger is a SYN with them) and strips the MPTCP option from SYNs, so
-MPTCP clients fall back to plain TCP. It hooks prerouting at raw priority,
+MPTCP clients fall back to plain TCP. nft strips only the first matching
+option, so a SYN still carrying one after that (built with two) is dropped.
+Whether to reload is decided from the live table, compared with the file
+loaded into a throwaway network namespace, so a run interrupted between
+writing the file and loading it is put right by the next run. It hooks
+prerouting at raw priority,
 ahead of conntrack and kube-proxy, so it covers pods as well as the host. It
 is loaded by `cve-2026-98432-filter.service`, not `nftables.service`: Ubuntu's
 `/etc/nftables.conf` starts with `flush ruleset`, which would wipe the rules
