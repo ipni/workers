@@ -159,6 +159,17 @@ out as:
    drops IP options and the test proves nothing. After, no SYN-ACK, and the
    drop counter on the box goes up.
 
+   In practice the paths tried so far (an operator's ISP, lith-1 to sing-1)
+   drop IP options before they reach the box, so the external test proves
+   nothing. What does: on the enforcing box itself, as an unprivileged user,
+   connect to the box's own public IP with the record-route option set
+   (`setsockopt(IPPROTO_IP, IP_OPTIONS, b"\x07\x07\x04\x00\x00\x00\x00\x00")`
+   in Python). The traffic goes over `lo` and through the same prerouting
+   hook, so the connect times out and the drop counter rises by one per SYN,
+   while a plain connect to the same port succeeds. Only do this on a box that
+   already enforces: on one that only counts, the SYN reaches the unfixed
+   kernel.
+
 To watch for attempts on a box:
 `sudo tcpdump -ni any 'tcp[tcpflags] & tcp-syn != 0 and ip[0] & 0xf != 5'`.
 Undo instantly with `sudo systemctl stop cve-2026-98432-filter`, which deletes

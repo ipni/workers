@@ -60,8 +60,10 @@ firewall_allowed_udp: []
 #   enforce  drop and strip
 #   off      remove the table and its unit
 #
-# Override per box in host_vars to enforce one box before the others.
-cve_2026_98432_mode: count
+# Override per box in host_vars to enforce one box before the others. All
+# three counted from 2026-10-30 13:20 UTC (no IP-options packets in the first
+# hour), then sing-1 enforced alone from 14:48 before this became the default.
+cve_2026_98432_mode: enforce
 
 # ---------------------------------------------------------------------------
 # Rollout mode
