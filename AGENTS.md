@@ -14,8 +14,10 @@ The inventory also has **sf** (103.232.206.165) and **sf2**
 (103.232.206.162), ipni/infra's indexers, in their own group `infra_boxes`.
 They are here for `cve.yml` and nothing else. Never add them to `ipfs_nodes`
 or run another playbook on them: `site.yml`'s hardening would swap their SSH
-keys and turn on ufw. They take the shared `user` account on port 5222, and
-sudo needs its password, so runs are an operator's with `-K`:
+keys and turn on ufw. `cve.yml` applies from CI, as CI's own account there
+(`ipni-ci`, which `cve.yml` creates and keeps). People take the shared `user`
+account on port 5222, whose sudo needs its password, so an operator's run is
+with `-K`:
 
 ```bash
 ansible-playbook cve.yml -K --check --diff -l sf   # dry run first
@@ -132,7 +134,7 @@ ansible-playbook routing.yml -l sing-1                  # one box
 ansible-playbook routing.yml                            # one box at a time, warmed (default)
 ```
 
-`site.yml` and `platform.yml` apply from CI: a merge that touches one gets a
+`site.yml`, `platform.yml` and `cve.yml` apply from CI: a merge that touches one gets a
 dry run on the run's summary page, then waits for a required reviewer to
 approve the real run in the `production` environment (README, "Running
 playbooks from CI"). Prefer that to running them from a controller, so what

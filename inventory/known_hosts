@@ -1,4 +1,4 @@
-# SSH host keys of the boxes, for CI (.github/workflows/platform.yml), which
+# SSH host keys of the boxes, for CI (.github/workflows/ci.yml), which
 # must refuse to connect to anything else. Public. Checked on 2026-10-12: the
 # scanned key, the key file on each box and an operator's known_hosts agreed.
 # Update when a box is reinstalled: ssh-keyscan -t ed25519 <ip>, then confirm
@@ -6,3 +6,8 @@
 5.199.165.77 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK2+9yvOjU3tE3K7zEVHn5M30X3FHRA6mgkSvFjmH2uL
 46.166.169.131 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBbz1MWGYfe2RzaH/SV+zBctwhUNWO0336K5N5x5ATOp
 84.32.48.211 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGsaCZG1aU29AqxU84RhnxlMdYyvzz1f2hBhpaYu2gHR
+# sf and sf2 (infra_boxes, cve.yml), on port 5222, so in ssh's [ip]:port form
+# (ssh-keyscan -t ed25519 -p 5222 <ip>). Checked the same three ways on
+# 2026-10-30.
+[103.232.206.165]:5222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL5ELQAJDOlCD2/LLr1GzjN6dQ3a5tR/avtk87AHOuAh
+[103.232.206.162]:5222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEPvz6Hb9UV/XfJURDQauhTQ3xZvb1Hx0Xh7MQUCFQZX

@@ -167,8 +167,10 @@ the table; set `off` to remove it for good once the fixed kernel is in.
 **sf and sf2** (ipni/infra's indexers) get the same filter from `cve.yml`,
 which runs only these tasks, on the `infra_boxes` group. Those boxes are not
 ours to harden: they stay out of `ipfs_nodes`, and nothing else here targets
-them. Everyone signs in as their shared `user` account on port 5222, and sudo
-there wants its password, so it is an operator's run with `-K`, never CI's:
+them. It runs from CI (see "Running playbooks from CI"), as CI's own account
+there, `ipni-ci`, which `cve.yml` creates and keeps. From an operator's
+machine it signs in as their shared `user` account on port 5222, whose sudo
+wants its password, so it takes `-K`:
 `ansible-playbook cve.yml -K --check --diff -l sf`, then without `--check`.
 Their mode is `cve_2026_98432_mode` in `group_vars/infra_boxes/main.yml`,
 rolled out the same way: `count`, then `enforce` one box at a time. To test
@@ -1518,14 +1520,14 @@ in the vault: `ansible-playbook platform.yml --check --diff`.
 
 ## Running playbooks from CI
 
-`site.yml` and `platform.yml` run from CI. The others (`routing.yml`,
+`site.yml`, `platform.yml` and `cve.yml` run from CI. The others (`routing.yml`,
 `bootstrap.yml`, `content.yml`, `k3s-upgrade.yml`) deliberately stay on an
 operator's machine for now: they need the vault (for `bootstrap.yml` and
 `content.yml` that includes permanent identity keys), and a `routing.yml` run
 takes about an hour per box. `routing.yml`, `content.yml` and `bootstrap.yml`
 are meant to move to Helm charts later, deployed by Argo CD like the monitoring
-stack, so CI is not given their secrets in the meantime. Both CI playbooks are
-part of the repo's one workflow
+stack, so CI is not given their secrets in the meantime. The CI playbooks are
+all part of the repo's one workflow
 (`.github/workflows/ci.yml`), so a merge starts a single run:
 
 | When | What |
@@ -1576,6 +1578,24 @@ keys) or restart k3s, so:
 If CI does lock itself out, an operator's key or the break-glass key (AGENTS.md)
 still gets in, unless the change removed those too, which the key check above
 stops after the first box.
+
+**cve.yml.** The CVE-2026-98432 filter on sf and sf2 (`infra_boxes`),
+ipni/infra's indexers. "Touching it" means `cve.yml`, the hardening role's
+CVE tasks, templates and defaults, `host_vars/sf*/`, CI's public key, and the
+shared paths above. It runs on its own, in `cve-main`: it needs nothing from
+`site.yml` or `platform.yml`, and they never touch these boxes.
+
+CI signs in there with the same key, but not as `ipni`, which these boxes do
+not have, nor as the operators' `user`, whose sudo wants a password. It uses
+an account of its own, `ipni-ci` (`infra_ci_user` in
+`group_vars/infra_boxes/main.yml`, read by `scripts/ci-playbook.sh`): key
+only, password locked, passwordless sudo, so it is root on those boxes.
+`cve.yml` creates and keeps it, with only CI's key installed. CI cannot
+create it itself, so the **first run on each box is an operator's**, from the
+branch that adds it: `ansible-playbook cve.yml -K -l sf`, then `-l sf2`. Until
+then CI's dry runs fail to connect. To revoke CI's access there, remove the
+account's tasks from `cve.yml`, then on each box `sudo userdel -r ipni-ci` and
+`sudo rm /etc/sudoers.d/90-ipni-ci`.
 
 ## Secrets
 
@@ -1792,7 +1812,7 @@ dns.txt                   Cloudflare-importable bootstrap DNS records (generated
 dns-libp2p.txt            bootstrap.libp2p.io records for the legacy identities (generated)
 site.yml                  base preparation playbook, run from CI
 k3s-upgrade.yml           k3s upgrade, one minor version at a time, backup per step
-cve.yml                   the CVE-2026-98432 filter alone, on sf and sf2 (infra_boxes), with -K
+cve.yml                   the CVE-2026-98432 filter alone, on sf and sf2 (infra_boxes), run from CI
 platform.yml              Argo CD (first install) and the monitoring stack's prerequisites, run from CI
 scripts/ci-playbook.sh    CI's wrapper for site.yml and platform.yml: secrets to variables, SSH key, pinned host keys
 inventory/known_hosts     the boxes' SSH host keys, pinned for CI

@@ -4,18 +4,55 @@
 # (roles/hardening/tasks/cve_2026_98432.yml), without the rest of that role.
 # The mode is cve_2026_98432_mode in group_vars/infra_boxes.
 #
+# It runs from CI like site.yml (README, "Running playbooks from CI"), as CI's
+# own account on these boxes, which this playbook also creates and keeps. From
+# an operator's machine, as the shared `user` account, sudo wants its password:
+#
 #   ansible-playbook cve.yml -K --check --diff -l sf   # dry run first
 #   ansible-playbook cve.yml -K -l sf                  # one box
 #
-# -K because sudo on these boxes wants the `user` account's password: an
-# operator's run, never CI's. Loading the table restarts nothing, but these
-# are the live indexers, so one box at a time, stopping at the first failure.
+# The first run on a box has to be an operator's: until it has created the CI
+# account, CI has no way in. Loading the table restarts nothing, but these are
+# the live indexers, so one box at a time, stopping at the first failure.
 - name: Mitigate CVE-2026-98432 on the ipni/infra boxes
   hosts: infra_boxes
   become: true
   gather_facts: false
   serial: 1
   tasks:
+    # CI's account: key only, password locked, passwordless sudo, which is
+    # what Ansible needs and makes it root on these boxes. It touches no other
+    # account, `user` included. To revoke CI's access, delete these tasks and
+    # the account (sudo userdel -r ipni-ci, sudo rm /etc/sudoers.d/90-ipni-ci).
+    - name: Create the CI account
+      ansible.builtin.user:
+        name: "{{ infra_ci_user }}"
+        shell: /bin/bash
+        create_home: true
+        password: "!"
+        state: present
+      register: infra_ci_account
+
+    # exclusive: CI's key and nothing else, so a key added by hand goes on the
+    # next run. A dry run on a box without the account cannot look it up: the
+    # task above only reported it.
+    - name: Install CI's SSH key on the CI account
+      ansible.posix.authorized_key:
+        user: "{{ infra_ci_user }}"
+        key: "{{ lookup('ansible.builtin.file', infra_ci_pubkey_file) | trim }}"
+        state: present
+        exclusive: true
+      when: not (ansible_check_mode and infra_ci_account is changed)
+
+    - name: Grant the CI account passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ infra_ci_user }}"
+        mode: "0440"
+        owner: root
+        group: root
+        content: "{{ infra_ci_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        validate: visudo -cf %s
+
     - name: Run the hardening role's CVE-2026-98432 tasks
       ansible.builtin.include_role:
         name: hardening

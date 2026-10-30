@@ -6,8 +6,9 @@
 # unnoticed here before, which is why this exists.
 #
 # The exception is the playbooks that run from CI: site.yml (the boxes' base:
-# packages, sysctls, SSH, firewall, k3s) and platform.yml (Argo CD and the
-# monitoring stack's firewall, see the README). For each of them:
+# packages, sysctls, SSH, firewall, k3s), platform.yml (Argo CD and the
+# monitoring stack's firewall, see the README) and cve.yml (the CVE-2026-98432
+# filter on sf and sf2, ipni/infra's boxes). For each of them:
 #
 #   pull request   -> the checks, then a dry run (--check --diff) against the
 #                     boxes if the PR touches that playbook
@@ -20,7 +21,8 @@
 #
 # site.yml goes first: platform.yml relies on what it sets up, so when a merge
 # touches both, platform.yml's dry run starts only once site.yml's apply is
-# done, and shows what is left to change after it.
+# done, and shows what is left to change after it. cve.yml runs on other boxes
+# and needs neither, so it goes on its own.
 #
 # One workflow, so a merge starts one run. Pull requests from forks get no
 # secrets: their dry runs are skipped.
@@ -35,7 +37,7 @@ on:
       playbook:
         description: "Playbook to run against the boxes"
         type: choice
-        options: [site, platform]
+        options: [site, platform, cve]
         default: site
       run:
         description: "none (checks only), check (dry run) or apply (dry run, then the approved run)"
@@ -211,7 +213,7 @@ jobs:
           shellcheck scripts/*.sh
 
   # ---------------------------------------------------------------------------
-  # Playbooks run from CI: site.yml, then platform.yml
+  # Playbooks run from CI: site.yml, then platform.yml; cve.yml alongside
   # ---------------------------------------------------------------------------
 
   # Whether this run touches what each playbook applies. On a pull request,
@@ -222,6 +224,7 @@ jobs:
     outputs:
       site: ${{ steps.diff.outputs.site }}
       platform: ${{ steps.diff.outputs.platform }}
+      cve: ${{ steps.diff.outputs.cve }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -247,12 +250,13 @@ jobs:
           declare -A paths=(
             [site]="^(site\.yml|roles/(common|hardening|k3s|storage)/|host_vars/|keys/|$shared)"
             [platform]="^(platform\.yml|roles/(argocd|monitoring|ufw_allowlist)/|roles/route_origin/defaults/main\.yml|$shared)"
+            [cve]="^(cve\.yml|roles/hardening/(defaults/|tasks/cve_2026_98432\.yml|templates/cve-)|host_vars/sf2?/|keys/github-actions\.pub|$shared)"
           )
           if [[ "$EVENT" != workflow_dispatch && "$RANGE" != 0000000000000000000000000000000000000000..* ]]; then
             changed=$(git diff --name-only "$RANGE")
           fi
           rows=""
-          for playbook in site platform; do
+          for playbook in site platform cve; do
             if [[ "$EVENT" == workflow_dispatch ]]; then
               hit=$([[ "$PLAYBOOK" == "$playbook" ]] && echo true || echo false)
             elif [[ "$RANGE" == 0000000000000000000000000000000000000000..* ]]; then
@@ -301,7 +305,7 @@ jobs:
             echo "|---|---|---|"
             printf '%s' "$rows"
             echo
-            echo "Dry runs start once every check has passed, and site.yml goes before platform.yml."
+            echo "Dry runs start once every check has passed, and site.yml goes before platform.yml. cve.yml (sf and sf2) goes on its own."
             echo "Each dry run's summary below lists exactly what it would change."
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -490,3 +494,77 @@ jobs:
           ARGOCD_REPO_SSH_KEY: ${{ secrets.ARGOCD_REPO_SSH_KEY }}
           LIMIT: ${{ inputs.limit }}
         run: scripts/ci-playbook.sh platform apply "$LIMIT"
+
+  # --- cve.yml ---------------------------------------------------------------
+
+  # As site-dry-run, for cve.yml: the CVE-2026-98432 filter on sf and sf2,
+  # ipni/infra's indexers, which no other playbook here touches. It signs in as
+  # CI's own account there (infra_ci_user), which an operator's first run of
+  # cve.yml creates; until then this fails to connect. It needs nothing from
+  # site.yml or platform.yml, so it waits for neither.
+  cve-dry-run:
+    needs: [ansible, manifests, generated, shell, changes]
+    outputs:
+      changes: ${{ steps.dry-run.outputs.changes }}
+    if: >-
+      needs.changes.outputs.cve == 'true' && (
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.run != 'none'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('cve-check-{0}', github.ref) || 'cve-main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      ANSIBLE_STDOUT_CALLBACK: default
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Dry run cve.yml
+        id: dry-run
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-playbook.sh cve check "$LIMIT"
+
+  # As site-apply, for cve.yml. One box at a time (serial: 1 in the playbook),
+  # stopping at the first that fails. Loading the table restarts nothing.
+  cve-apply:
+    needs: [ansible, manifests, generated, shell, changes, cve-dry-run]
+    if: >-
+      needs.changes.outputs.cve == 'true' && (
+        (github.event_name == 'push' && needs.cve-dry-run.outputs.changes == 'true') ||
+        (github.event_name == 'workflow_dispatch' && inputs.run == 'apply'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cve-main
+      cancel-in-progress: false
+    environment: production
+    env:
+      ANSIBLE_STDOUT_CALLBACK: default
+      ANSIBLE_FORCE_COLOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible and the collections the roles use
+        run: |
+          pip install ansible-core
+          ansible-galaxy collection install community.general ansible.posix kubernetes.core
+      - name: Run cve.yml
+        env:
+          ANSIBLE_SSH_PRIVATE_KEY: ${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}
+          LIMIT: ${{ inputs.limit }}
+        run: scripts/ci-playbook.sh cve apply "$LIMIT"
