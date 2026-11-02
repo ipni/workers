@@ -186,6 +186,19 @@ static_resources:
                       # anything not listed here - including endpoints a future
                       # needle release adds - is never exposed publicly.
                       routes:
+                        # needle does not support provide: ProvideBitswap always
+                        # returns ErrNotSupported, which boxo answers with a 500.
+                        # Refused here so a client sending these does not read
+                        # as a server fault in the 5xx alerts.
+                        - match:
+                            prefix: "/routing/v1/providers"
+                            headers:
+                              - name: ":method"
+                                string_match: { exact: "PUT" }
+                          direct_response:
+                            status: 405
+                            body: { inline_string: "provide is not supported\n" }
+                          decorator: { operation: provide-refused }
                         # IPNS publishing is deliberately open, matching the
                         # production delegated-ipfs.dev: records are
                         # self-certifying, but each PUT fans out to the DHT, so
