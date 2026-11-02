@@ -154,7 +154,13 @@
     "RemoteServices": {}
   },
   "Plugins": {
-    "Plugins": null
+    "Plugins": {
+      "peerlog": {
+        "Config": {
+          "Enabled": true
+        }
+      }
+    }
   },
   "Provide": {
     "DHT": {},

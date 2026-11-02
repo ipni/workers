@@ -136,12 +136,14 @@ spec:
               value: 12GiB
             - name: IPFS_TELEMETRY
               value: "off"
-            # kubo logs only errors by default. Info adds libp2p's and the
-            # DHT's warnings and info lines, which ProbeLab asked us to ship
-            # for them; it has no per-connection peer IDs or agent versions.
+            # ProbeLab counts the distinct peers and agent versions that reach
+            # the bootstrappers. kubo's peerlog plugin (Plugins in
+            # roles/bootstrap/files/kubo-config.json) logs both, with no IPs,
+            # at info whatever this level says. Info for everything else added
+            # relay lines, 90% of the volume, and no agent versions.
             # JSON, as on needle, so Loki can parse the fields.
             - name: GOLOG_LOG_LEVEL
-              value: info
+              value: error
             - name: GOLOG_LOG_FMT
               value: json
             # RPC bearer token for probes and CLI calls (kubo's --api-auth takes
