@@ -239,7 +239,7 @@
                      if route_origin_aop_enforced | bool else {}) }}
   no_log: true
   register: origin_tls_secret
-  when: not ansible_check_mode or origin_ns.stdout
+  when: not ansible_check_mode or (origin_ns.stdout | length > 0)
 
 - name: Deploy the route-origin manifests
   ansible.builtin.include_role:
