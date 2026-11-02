@@ -229,7 +229,7 @@
   register: content_kubo_secret
   # On a first --check the namespace is only simulated and a dry-run secret
   # create would fail with "namespace not found".
-  when: not ansible_check_mode or content_ns.stdout
+  when: not ansible_check_mode or (content_ns.stdout | length > 0)
 
 - name: Install the content cluster Secret
   vars:
@@ -265,7 +265,7 @@
              | map('join', ':') | join(',') | b64encode }}
   no_log: true
   register: content_secret
-  when: not ansible_check_mode or content_ns.stdout
+  when: not ansible_check_mode or (content_ns.stdout | length > 0)
 
 - name: Deploy the content manifests
   ansible.builtin.include_role:
@@ -407,7 +407,7 @@
 - name: Load the pinset into the content cluster
   run_once: true
   # On a first --check the node does not exist yet.
-  when: not ansible_check_mode or content_ns.stdout
+  when: not ansible_check_mode or (content_ns.stdout | length > 0)
   block:
     - name: Load the pinset
       vars:
