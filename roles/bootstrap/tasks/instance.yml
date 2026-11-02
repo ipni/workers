@@ -236,7 +236,7 @@
 # On a first --check neither the namespace nor cert-manager's CRDs exist, so
 # the objects below cannot even be dry-run.
 - name: Create the WSS certificate
-  when: not ansible_check_mode or (bootstrap_ns.stdout and bootstrap_cm_crd.stdout)
+  when: not ansible_check_mode or (bootstrap_ns.stdout | length > 0 and bootstrap_cm_crd.stdout | length > 0)
   block:
     - name: Install the Cloudflare API token for DNS-01 challenges
       kubernetes.core.k8s:
@@ -430,7 +430,7 @@
   register: bootstrap_secret
   # On a first --check the namespace is only simulated and a dry-run secret
   # create would fail with "namespace not found".
-  when: not ansible_check_mode or bootstrap_ns.stdout
+  when: not ansible_check_mode or (bootstrap_ns.stdout | length > 0)
 
 - name: "Deploy the {{ bootstrap_namespace }} manifests"
   ansible.builtin.include_role:

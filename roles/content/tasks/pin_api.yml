@@ -26,7 +26,7 @@
 # On a first --check the namespace does not exist yet, so nothing in it can be
 # dry-run.
 - name: Create the pinning certificate
-  when: not ansible_check_mode or content_ns.stdout
+  when: not ansible_check_mode or (content_ns.stdout | length > 0)
   block:
     - name: Install the Cloudflare API token for DNS-01 challenges
       kubernetes.core.k8s:
