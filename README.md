@@ -250,7 +250,7 @@ Manifests live in `k8s/needle/` (kustomize, same conventions as
 `storetheindex/deploy`). The role opens the libp2p port, ships the manifests,
 applies them, waits for the rollout and checks `/version` on the box.
 
-**Version:** `ghcr.io/ipni/needle:v1.0.0`, pinned by index digest in
+**Version:** `ghcr.io/ipni/needle:v1.1.0`, pinned by index digest in
 `k8s/needle/kustomization.yaml`. To upgrade, change the digest.
 
 At v1.0.0 the fork was renamed to needle: module `github.com/ipni/needle`,

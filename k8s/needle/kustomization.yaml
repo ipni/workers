@@ -29,9 +29,9 @@ labels:
 
 # Pinned by digest so every box runs byte-identical images and a re-pushed tag
 # cannot change what is deployed. This is the index digest of
-# ghcr.io/ipni/needle:v1.0.0 (2026-09-18), a multi-arch index covering
+# ghcr.io/ipni/needle:v1.1.0 (2026-11-03), a multi-arch index covering
 # amd64, arm/v7 and arm64; the amd64 manifest these boxes run is
-# sha256:f31bd19df98216b6418cb6c007fe5ce2559c7ed430d60bf18c0929e74d5671f3.
+# sha256:cd7d2074a72b7a18da1524f07846388159d2581e44ee6136099c23836d1cc91c.
 #
 # ghcr.io/ipni is IPNI's fork of ipfs/someguy, not a re-tag of upstream. At
 # v1.0.0 the fork was renamed to needle: module github.com/ipni/needle, image
@@ -50,7 +50,7 @@ labels:
 images:
   - name: needle
     newName: ghcr.io/ipni/needle
-    digest: sha256:65cfdabeb5eb1a616960ac9aab1e2c4663802c8fabb3ae84fb87151006b6ada6
+    digest: sha256:067e3be30bad134931f4c681d2dbc4baf53bb648051fab2a425ca86a63071dba
 
 configMapGenerator:
   - name: needle-env-vars
