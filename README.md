@@ -272,12 +272,43 @@ of `ipfs_nodes` and `indexers` (`group_vars/managed_boxes/main.yml`); a value in
 comes from ipni/infra through Argo CD. sf and sf2 are not part of this.
 
 **Storage** is per box, in `host_vars/<box>/main.yml`. `storage_mode` is
-`ext4_blank_nvme` (as on the IPFS boxes) or `zfs` (the pools in
-`storage_zfs_pools`, with disks by `/dev/disk/by-id`). The ZFS path never
-recreates anything: an imported pool is left alone, an exported pool of that name
-or a disk with any signature stops the run, `zpool create` never gets `-f`, and a
-run from CI refuses to create a pool at all. k3s will not start until the datasets
-are mounted, so pods cannot write to the OS disk after a failed import.
+`ext4_blank_nvme` (as on the IPFS boxes), `zfs` (the pools in
+`storage_zfs_pools`, with disks by `/dev/disk/by-id`) or `md_xfs` (one md array
+over a partition on each disk, XFS on it, from `storage_md`). Indexers mount
+their data at `/ipni`, the path ipni/infra's indexer manifests use. The `zfs` and
+`md_xfs` modes never recreate anything: an existing pool, array or filesystem is left alone, a disk
+or member with any signature stops the run, `zpool create` and `mdadm --create`
+get no force flag, and a run from CI refuses to create a pool or array at all.
+k3s will not start until the data volume is mounted, so pods cannot write to the
+OS disk after a failed import or assembly.
+
+**The indexer test layout** (`idx-new-1`, three 15.36 TB NVMe), meant to become
+the layout for sf and sf2 once it has proved itself:
+
+| Part | Where | Layout | Filesystem |
+|------|-------|--------|------------|
+| EFI | partition 1 on each disk | the installer's | vfat |
+| OS, 500 GiB | partition 2 on each disk | md RAID1 over the three | ext4, `/` |
+| Data, the rest (about 27 TiB) | partition 3 on each disk | md RAID5 over the three | XFS, `/ipni` |
+
+The OS part is the install: the provider's custom partitioning or a Debian
+install from the console, with the rest of each disk left unallocated. Ansible
+cannot repartition a running root. `site.yml` then does the data part: it creates
+partition 3 after the last partition on each disk (only if every disk has at
+least `storage_md_min_free_gib` free and a GPT table), checks the three are
+blank, creates the array, records it in `mdadm.conf` and the initramfs, and
+formats XFS with 4 KiB sectors, which `mkfs.xfs` aligns to the RAID stripe by
+itself. The array's first resync runs for hours afterwards; it is usable
+meanwhile. Check what the drives report before building, since a drive can
+also be reformatted to 4 KiB sectors, which erases it:
+
+```bash
+lsblk -d -o NAME,MODEL,PHY-SEC,LOG-SEC,MIN-IO,OPT-IO
+nvme id-ns -H /dev/nvme0n1 | grep 'LBA Format'
+```
+
+To try a different data layout on the same box, stop k3s, unmount `/ipni`, and
+stop and clear the array by hand; the role will not do that.
 
 **Building a box.** Add it to `indexers` with its `host_vars`, on a branch. With
 the root key in your agent (`ssh-add`), and an admin key from `keys/` too:

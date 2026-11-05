@@ -1,6 +1,10 @@
 ---
 # Indexer boxes. Everything not set here comes from group_vars/managed_boxes.
 
+# Where the data volume is mounted, as on sf and sf2: ipni/infra's indexer
+# manifests use /ipni/indexer/... host paths. k3s and local-path live here too.
+data_mount: /ipni
+
 # `debian` is the Debian cloud image's login account, the same uid 1000 risk as
 # Ubuntu's (see roles/hardening/tasks/main.yml).
 hardening_removed_accounts:

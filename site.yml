@@ -34,8 +34,9 @@
         that:
           - site != 'undecided'
           - storage_mode | default('') != 'undecided'
+          - storage_mode | default('') != 'md_xfs' or storage_md.disks | default([]) | length > 0
         fail_msg: >-
-          {{ inventory_hostname }}: set site and storage_mode in
+          {{ inventory_hostname }}: set site, storage_mode and its disks in
           host_vars/{{ inventory_hostname }}/main.yml, and rename the box if its
           name is a placeholder, before building it.
         quiet: true

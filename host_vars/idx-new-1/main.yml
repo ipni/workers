@@ -1,19 +1,18 @@
 ---
-# Placeholder box: site.yml refuses to build it until both of these are decided.
+# Placeholder box: site.yml refuses to build it until site is decided and its
+# disks are listed below.
 site: undecided           # the location, for the site= node label
 
-# ext4_blank_nvme: the single blank NVMe, ext4 at data_mount, as on ipfs_nodes.
-# zfs: the pools below. Disks by /dev/disk/by-id only. An existing pool is never
-# recreated, and a disk carrying any signature stops the run.
-storage_mode: undecided
-
-# Shape of a zfs box, to fill in from the box's real disks:
-#
-# storage_mode: zfs
-# data_mount: /ipni      # must be one of the mountpoints below; k3s's local-path lives here
-# storage_zfs_pools:
-#   - name: tank
-#     vdevs: [mirror, /dev/disk/by-id/nvme-AAA, /dev/disk/by-id/nvme-BBB]
-#     datasets:
-#       - {name: ipni, properties: {mountpoint: /ipni}}
-#       - {name: ipni-mirror, properties: {mountpoint: /ipni-mirror}}
+# The test layout for the next indexers (README, "Indexer boxes"). Installed by
+# hand first: on each of the three disks the provider's EFI partition, then a
+# 500 GiB partition, the three in an md RAID1 with ext4 for the OS, and the rest
+# left unallocated. site.yml then creates partition 3 in that space on each
+# disk, one md RAID5 over the three, and XFS on it at data_mount (/ipni).
+storage_mode: md_xfs
+storage_md:
+  name: ipni
+  level: 5
+  partition_number: 3
+  # Whole disks, by /dev/disk/by-id (nvme-<model>_<serial>, without -partN),
+  # from `ls -l /dev/disk/by-id/` on the rebuilt box.
+  disks: []

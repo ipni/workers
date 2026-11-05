@@ -4,7 +4,7 @@
 # the tasks inside.
 - name: Check storage_mode is one this role knows
   ansible.builtin.assert:
-    that: storage_mode in ['ext4_blank_nvme', 'zfs']
+    that: storage_mode in ['ext4_blank_nvme', 'zfs', 'md_xfs']
     fail_msg: "{{ inventory_hostname }}: unknown storage_mode {{ storage_mode }}"
     quiet: true
 
@@ -15,6 +15,10 @@
 - name: Provision ZFS
   ansible.builtin.import_tasks: zfs.yml
   when: storage_mode == 'zfs'
+
+- name: Provision an md array with XFS
+  ansible.builtin.import_tasks: md_xfs.yml
+  when: storage_mode == 'md_xfs'
 
 # local-path-provisioner resets its root to 0700 whenever it provisions a
 # volume. Matching that here stops Ansible and the provisioner flipping the
