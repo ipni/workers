@@ -1,5 +1,7 @@
 ---
-# Ubuntu 24.04 may run sshd under socket activation (ssh.socket), where
+# The unit is `ssh` on Debian and Ubuntu alike. Debian runs it as a plain service,
+# so the reload below is all it needs. Ubuntu 24.04 may run sshd under socket
+# activation (ssh.socket), where
 # `systemctl reload ssh` is not necessarily valid. Try the reload, and fall
 # back to restarting the socket unit. Neither drops established sessions.
 # The post-hardening reachability check in tasks/main.yml is the real proof

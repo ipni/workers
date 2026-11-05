@@ -20,3 +20,36 @@
 # Security updates keep arriving on their own in the meantime; this switch is
 # about when a WHOLE-SYSTEM upgrade happens, not about whether patching happens.
 common_apt_upgrade: "{{ bootstrap_mode | default(false) }}"
+
+# Installed everywhere. Debian-only additions are in common_distro_packages.
+common_base_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - git
+  - jq
+  - htop
+  - iotop
+  - ncdu
+  - net-tools
+  - rsync
+  - unzip
+  - chrony
+  - unattended-upgrades
+  - apt-listchanges
+  - python3-kubernetes   # lets Ansible drive k8s later without pip
+
+common_distro_packages:
+  Ubuntu: [dnsutils]
+  Debian: [sudo, bind9-dnsutils, apparmor]
+
+# Origins allowed on top of the distribution's own 50unattended-upgrades.
+common_unattended_extra_origins: []
+
+# needrestart in list-only mode, and a metric saying a reboot is pending. Off on
+# the IPFS boxes, whose behaviour this must not change.
+common_reboot_reporting: false
+
+# node-exporter reads *.prom from here once it is given
+# --collector.textfile.directory (ipni/infra kubernetes/platform/node-exporter).
+common_textfile_dir: /var/lib/node_exporter/textfile

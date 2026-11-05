@@ -1,0 +1,19 @@
+---
+# Placeholder box: site.yml refuses to build it until both of these are decided.
+site: undecided           # the location, for the site= node label
+
+# ext4_blank_nvme: the single blank NVMe, ext4 at data_mount, as on ipfs_nodes.
+# zfs: the pools below. Disks by /dev/disk/by-id only. An existing pool is never
+# recreated, and a disk carrying any signature stops the run.
+storage_mode: undecided
+
+# Shape of a zfs box, to fill in from the box's real disks:
+#
+# storage_mode: zfs
+# data_mount: /ipni      # must be one of the mountpoints below; k3s's local-path lives here
+# storage_zfs_pools:
+#   - name: tank
+#     vdevs: [mirror, /dev/disk/by-id/nvme-AAA, /dev/disk/by-id/nvme-BBB]
+#     datasets:
+#       - {name: ipni, properties: {mountpoint: /ipni}}
+#       - {name: ipni-mirror, properties: {mountpoint: /ipni-mirror}}

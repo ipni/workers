@@ -1,0 +1,79 @@
+---
+# One entry of storage_zfs_pools, as storage_pool.
+
+- name: "Look for pool {{ storage_pool.name }}"
+  ansible.builtin.command:
+    argv: [zpool, list, -H, -o, name, "{{ storage_pool.name }}"]
+  register: storage_pool_list
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: "Create pool {{ storage_pool.name }} if it does not exist"
+  when: storage_pool_list.rc != 0
+  block:
+    # CI only maintains built boxes. A pool missing there is an incident (a typo,
+    # a failed import, a dead disk), not something to build.
+    - name: Refuse to create a pool from a run that only maintains built boxes
+      ansible.builtin.assert:
+        that: not (site_require_hardened | default(false) | bool)
+        fail_msg: "{{ inventory_hostname }}: pool {{ storage_pool.name }} is not imported; look at the box."
+        quiet: true
+
+    - name: List pools that exist on disk but are not imported
+      ansible.builtin.command:
+        argv: [zpool, import]
+      register: storage_importable
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Refuse to create over a pool that is only exported
+      ansible.builtin.assert:
+        that: "storage_importable.stdout is not search('pool: ' ~ storage_pool.name ~ '$', multiline=True)"
+        fail_msg: >-
+          {{ inventory_hostname }}: pool {{ storage_pool.name }} exists on disk but
+          is not imported. Import it by hand rather than creating a new one.
+        quiet: true
+
+    # wipefs -n reads and reports only.
+    - name: Read the signatures on each disk
+      ansible.builtin.command:
+        argv: [wipefs, --no-act, "{{ item }}"]
+      loop: "{{ storage_pool.vdevs | select('match', '^/') | list }}"
+      register: storage_disk_signatures
+      changed_when: false
+      check_mode: false
+
+    - name: Refuse to touch a disk that is not blank
+      ansible.builtin.assert:
+        that: storage_disk_signatures.results | selectattr('stdout', 'ne', '') | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: not blank:
+          {{ storage_disk_signatures.results | selectattr('stdout', 'ne', '') | map(attribute='item') | list }}.
+          Nothing was changed. Clearing a disk is an operator's decision.
+        quiet: true
+
+    - name: "Create pool {{ storage_pool.name }}"
+      vars:
+        pool_args: >-
+          {%- set a = [] -%}
+          {%- for k, v in storage_zfs_pool_options.items() -%}{%- set _ = a.extend(['-o', k ~ '=' ~ v]) -%}{%- endfor -%}
+          {%- for k, v in storage_zfs_fs_options.items() -%}{%- set _ = a.extend(['-O', k ~ '=' ~ v]) -%}{%- endfor -%}
+          {{ a }}
+      ansible.builtin.command:
+        argv: "{{ ['zpool', 'create'] + pool_args + ['-m', 'none', storage_pool.name] + storage_pool.vdevs }}"
+      changed_when: true
+      register: storage_pool_created
+      when: not ansible_check_mode
+
+# In a dry run a missing pool stays missing, and zfs would have nothing to change.
+- name: "Create the datasets on {{ storage_pool.name }}"
+  community.general.zfs:
+    name: "{{ storage_pool.name }}/{{ item.name }}"
+    state: present
+    extra_zfs_properties: "{{ item.properties }}"
+  loop: "{{ storage_pool.datasets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: storage_pool_list.rc == 0 or not ansible_check_mode

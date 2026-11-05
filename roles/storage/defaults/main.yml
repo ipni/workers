@@ -1,0 +1,18 @@
+---
+# ext4_blank_nvme  the one blank NVMe, ext4 at data_mount (the IPFS boxes)
+# zfs              the pools in storage_zfs_pools
+storage_mode: ext4_blank_nvme
+
+# Each: name, vdevs (the zpool create layout: mirror, raidz..., and disks by
+# /dev/disk/by-id), and datasets, each a name and its zfs properties. Listed per
+# box in host_vars, because a disk layout is never guessed. See
+# host_vars/idx-new-1/main.yml.
+storage_zfs_pools: []
+
+# Passed to zpool create only. Changing these does nothing to an existing pool.
+storage_zfs_pool_options:
+  ashift: "12"
+storage_zfs_fs_options:
+  compression: lz4
+  atime: "off"
+  xattr: sa

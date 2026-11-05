@@ -1,0 +1,22 @@
+---
+# Indexer boxes. Everything not set here comes from group_vars/managed_boxes.
+
+# `debian` is the Debian cloud image's login account, the same uid 1000 risk as
+# Ubuntu's (see roles/hardening/tasks/main.yml).
+hardening_removed_accounts:
+  - ubuntu
+  - debian
+
+# Point releases as well as security fixes, so packages keep up with Debian
+# stable and not only with its advisories. Debian's own defaults already allow
+# the release itself and Debian-Security; this adds -updates. Backports are
+# never matched. See "Package updates and reboots" in the README.
+common_unattended_extra_origins:
+  - "origin=Debian,codename=${distro_codename}-updates"
+
+# needrestart reports and restarts nothing, and the reboot state goes to a
+# file node-exporter can read.
+common_reboot_reporting: true
+
+# To upgrade k3s here ahead of the fleet (a canary), set k3s_version and
+# k3s_upgrade_path in this file: they override group_vars/managed_boxes.

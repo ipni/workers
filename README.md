@@ -46,8 +46,9 @@ The playbook is idempotent and safe to re-run.
 **Controller prerequisites.** `ansible-core` with the `community.general` and
 `ansible.posix` collections, and `kubectl` for the tunnel scripts. A **first**
 run against a freshly provisioned box also needs `sshpass` installed on the
-controller: site.yml falls back to root password authentication when the admin
-key does not work yet, and Ansible shells out to `sshpass` for that
+controller: site.yml falls back to root when the admin key does not work yet,
+by key from your ssh-agent if the box takes it (no `sshpass` needed), otherwise
+with the root password, and Ansible shells out to `sshpass` for that
 (`ansible.cfg` keeps `password` in `PreferredAuthentications` for the same
 reason). Once hardening has run, every later connection is key-based and
 `sshpass` is no longer used.
@@ -217,7 +218,7 @@ those with this box's own IP (the same machine under its old name) and any
 that are not Ready. A Ready node on another IP is never deleted.
 
 **Upgrading k3s.** Add the latest patch of each minor version you need, up to
-the stable channel, to `k3s_upgrade_path` in `group_vars/ipfs_nodes/main.yml`,
+the stable channel, to `k3s_upgrade_path` in `group_vars/managed_boxes/main.yml`,
 and set `k3s_version` there to the last entry — the playbook refuses to run
 unless the two agree, so the target and the route to it stay in step. Then run
 `k3s-upgrade.yml`. Look versions up at
@@ -231,6 +232,87 @@ unless the two agree, so the target and the route to it stay in step. Then run
   k3s itself, it first flushes every `KUBE-*`/flannel iptables rule.
 - Each step waits for the node version, Ready, and every deployment.
 - Rolling back to an older minor needs the backup taken on that minor.
+- Each step records every container ID first and compares afterwards. A
+  container replaced outside `kube-system` fails the box, so the next box is
+  not touched; one replaced inside it is reported.
+
+**Do containers restart on a k3s upgrade?** Normally not, from 1.31 on. This was
+checked against k3s's docs and the source of k3s and Kubernetes, not measured on
+a box, so the check above is what proves it on each hop.
+
+Why they survive: the unit has `KillMode=process`, so stopping k3s kills only
+k3s itself. Its containerd child dies with it (`Pdeathsig`), but each container
+has its own shim process, which keeps running and which the new containerd
+reconnects to. A running container keeps its old shim and runc until it is
+replaced. k3s's docs say containers continue while k3s is stopped. The kubelet
+then decides from two checks, and neither looks at its own version or at the
+pause image: the container hash (since 1.31 only the name and image, unchanged
+through 1.37) and `PodSandboxChanged`. Readiness is carried over a kubelet
+restart for containers that were already ready.
+
+Where containers **do** restart, or traffic is otherwise touched:
+
+| Case | What happens |
+|---|---|
+| Crossing 1.30 to 1.31 | The hash changed, so every container on the node restarts. Any box still below 1.31 hits this once (sf and sf2, on 1.28, would). |
+| A later Kubernetes changes the hash again | The same, with no warning. Upstream only supports draining before a minor kubelet upgrade, and declined to treat this as a breaking change. |
+| k3s's packaged components get a new image | Those pods roll: CoreDNS (1.36.4 to 1.37.2 moves it from 1.14.6 to 1.14.7) and, where enabled, Traefik, metrics-server, local-path and servicelb's `svclb` pods. |
+| A new pause image | Existing pods keep theirs; only new pods get it. Not a restart. |
+| A containerd bug | Has happened: k3s issue 6809 restarted non-host-network pods because CNI state was lost. Read the release notes. |
+| The API server and kubelet are down for the backup and restart | Containers run on, but nothing is restarted if one crashes, and anything calling the API sees errors: Argo CD, operators, pods that watch. |
+| A reboot or `k3s-killall.sh` | Everything restarts. |
+
+## Indexer boxes
+
+The `indexers` group holds indexers built by this repo: Debian stable, standalone
+k3s, built by `site.yml` and upgraded by `k3s-upgrade.yml`. No other playbook
+reaches them. They share the fleet's settings through `managed_boxes`, the parent
+of `ipfs_nodes` and `indexers` (`group_vars/managed_boxes/main.yml`); a value in
+`group_vars/indexers/` or `host_vars/<box>/` overrides it. What runs on the box
+comes from ipni/infra through Argo CD. sf and sf2 are not part of this.
+
+**Storage** is per box, in `host_vars/<box>/main.yml`. `storage_mode` is
+`ext4_blank_nvme` (as on the IPFS boxes) or `zfs` (the pools in
+`storage_zfs_pools`, with disks by `/dev/disk/by-id`). The ZFS path never
+recreates anything: an imported pool is left alone, an exported pool of that name
+or a disk with any signature stops the run, `zpool create` never gets `-f`, and a
+run from CI refuses to create a pool at all. k3s will not start until the datasets
+are mounted, so pods cannot write to the OS disk after a failed import.
+
+**Building a box.** Add it to `indexers` with its `host_vars`, on a branch. With
+the root key in your agent (`ssh-add`), and an admin key from `keys/` too:
+
+```bash
+ansible-playbook site.yml -l <box>
+```
+
+A dry run cannot get far on a box this new: the access gate needs the admin user
+to exist and later tasks need packages installed. So check the box with read-only
+commands first. Then pin its host key in `inventory/known_hosts` and merge. **Do
+not merge before the build**: CI refuses an unhardened box, and its `site.yml` runs
+would fail until the box is built and pinned. If root takes neither your key nor
+`vault_root_password` (which only `ipfs_nodes` can see), the run stops there.
+
+### Package updates and reboots
+
+| | Policy on an indexer |
+|---|---|
+| What updates | `unattended-upgrades`, daily: Debian stable, its security archive and `-updates`. Never backports. |
+| Reboots | Never automatic. |
+| ZFS packages | Held out of unattended upgrades on a zfs box: a DKMS build that fails would only show at the next reboot, as a pool that does not import. Upgrade them by hand. |
+| Services | Packages that restart their own service on upgrade still do (ssh, chrony, fail2ban). Established SSH sessions survive. k3s is not an apt package, so apt never restarts k3s or containers. `needrestart` only lists what is left running on old libraries. |
+| Kernels | Installed but inactive until a reboot. |
+
+A pending reboot shows in three places: `/var/run/reboot-required`, the `reboot:`
+line in every `site.yml` summary, and the `node_reboot_required` metric, which an
+hourly timer writes to `/var/lib/node_exporter/textfile/reboot.prom`. The metric
+reaches Prometheus only once ipni/infra's node-exporter is given that directory
+(`--collector.textfile.directory`, with a host mount) and an alert is added.
+
+To reboot: on a zfs box run `dkms status` first and check ZFS is built for the new
+kernel, then reboot one box at a time. Every container restarts.
+
+The IPFS boxes keep their existing update policy. They only gain the `reboot:` summary line.
 
 ## needle
 
@@ -1772,8 +1854,11 @@ turn an unrelated pull request red.
 
 ```
 ansible.cfg               inventory, vault and SSH defaults
-inventory/hosts.yml       the three hosts
-group_vars/ipfs_nodes/    tunables (admin user, firewall, k3s, sysctl)
+inventory/hosts.yml       the boxes and their groups
+group_vars/managed_boxes/ what every built box shares (admin user, firewall, k3s, sysctl)
+group_vars/ipfs_nodes/    the IPFS boxes' own settings (rollout, bootstrappers, Argo CD)
+group_vars/indexers/      the indexers' own settings
+host_vars/<box>/main.yml  an indexer's site and storage
 host_vars/<box>/vault.yml   encrypted per-box credentials (gitignored, see Secrets)
 roles/{common,storage,hardening,k3s}/   base preparation
 roles/needle/            needle firewall + deploy

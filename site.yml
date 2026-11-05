@@ -1,5 +1,6 @@
 ---
-# Base preparation for the three IPFS/IPNI hosts.
+# Base preparation for every box this repo builds (managed_boxes: the IPFS hosts
+# and the indexers).
 #
 #   ansible-playbook site.yml                 # all three
 #   ansible-playbook site.yml -l chic-1       # one host
@@ -16,7 +17,7 @@
 # sets site_require_hardened: CI only maintains boxes that are already built.
 
 - name: Detect which credentials work for each host
-  hosts: ipfs_nodes
+  hosts: managed_boxes
   gather_facts: false
   connection: local
   tags: always
@@ -26,6 +27,19 @@
     # a Homebrew python on an Ubuntu box.
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   tasks:
+    # Before anything touches the box: the name becomes its hostname and k3s
+    # node name, and the storage choice decides what gets formatted.
+    - name: Refuse to build a box whose placeholders are still undecided
+      ansible.builtin.assert:
+        that:
+          - site != 'undecided'
+          - storage_mode | default('') != 'undecided'
+        fail_msg: >-
+          {{ inventory_hostname }}: set site and storage_mode in
+          host_vars/{{ inventory_hostname }}/main.yml, and rename the box if its
+          name is a placeholder, before building it.
+        quiet: true
+
     - name: Probe key-based login as the admin user
       ansible.builtin.command:
         argv:
@@ -67,6 +81,40 @@
         - admin_probe.rc != 0
         - site_require_hardened | default(false) | bool
 
+    # A new box may take root by key, from the operator's ssh-agent. That needs
+    # no vault password, and hardening disables it just the same.
+    - name: Probe key-based login as root on a box that is not hardened yet
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -o
+          - BatchMode=yes
+          - -o
+          - ConnectTimeout=10
+          - -o
+          - StrictHostKeyChecking=accept-new
+          - -o
+          - PasswordAuthentication=no
+          - -p
+          - "{{ ssh_port }}"
+          - "root@{{ ansible_host }}"
+          - "true"
+      register: root_key_probe
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      when: admin_probe.rc != 0
+
+    - name: Use root by key on a freshly provisioned host
+      ansible.builtin.set_fact:
+        ansible_user: root
+        ansible_become: false
+        bootstrap_mode: true
+        bootstrap_auth: key
+      when:
+        - admin_probe.rc != 0
+        - root_key_probe.rc == 0
+
     # no_log: set_fact echoes its arguments, so at -v or through any callback
     # plugin the vaulted root password would be printed in cleartext.
     - name: Fall back to root password auth on a freshly provisioned host
@@ -75,17 +123,20 @@
         ansible_password: "{{ vault_root_password }}"
         ansible_become: false
         bootstrap_mode: true
-      when: admin_probe.rc != 0
+        bootstrap_auth: password
+      when:
+        - admin_probe.rc != 0
+        - root_key_probe.rc != 0
       no_log: true
 
     - name: Report the connection mode
       ansible.builtin.debug:
         msg: >-
-          {{ inventory_hostname }}: {{ 'BOOTSTRAP (root + password)'
+          {{ inventory_hostname }}: {{ 'BOOTSTRAP (root + ' ~ bootstrap_auth ~ ')'
           if bootstrap_mode else 'HARDENED (admin key + sudo)' }}
 
-- name: Prepare IPFS hosts
-  hosts: ipfs_nodes
+- name: Prepare the boxes
+  hosts: managed_boxes
   gather_facts: true
   # serial is templated before any host is chosen, so inventory group_vars are
   # not visible here: read production_rollout from its group_vars file
@@ -99,7 +150,7 @@
     {{ rollout_serial | default(1 if (production_rollout
        | default((lookup('ansible.builtin.file', playbook_dir ~ '/group_vars/ipfs_nodes/main.yml')
                   | from_yaml).production_rollout | default(false)) | bool)
-       else (groups['ipfs_nodes'] | length)) }}
+       else (groups['managed_boxes'] | length)) }}
   any_errors_fatal: false
   roles:
     - role: common
@@ -201,6 +252,12 @@
       changed_when: false
       failed_when: false
 
+    # Read-only, and printed in every run's summary, CI's included.
+    - name: Check whether this box is waiting for a reboot
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: site_reboot_required
+
     - name: Summarise the finished host
       ansible.builtin.debug:
         msg:
@@ -208,5 +265,6 @@
           - "site:       {{ site }}"
           - "os:         {{ ansible_distribution }} {{ ansible_distribution_version }}"
           - "data disk:  {{ live_data_mount.stdout | trim | default('NOT MOUNTED', true) }}"
+          - "reboot:     {{ 'PENDING (/var/run/reboot-required); reboot deliberately, see the README' if site_reboot_required.stat.exists else 'none pending' }}"
           - "ssh:        key-only as {{ admin_user }}, root login disabled"
           - "kubeconfig: kubeconfigs/{{ inventory_hostname }}.yaml (via SSH tunnel)"

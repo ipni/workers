@@ -1,0 +1,12 @@
+---
+# Every running container as namespace/pod/container=id, one a line, which
+# upgrade_hop.yml compares across a hop.
+k3s_list_containers:
+  - k3s
+  - kubectl
+  - get
+  - pods
+  - --all-namespaces
+  - -o
+  - >-
+    go-template={{ '{{' }}range .items{{ '}}' }}{{ '{{' }}$p := .{{ '}}' }}{{ '{{' }}range .status.containerStatuses{{ '}}' }}{{ '{{' }}$p.metadata.namespace{{ '}}' }}/{{ '{{' }}$p.metadata.name{{ '}}' }}/{{ '{{' }}.name{{ '}}' }}={{ '{{' }}.containerID{{ '}}' }}{{ '{{' }}"\n"{{ '}}' }}{{ '{{' }}end{{ '}}' }}{{ '{{' }}end{{ '}}' }}

@@ -1,0 +1,118 @@
+---
+# Pools from storage_zfs_pools. This never recreates or forces anything: a pool
+# that exists is left alone, `zpool create` runs without -f, and a disk with any
+# signature on it stops the run. Reads live state, like the ext4 path.
+
+- name: Check the ZFS layout is complete
+  vars:
+    mountpoints: "{{ storage_zfs_pools | map(attribute='datasets') | flatten | map(attribute='properties') | map(attribute='mountpoint') | list }}"
+    disks: "{{ storage_zfs_pools | map(attribute='vdevs') | flatten | select('match', '^/') | list }}"
+    keywords: "{{ storage_zfs_pools | map(attribute='vdevs') | flatten | reject('match', '^/') | list }}"
+  ansible.builtin.assert:
+    that:
+      - storage_zfs_pools | length > 0
+      - data_mount in mountpoints
+      - disks | length > 0
+      - disks | reject('match', '^/dev/disk/by-id/') | list | length == 0
+      - keywords | reject('match', '^(mirror|raidz[123]?|log|cache|spare|special)$') | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: storage_zfs_pools needs at least one pool, disks
+      as /dev/disk/by-id paths (kernel names move between boots), and a dataset
+      mounted at data_mount ({{ data_mount }}).
+    quiet: true
+
+# Ubuntu's kernel carries the module. Debian's cannot, for licence reasons: the
+# module is built by DKMS from contrib.
+- name: Enable contrib for ZFS on Debian
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/ipni-contrib.sources
+    mode: "0644"
+    content: |
+      # Managed by Ansible. ZFS lives in contrib.
+      Types: deb
+      URIs: http://deb.debian.org/debian
+      Suites: {{ ansible_distribution_release }} {{ ansible_distribution_release }}-updates
+      Components: contrib
+      Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+  register: storage_contrib
+  when: ansible_distribution == 'Debian'
+
+- name: Refresh apt after enabling contrib
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+  when: storage_contrib is changed  # noqa: no-handler
+
+- name: Accept the ZFS licence note non-interactively
+  ansible.builtin.debconf:
+    name: zfs-dkms
+    question: zfs-dkms/note-incompatible-licenses
+    value: "true"
+    vtype: note
+  when: ansible_distribution == 'Debian'
+
+- name: Install ZFS
+  ansible.builtin.apt:
+    name: "{{ ['linux-headers-' ~ ansible_kernel, 'zfs-dkms', 'zfsutils-linux'] if ansible_distribution == 'Debian' else ['zfsutils-linux'] }}"
+    state: present
+
+- name: Look for the zpool command
+  ansible.builtin.stat:
+    path: /usr/sbin/zpool
+  register: storage_zpool_bin
+
+# In a dry run on a box without ZFS there is nothing yet to ask.
+- name: Provision the pools
+  when: storage_zpool_bin.stat.exists
+  block:
+    - name: Load the ZFS module
+      community.general.modprobe:
+        name: zfs
+        state: present
+
+    - name: Provision each pool
+      ansible.builtin.include_tasks: zfs_pool.yml
+      loop: "{{ storage_zfs_pools }}"
+      loop_control:
+        loop_var: storage_pool
+        label: "{{ storage_pool.name }}"
+
+    - name: Import and mount the pools on boot
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+      loop:
+        - zfs-import-cache.service
+        - zfs-mount.service
+        - zfs.target
+
+# Without this a pool that failed to import leaves empty directories, and k3s
+# would start pods that write their data to the OS disk. After= alone, not
+# Requires=: restarting a ZFS unit must not restart k3s.
+- name: Create the k3s unit drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/k3s.service.d
+    state: directory
+    mode: "0755"
+
+- name: Hold k3s until the ZFS datasets are mounted
+  vars:
+    mountpoints: "{{ storage_zfs_pools | map(attribute='datasets') | flatten | map(attribute='properties') | map(attribute='mountpoint') | list }}"
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/k3s.service.d/10-wait-for-zfs.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      [Unit]
+      After=zfs-mount.service
+
+      [Service]
+      {% for path in mountpoints %}
+      ExecStartPre=/usr/bin/mountpoint -q {{ path }}
+      {% endfor %}
+  register: storage_k3s_dropin
+
+- name: Reload systemd for the k3s drop-in
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: storage_k3s_dropin is changed  # noqa: no-handler
