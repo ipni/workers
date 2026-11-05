@@ -7,7 +7,7 @@ storage_mode: ext4_blank_nvme
 # Each: name, vdevs (the zpool create layout: mirror, raidz..., and disks by
 # /dev/disk/by-id), and datasets, each a name and its zfs properties. Listed per
 # box in host_vars, because a disk layout is never guessed. See
-# host_vars/idx-new-1/main.yml.
+# host_vars/indexers-chic1/main.yml.
 storage_zfs_pools: []
 
 # Passed to zpool create only. Changing these does nothing to an existing pool.

@@ -24,7 +24,7 @@ ansible-playbook cve.yml -K --check --diff -l sf   # dry run first
 ansible infra_boxes -m ping                         # no sudo needed
 ```
 
-**indexers** (`idx-new-1`, a placeholder name, 84.32.71.3) are built by this repo
+**indexers** (`indexers-chic1`, 84.32.71.3, the indexer test box) are built by this repo
 but are not `ipfs_nodes`: Debian, `site.yml` and `k3s-upgrade.yml` only. Shared
 settings are in `group_vars/managed_boxes/`. See "Indexer boxes" in the README.
 Merge a new box only after it is built and its host key is pinned, or CI's

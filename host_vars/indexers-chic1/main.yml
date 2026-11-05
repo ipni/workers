@@ -1,7 +1,6 @@
 ---
-# Placeholder box: site.yml refuses to build it until site is decided and its
-# disks are listed below.
-site: undecided           # the location, for the site= node label
+# The indexer test box, Cherry Servers in Chicago.
+site: chicago             # the location, for the site= node label
 
 # The test layout for the next indexers (README, "Indexer boxes"). Installed by
 # hand first: on each of the three disks the provider's EFI partition, then a

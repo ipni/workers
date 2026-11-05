@@ -282,7 +282,7 @@ get no force flag, and a run from CI refuses to create a pool or array at all.
 k3s will not start until the data volume is mounted, so pods cannot write to the
 OS disk after a failed import or assembly.
 
-**The indexer test layout** (`idx-new-1`, three 15.36 TB NVMe), meant to become
+**The indexer test layout** (`indexers-chic1`, three 15.36 TB NVMe), meant to become
 the layout for sf and sf2 once it has proved itself:
 
 | Part | Where | Layout | Filesystem |
@@ -314,7 +314,7 @@ nvme format /dev/nvme0n1 --lbaf=1                # each drive; erases it
 lsblk -d -o NAME,PHY-SEC,LOG-SEC                 # LOG-SEC 4096 on each
 ```
 
-Cherry's Debian 13 reinstall boots on 4096-byte drives (idx-new-1, 2026-11). A
+Cherry's Debian 13 reinstall boots on 4096-byte drives (indexers-chic1, 2026-11). A
 `PHY-SEC` of 262144 on the 7450s is their preferred write size, not a sector
 size; partitions on whole MiB and the 512 KiB chunk are multiples of it.
 
