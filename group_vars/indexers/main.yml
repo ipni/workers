@@ -24,3 +24,15 @@ common_reboot_reporting: true
 
 # To upgrade k3s here ahead of the fleet (a canary), set k3s_version and
 # k3s_upgrade_path in this file: they override group_vars/managed_boxes.
+#
+# Indexers run the stable channel's latest, ahead of the IPFS boxes (1.36).
+# Checked 2026-11-05 at https://update.k3s.io/v1-release/channels.
+k3s_version: v1.37.2+k3s1
+k3s_upgrade_path:
+  - v1.31.14+k3s1
+  - v1.32.13+k3s1
+  - v1.33.13+k3s2
+  - v1.34.11+k3s1
+  - v1.35.8+k3s1
+  - v1.36.4+k3s1
+  - v1.37.2+k3s1
