@@ -232,6 +232,32 @@
 # ---------------------------------------------------------------------------
 # 4. SSH lockdown - last, and only after the gate above passed
 # ---------------------------------------------------------------------------
+# Provider images (Cherry's Debian 13) ship 50-cloud-init.conf with
+# PasswordAuthentication yes, which sorts before 99-hardening.conf and so wins.
+# Remove it, and tell cloud-init not to write it again (its cloud.cfg has
+# ssh_pwauth: true). Skipped where cloud-init is not installed.
+- name: Look for cloud-init's config directory
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg.d
+  register: cloud_cfg_d
+
+- name: Stop cloud-init from turning SSH password login back on
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-ipni-ssh.cfg
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible: SSH is key-only (roles/hardening).
+      ssh_pwauth: false
+  when: cloud_cfg_d.stat.isdir | default(false)
+
+- name: Remove cloud-init's sshd drop-in, which overrides 99-hardening.conf
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+    state: absent
+  notify: Reload sshd
+
 - name: Harden sshd configuration
   ansible.builtin.copy:
     dest: /etc/ssh/sshd_config.d/99-hardening.conf
