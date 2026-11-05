@@ -288,7 +288,7 @@ the layout for sf and sf2 once it has proved itself:
 | Part | Where | Layout | Filesystem |
 |------|-------|--------|------------|
 | EFI | partition 1 on each disk | the installer's | vfat |
-| OS, 500 GiB | partition 2 on each disk | md RAID1 over the three | ext4, `/` |
+| OS, 300 GB | partition 2 on each disk | md RAID1 over the three | ext4, `/` |
 | Data, the rest (about 27 TiB) | partition 3 on each disk | md RAID5 over the three | XFS, `/ipni` |
 
 The OS part is the install: the provider's custom partitioning or a Debian
@@ -299,13 +299,24 @@ least `storage_md_min_free_gib` free and a GPT table), checks the three are
 blank, creates the array, records it in `mdadm.conf` and the initramfs, and
 formats XFS with 4 KiB sectors, which `mkfs.xfs` aligns to the RAID stripe by
 itself. The array's first resync runs for hours afterwards; it is usable
-meanwhile. Check what the drives report before building, since a drive can
-also be reformatted to 4 KiB sectors, which erases it:
+meanwhile.
+
+**Switch the drives to 4096-byte sectors before the install.** Drives often
+ship on 512-byte sectors and offer 4096, which their makers rate faster (the
+Micron 7450s here: 512 "Good", 4096 "Best"). Switching erases the drive, so it
+is done from the provider's rescue system before the OS goes on, never from the
+installed OS:
 
 ```bash
-lsblk -d -o NAME,MODEL,PHY-SEC,LOG-SEC,MIN-IO,OPT-IO
-nvme id-ns -H /dev/nvme0n1 | grep 'LBA Format'
+nvme id-ns -H /dev/nvme0n1 | grep 'LBA Format'   # which format number is 4096
+mdadm --stop --scan                              # if the rescue system assembled the old RAID
+nvme format /dev/nvme0n1 --lbaf=1                # each drive; erases it
+lsblk -d -o NAME,PHY-SEC,LOG-SEC                 # LOG-SEC 4096 on each
 ```
+
+Cherry's Debian 13 reinstall boots on 4096-byte drives (idx-new-1, 2026-11). A
+`PHY-SEC` of 262144 on the 7450s is their preferred write size, not a sector
+size; partitions on whole MiB and the 512 KiB chunk are multiples of it.
 
 To try a different data layout on the same box, stop k3s, unmount `/ipni`, and
 stop and clear the array by hand; the role will not do that.
