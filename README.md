@@ -272,13 +272,12 @@ of `ipfs_nodes` and `indexers` (`group_vars/managed_boxes/main.yml`); a value in
 comes from ipni/infra through Argo CD. sf and sf2 are not part of this.
 
 **Storage** is per box, in `host_vars/<box>/main.yml`. `storage_mode` is
-`ext4_blank_nvme` (as on the IPFS boxes), `zfs` (the pools in
-`storage_zfs_pools`, with disks by `/dev/disk/by-id`) or `md_xfs` (one md array
-over a partition on each disk, XFS on it, from `storage_md`). Indexers mount
-their data at `/ipni`, the path ipni/infra's indexer manifests use. The `zfs` and
-`md_xfs` modes never recreate anything: an existing pool, array or filesystem is left alone, a disk
-or member with any signature stops the run, `zpool create` and `mdadm --create`
-get no force flag, and a run from CI refuses to create a pool or array at all.
+`ext4_blank_nvme` (as on the IPFS boxes) or `md_xfs` (one md array over a
+partition on each disk, XFS on it, from `storage_md`). Indexers mount their data
+at `/ipni`, the path ipni/infra's indexer manifests use. `md_xfs` never
+recreates anything: an existing array or filesystem is left alone, a member with
+any signature stops the run, `mdadm --create` gets no force flag, and a run from
+CI refuses to create an array at all.
 k3s will not start until the data volume is mounted, so pods cannot write to the
 OS disk after a failed import or assembly.
 
@@ -341,7 +340,6 @@ would fail until the box is built and pinned. If root takes neither your key nor
 |---|---|
 | What updates | `unattended-upgrades`, daily: Debian stable, its security archive and `-updates`. Never backports. |
 | Reboots | Never automatic. |
-| ZFS packages | Held out of unattended upgrades on a zfs box: a DKMS build that fails would only show at the next reboot, as a pool that does not import. Upgrade them by hand. |
 | Services | Packages that restart their own service on upgrade still do (ssh, chrony, fail2ban). Established SSH sessions survive. k3s is not an apt package, so apt never restarts k3s or containers. `needrestart` only lists what is left running on old libraries. |
 | Kernels | Installed but inactive until a reboot. |
 
@@ -351,8 +349,7 @@ hourly timer writes to `/var/lib/node_exporter/textfile/reboot.prom`. The metric
 reaches Prometheus only once ipni/infra's node-exporter is given that directory
 (`--collector.textfile.directory`, with a host mount) and an alert is added.
 
-To reboot: on a zfs box run `dkms status` first and check ZFS is built for the new
-kernel, then reboot one box at a time. Every container restarts.
+To reboot: one box at a time. Every container restarts.
 
 The IPFS boxes keep their existing update policy. They only gain the `reboot:` summary line.
 

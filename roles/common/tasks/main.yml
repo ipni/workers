@@ -200,7 +200,7 @@
       APT::Periodic::AutocleanInterval "7";
 
 # With the defaults this writes what it always has: the policy on the IPFS boxes
-# is unchanged. An indexer widens the origins, and a zfs box adds the blocklist.
+# is unchanged. An indexer widens the origins.
 - name: Configure unattended-upgrades to security only, no auto-reboot
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/51-ipfs-unattended
@@ -217,17 +217,6 @@
       {% for origin in common_unattended_extra_origins %}
         "{{ origin }}";
       {% endfor %}
-      };
-      {% endif %}
-      {% if storage_mode | default('') == 'zfs' %}
-      // A DKMS module that fails to build against a new ZFS would surface at
-      // the next reboot, as a pool that does not import. ZFS moves by hand.
-      Unattended-Upgrade::Package-Blacklist {
-        "zfs";
-        "libzfs";
-        "libzpool";
-        "libnvpair";
-        "libuutil";
       };
       {% endif %}
 

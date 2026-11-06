@@ -4,17 +4,13 @@
 # the tasks inside.
 - name: Check storage_mode is one this role knows
   ansible.builtin.assert:
-    that: storage_mode in ['ext4_blank_nvme', 'zfs', 'md_xfs']
+    that: storage_mode in ['ext4_blank_nvme', 'md_xfs']
     fail_msg: "{{ inventory_hostname }}: unknown storage_mode {{ storage_mode }}"
     quiet: true
 
 - name: Provision the blank NVMe as ext4
   ansible.builtin.import_tasks: ext4_blank_nvme.yml
   when: storage_mode == 'ext4_blank_nvme'
-
-- name: Provision ZFS
-  ansible.builtin.import_tasks: zfs.yml
-  when: storage_mode == 'zfs'
 
 - name: Provision an md array with XFS
   ansible.builtin.import_tasks: md_xfs.yml
