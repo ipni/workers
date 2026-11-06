@@ -140,6 +140,21 @@ configMapGenerator:
       # which is the only reason the per-peer lock contention was ever visible.
       - NEEDLE_PPROF=true
 
+      # Traces (ipni/infra#163), to the trace collector on the box's loopback
+      # (ipni/infra kubernetes/platform/alloy-traces) over OTLP/HTTP. Under
+      # hostNetwork this is the HOST's loopback, which is where it listens.
+      # Setting the endpoint alone is enough for needle to export.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+
+      # Join the trace Envoy starts and follow its sampling decision (5%, see
+      # tracing in k8s/route-origin/envoy.yaml.j2) rather than deciding again.
+      # Safe only because needle is reachable solely through that Envoy: the
+      # API is loopback-only, and Envoy drops a client's traceparent and
+      # tracestate before reading them, so a client cannot choose what needle
+      # samples. NEEDLE_SAMPLING_FRACTION stays at its default of 0, so a
+      # request without a traceparent, from a tool on the box, is not traced.
+      - NEEDLE_TRACING_TRUST_TRACEPARENT=true
+
       # The libp2p resource manager defaults to 85% of HOST RAM and ignores the
       # cgroup limit, which would let it plan past the pod's 21Gi and get
       # OOM-killed. 16 GiB, in bytes: a quarter of the 64 GiB the single
