@@ -52,10 +52,50 @@
   failed_when: false
   check_mode: false
 
+# A filesystem carrying the label is only accepted on the configured array,
+# built from the configured members. Anything else (the label on some other
+# volume, the array missing, or an array of other disks under the same name)
+# stops the run before the mount below could put the wrong volume at
+# data_mount.
+- name: Resolve the array and its configured members to kernel names
+  ansible.builtin.command:
+    argv: "{{ ['readlink', '-f', storage_md_dev] + storage_md_members }}"
+  register: storage_md_paths
+  changed_when: false
+  check_mode: false
+  when: storage_md_detail.rc == 0
+
+- name: Read the array's actual members
+  ansible.builtin.command:
+    argv: [mdadm, --detail, --export, "{{ storage_md_dev }}"]
+  register: storage_md_export
+  changed_when: false
+  check_mode: false
+  when: storage_md_detail.rc == 0
+
+- name: Refuse a data filesystem or array that is not the configured one
+  vars:
+    md_real: "{{ storage_md_paths.stdout_lines[0] if storage_md_detail.rc == 0 else '' }}"
+    want_members: "{{ (storage_md_paths.stdout_lines[1:] if storage_md_detail.rc == 0 else []) | sort }}"
+    have_members: >-
+      {{ (storage_md_export.stdout_lines | default([]))
+         | select('match', '^MD_DEVICE_.*_DEV=')
+         | map('regex_replace', '^[^=]*=', '') | sort }}
+  ansible.builtin.assert:
+    that:
+      - storage_md_fs.rc != 0 or storage_md_detail.rc == 0
+      - storage_md_fs.rc != 0 or (storage_md_fs.stdout | trim) in [storage_md_dev, md_real]
+      - storage_md_detail.rc != 0 or have_members == want_members
+    fail_msg: >-
+      {{ inventory_hostname }}: the label {{ storage_md_label }} is on
+      {{ storage_md_fs.stdout | default('nothing') | trim }}, and {{ storage_md_dev }}
+      {{ ('is ' ~ md_real ~ ' with members ' ~ have_members) if storage_md_detail.rc == 0 else 'is not assembled' }};
+      expected members {{ want_members if want_members else storage_md_members }}.
+      Nothing was changed; look at the box.
+    quiet: true
+
 - name: Create the array if it does not exist
-  when:
-    - storage_md_detail.rc != 0
-    - storage_md_fs.rc != 0
+  when: storage_md_detail.rc != 0
   block:
     # CI only maintains built boxes. A missing array there is an incident (a
     # failed assembly, a dead disk), not something to build.
@@ -134,24 +174,28 @@
 
     # wipefs -n reads and reports only. An empty answer means no filesystem, RAID
     # or partition-table signature: a member that was in another array stops here.
+    # A dry run probes the partitions that already exist too, so it refuses what
+    # the real run would; only partitions it merely simulated creating are skipped.
     - name: Read the signatures on each member
       ansible.builtin.command:
-        argv: [wipefs, --no-act, "{{ item }}"]
-      loop: "{{ storage_md_members }}"
+        argv: [wipefs, --no-act, "{{ item.disk }}-part{{ storage_md.partition_number }}"]
+      loop: "{{ storage_md_plan }}"
+      loop_control:
+        label: "{{ item.disk }}-part{{ storage_md.partition_number }}"
       register: storage_md_signatures
       changed_when: false
       check_mode: false
-      when: not ansible_check_mode
+      when: item.exists or not ansible_check_mode
 
     - name: Refuse to touch a member that is not blank
       ansible.builtin.assert:
         that: storage_md_signatures.results | selectattr('stdout', 'defined') | selectattr('stdout', 'ne', '') | list | length == 0
         fail_msg: >-
           {{ inventory_hostname }}: not blank:
-          {{ storage_md_signatures.results | selectattr('stdout', 'defined') | selectattr('stdout', 'ne', '') | map(attribute='item') | list }}.
+          {{ storage_md_signatures.results | selectattr('stdout', 'defined') | selectattr('stdout', 'ne', '')
+             | map(attribute='item.disk') | map('regex_replace', '$', '-part' ~ storage_md.partition_number) | list }}.
           Nothing was changed. Clearing a disk is an operator's decision.
         quiet: true
-      when: not ansible_check_mode
 
     # --homehost=any keeps the array's name from depending on the hostname, so
     # renaming the box does not rename /dev/md/<name>. The first resync of a
