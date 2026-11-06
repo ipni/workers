@@ -1,0 +1,278 @@
+---
+# storage_md: one md array built from a partition on each disk, XFS on it, at
+# data_mount. The OS is installed first on its own small partitions and the
+# rest of each disk is left unallocated; this fills that space with partition
+# storage_md.partition_number. See host_vars/indexers-chic1/main.yml.
+#
+# Like the other modes, this never recreates anything: an array or filesystem
+# that exists is left alone, a member with any signature stops the run, mdadm
+# gets no --force or --run (so a question it would ask aborts it), and a run from
+# CI refuses to create an array at all. Live state only, never cached facts.
+
+- name: Check the md layout is complete
+  vars:
+    min_disks: "{{ {1: 2, 5: 3, 6: 4, 10: 4}[storage_md.level | default(0) | int] | default(99) }}"
+  ansible.builtin.assert:
+    that:
+      - storage_md.name | default('') is match('^[a-z0-9-]+$')
+      - storage_md.level | default(0) | int in [1, 5, 6, 10]
+      - storage_md.partition_number | default(0) | int > 0
+      - storage_md.disks | default([]) | length >= min_disks | int
+      - storage_md.disks | reject('match', '^/dev/disk/by-id/') | list | length == 0
+      - storage_md.disks | select('search', '-part[0-9]+$') | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: storage_md needs a name, a RAID level (1, 5, 6 or
+      10) with enough disks for it, the partition number to use, and whole disks
+      as /dev/disk/by-id paths (kernel names move between boots).
+    quiet: true
+
+- name: Install mdadm, XFS and parted
+  ansible.builtin.apt:
+    name: [mdadm, xfsprogs, parted]
+    state: present
+
+- name: Name the array's device and members
+  ansible.builtin.set_fact:
+    storage_md_dev: "/dev/md/{{ storage_md.name }}"
+    storage_md_members: "{{ storage_md.disks | map('regex_replace', '$', '-part' ~ storage_md.partition_number) | list }}"
+
+- name: Look for the data filesystem by label
+  ansible.builtin.command:
+    argv: [blkid, -L, "{{ storage_md_label }}"]
+  register: storage_md_fs
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Look for the array
+  ansible.builtin.command:
+    argv: [mdadm, --detail, "{{ storage_md_dev }}"]
+  register: storage_md_detail
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# A filesystem carrying the label is only accepted on the configured array,
+# built from the configured members. Anything else (the label on some other
+# volume, the array missing, or an array of other disks under the same name)
+# stops the run before the mount below could put the wrong volume at
+# data_mount.
+- name: Resolve the array and its configured members to kernel names
+  ansible.builtin.command:
+    argv: "{{ ['readlink', '-f', storage_md_dev] + storage_md_members }}"
+  register: storage_md_paths
+  changed_when: false
+  check_mode: false
+  when: storage_md_detail.rc == 0
+
+- name: Read the array's actual members
+  ansible.builtin.command:
+    argv: [mdadm, --detail, --export, "{{ storage_md_dev }}"]
+  register: storage_md_export
+  changed_when: false
+  check_mode: false
+  when: storage_md_detail.rc == 0
+
+- name: Refuse a data filesystem or array that is not the configured one
+  vars:
+    md_real: "{{ storage_md_paths.stdout_lines[0] if storage_md_detail.rc == 0 else '' }}"
+    want_members: "{{ (storage_md_paths.stdout_lines[1:] if storage_md_detail.rc == 0 else []) | sort }}"
+    have_members: >-
+      {{ (storage_md_export.stdout_lines | default([]))
+         | select('match', '^MD_DEVICE_.*_DEV=')
+         | map('regex_replace', '^[^=]*=', '') | sort }}
+  ansible.builtin.assert:
+    that:
+      - storage_md_fs.rc != 0 or storage_md_detail.rc == 0
+      - storage_md_fs.rc != 0 or (storage_md_fs.stdout | trim) in [storage_md_dev, md_real]
+      - storage_md_detail.rc != 0 or have_members == want_members
+    fail_msg: >-
+      {{ inventory_hostname }}: the label {{ storage_md_label }} is on
+      {{ storage_md_fs.stdout | default('nothing') | trim }}, and {{ storage_md_dev }}
+      {{ ('is ' ~ md_real ~ ' with members ' ~ have_members) if storage_md_detail.rc == 0 else 'is not assembled' }};
+      expected members {{ want_members if want_members else storage_md_members }}.
+      Nothing was changed; look at the box.
+    quiet: true
+
+- name: Create the array if it does not exist
+  when: storage_md_detail.rc != 0
+  block:
+    # CI only maintains built boxes. A missing array there is an incident (a
+    # failed assembly, a dead disk), not something to build.
+    - name: Refuse to create an array from a run that only maintains built boxes
+      ansible.builtin.assert:
+        that: not (site_require_hardened | default(false) | bool)
+        fail_msg: "{{ inventory_hostname }}: {{ storage_md_dev }} is not assembled; look at the box."
+        quiet: true
+
+    - name: Read each disk's partition table
+      community.general.parted:
+        device: "{{ item }}"
+        unit: MiB
+        state: info
+      loop: "{{ storage_md.disks }}"
+      register: storage_md_tables
+      check_mode: false
+
+    # parted would write a new, empty label over any other kind of table.
+    - name: Refuse a disk without a GPT table
+      ansible.builtin.assert:
+        that: storage_md_tables.results | rejectattr('disk.table', 'eq', 'gpt') | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: no GPT table on
+          {{ storage_md_tables.results | rejectattr('disk.table', 'eq', 'gpt') | map(attribute='item') | list }}.
+          Install the OS with the layout in the README first.
+        quiet: true
+
+    # The new partition starts after the last one on the disk and must leave a
+    # real data volume: storage_md_min_free_gib of space after it. Every disk is
+    # checked before any is partitioned.
+    - name: Work out where each data partition goes
+      ansible.builtin.set_fact:
+        storage_md_plan: >-
+          {%- set plan = [] -%}
+          {%- for t in storage_md_tables.results -%}
+          {%-   set ends = t.partitions | map(attribute='end') | map('float') | list -%}
+          {%-   set start = ((ends | max) if ends else 1) | round(0, 'ceil') | int + 1 -%}
+          {%-   set _ = plan.append({'disk': t.item,
+                  'exists': t.partitions | selectattr('num', 'eq', storage_md.partition_number | int) | list | length > 0,
+                  'start_mib': start,
+                  'free_gib': ((t.disk.size | float) - start) / 1024}) -%}
+          {%- endfor -%}
+          {{ plan }}
+
+    - name: Check there is room for every data partition
+      ansible.builtin.assert:
+        that: storage_md_plan | rejectattr('exists') | selectattr('free_gib', 'lt', storage_md_min_free_gib) | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: under {{ storage_md_min_free_gib }} GiB free after
+          the last partition on
+          {{ storage_md_plan | rejectattr('exists') | selectattr('free_gib', 'lt', storage_md_min_free_gib) | map(attribute='disk') | list }}.
+          Nothing was changed.
+        quiet: true
+
+    - name: Create the data partition in each disk's free space
+      community.general.parted:
+        device: "{{ item.disk }}"
+        label: gpt
+        number: "{{ storage_md.partition_number | int }}"
+        part_start: "{{ item.start_mib }}MiB"
+        part_end: "100%"
+        name: "{{ storage_md_label }}"
+        flags: [raid]
+        align: optimal
+        state: present
+      loop: "{{ storage_md_plan | rejectattr('exists') | list }}"
+      loop_control:
+        label: "{{ item.disk }} from {{ item.start_mib }} MiB"
+
+    - name: Let udev create the partitions' by-id links
+      ansible.builtin.command:
+        argv: [udevadm, settle]
+      changed_when: false
+      when: not ansible_check_mode
+
+    # wipefs -n reads and reports only. An empty answer means no filesystem, RAID
+    # or partition-table signature: a member that was in another array stops here.
+    # A dry run probes the partitions that already exist too, so it refuses what
+    # the real run would; only partitions it merely simulated creating are skipped.
+    - name: Read the signatures on each member
+      ansible.builtin.command:
+        argv: [wipefs, --no-act, "{{ item.disk }}-part{{ storage_md.partition_number }}"]
+      loop: "{{ storage_md_plan }}"
+      loop_control:
+        label: "{{ item.disk }}-part{{ storage_md.partition_number }}"
+      register: storage_md_signatures
+      changed_when: false
+      check_mode: false
+      when: item.exists or not ansible_check_mode
+
+    - name: Refuse to touch a member that is not blank
+      ansible.builtin.assert:
+        that: storage_md_signatures.results | selectattr('stdout', 'defined') | selectattr('stdout', 'ne', '') | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: not blank:
+          {{ storage_md_signatures.results | selectattr('stdout', 'defined') | selectattr('stdout', 'ne', '')
+             | map(attribute='item.disk') | map('regex_replace', '$', '-part' ~ storage_md.partition_number) | list }}.
+          Nothing was changed. Clearing a disk is an operator's decision.
+        quiet: true
+
+    # --homehost=any keeps the array's name from depending on the hostname, so
+    # renaming the box does not rename /dev/md/<name>. The first resync of a
+    # large array takes hours; the array is usable meanwhile.
+    - name: "Create {{ storage_md_dev }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['mdadm', '--create', storage_md_dev, '--name=' ~ storage_md.name, '--homehost=any',
+              '--metadata=1.2', '--level=' ~ storage_md.level, '--chunk=' ~ storage_md_chunk_kib,
+              '--bitmap=internal', '--raid-devices=' ~ (storage_md_members | length)] + storage_md_members }}
+      changed_when: true
+      when: not ansible_check_mode
+
+- name: Read the array's identity
+  ansible.builtin.command:
+    argv: [mdadm, --detail, --brief, "{{ storage_md_dev }}"]
+  register: storage_md_brief
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# Without this line Debian assembles the array under a made-up md12x name.
+- name: Record the array in mdadm.conf
+  ansible.builtin.lineinfile:
+    path: /etc/mdadm/mdadm.conf
+    regexp: "^ARRAY {{ storage_md_dev }} "
+    line: "{{ storage_md_brief.stdout | trim }}"
+  register: storage_md_conf
+  when: storage_md_brief.rc == 0
+
+- name: Rebuild the initramfs for the new mdadm.conf
+  ansible.builtin.command:
+    argv: [update-initramfs, -u]
+  changed_when: true
+  when: storage_md_conf is changed  # noqa: no-handler
+
+# The filesystem module never reformats: it refuses a device that already
+# carries a filesystem. mkfs.xfs reads the RAID geometry from md itself;
+# -s size=4096 keeps 4 KiB writes on drives that still report 512-byte sectors.
+- name: Create the XFS filesystem on the array
+  community.general.filesystem:
+    fstype: xfs
+    dev: "{{ storage_md_dev }}"
+    opts: "-L {{ storage_md_label }} -s size=4096"
+  when: storage_md_brief.rc == 0 and storage_md_fs.rc != 0
+
+# nofail: a box whose array fails to assemble still boots and can be reached
+# over SSH. The k3s drop-in below then keeps pods off the OS disk.
+- name: Mount the data volume by label and persist it in fstab
+  ansible.posix.mount:
+    path: "{{ data_mount }}"
+    src: "LABEL={{ storage_md_label }}"
+    fstype: xfs
+    opts: defaults,noatime,nofail
+    state: mounted
+  when: storage_md_brief.rc == 0 or storage_md_fs.rc == 0
+
+- name: Create the k3s unit drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/k3s.service.d
+    state: directory
+    mode: "0755"
+
+- name: Hold k3s until the data volume is mounted
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/k3s.service.d/10-wait-for-data.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      [Unit]
+      After=local-fs.target
+
+      [Service]
+      ExecStartPre=/usr/bin/mountpoint -q {{ data_mount }}
+  register: storage_md_k3s_dropin
+
+- name: Reload systemd for the k3s drop-in
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: storage_md_k3s_dropin is changed  # noqa: no-handler

@@ -9,12 +9,15 @@
 #   ansible-playbook k3s-upgrade.yml -l chic-1
 #
 # Every step backs up /var/lib/rancher/k3s/server to /var/lib/rancher/k3s-backups
-# first. The path itself lives in group_vars/ipfs_nodes/main.yml beside
-# k3s_version, so one file records both the target and the route to it; the
-# last entry there must equal k3s_version. The assert below enforces that.
+# first, and afterwards fails the box if a container outside kube-system was
+# replaced (see "Upgrading k3s" in the README). The path itself lives in
+# group_vars/managed_boxes/main.yml beside k3s_version, so one file records both
+# the target and the route to it; the last entry there must equal k3s_version.
+# The assert below enforces that. group_vars/indexers can override both, to
+# upgrade the indexers first.
 
 - name: Upgrade k3s
-  hosts: ipfs_nodes
+  hosts: managed_boxes
   # serial is templated before any host is chosen, so inventory group_vars are
   # not visible here: read production_rollout from its group_vars file
   # directly. -e production_rollout and -e rollout_serial still override.
@@ -22,7 +25,7 @@
     {{ rollout_serial | default(1 if (production_rollout
        | default((lookup('ansible.builtin.file', playbook_dir ~ '/group_vars/ipfs_nodes/main.yml')
                   | from_yaml).production_rollout | default(false)) | bool)
-       else (groups['ipfs_nodes'] | length)) }}
+       else (groups['managed_boxes'] | length)) }}
   remote_user: "{{ admin_user }}"
   become: true
   gather_facts: false
@@ -34,9 +37,9 @@
         that: k3s_upgrade_path[-1] == k3s_version
         fail_msg: >-
           k3s_upgrade_path ends at {{ k3s_upgrade_path[-1] }} but k3s_version is
-          {{ k3s_version }}; both are in group_vars/ipfs_nodes/main.yml.
+          {{ k3s_version }}; both are in group_vars/managed_boxes/main.yml, or
+          a group's override of it.
         quiet: true
-      run_once: true
 
     - name: Walk the upgrade path
       ansible.builtin.include_role:

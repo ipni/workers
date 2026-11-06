@@ -1,70 +1,7 @@
 ---
-# ---------------------------------------------------------------------------
-# Admin account
-# ---------------------------------------------------------------------------
-# The non-root account that replaces root SSH access. Its authorized_keys is
-# the ONLY way in over the network once hardening completes; the provider
-# KVM/web console is the designated out-of-band fallback.
-#
-# The role installs these keys exclusively: a key that is not listed here is
-# REMOVED on the next run. So every key is a committed public key file in
-# keys/, never "whoever runs the playbook" (~/.ssh/id_ed25519.pub), which would
-# lock out every other operator. To add someone, commit their public key here
-# BEFORE the run that would lock them out; to remove someone, delete their line
-# and re-run the hardening role (site.yml --tags hardening, one box at a time).
-admin_user: ipni
-admin_pubkey_file:
-  - "{{ playbook_dir }}/keys/takgn.pub"
-  - "{{ playbook_dir }}/keys/nymd.pub"
-  - "{{ playbook_dir }}/keys/byo.pub"
-  # Break-glass: only for when no operator key works. Its private half exists
-  # only in 1Password (IPFS account, Compass vault); see AGENTS.md. Never
-  # remove it without putting another emergency key in its place.
-  - "{{ playbook_dir }}/keys/break-glass.pub"
-  # CI (.github/workflows/ci.yml, platform.yml). Its private key is the
-  # ANSIBLE_SSH_PRIVATE_KEY repository secret.
-  - "{{ playbook_dir }}/keys/github-actions.pub"
-
-# ---------------------------------------------------------------------------
-# SSH hardening
-# ---------------------------------------------------------------------------
-ssh_port: 22
-ssh_permit_root_login: "no"
-ssh_password_authentication: "no"
-ssh_allow_users: "{{ admin_user }}"
-
-# ---------------------------------------------------------------------------
-# Firewall (default deny inbound)
-# ---------------------------------------------------------------------------
-# Base-prep ports only. Service ports (IPFS swarm, HTTP ingress) get opened by
-# the per-service playbooks in the next pass, so we are not exposing surface
-# for workloads that do not exist yet.
-#
-# The k3s API server (6443) is deliberately absent from this list: it stays
-# closed to the internet and remote kubectl goes over an SSH tunnel (see
-# scripts/kubectl-tunnel.sh). Do not add it here - this list opens a port to
-# every source. The one exception is narrower: roles/argocd opens 6443 on the
-# other boxes to argocd_hub's address only, for Argo CD (see below).
-firewall_allowed_tcp:
-  - "{{ ssh_port }}"
-firewall_allowed_udp: []
-
-# CVE-2026-98432: a remote bug in the kernel's TCP handshake, triggered by a SYN
-# that carries IPv4 options. Until the boxes run a fixed kernel, an nft table
-# of its own drops IPv4 TCP with IP options, and strips the MPTCP option from
-# SYNs (roles/hardening/tasks/cve_2026_98432.yml). Nothing legitimate sends
-# IP options on TCP.
-#
-#   count    match and count, change nothing: what to run first, to see what
-#            enforce would have hit (sudo nft list table inet cve_2026_98432)
-#   enforce  drop and strip
-#   off      remove the table and its unit
-#
-# Override per box in host_vars to enforce one box before the others. All
-# three counted from 2026-10-30 13:20 UTC (no IP-options packets in the first
-# hour), then sing-1 enforced alone from 14:48 before this became the default.
-cve_2026_98432_mode: enforce
-
+# The IPFS boxes' own settings. What they share with every other box this repo
+# builds (admin user, SSH, firewall, storage, k3s, sysctls) is in
+# group_vars/managed_boxes/main.yml.
 # ---------------------------------------------------------------------------
 # Rollout mode
 # ---------------------------------------------------------------------------
@@ -92,97 +29,6 @@ cve_2026_98432_mode: enforce
 production_rollout: true
 
 # ---------------------------------------------------------------------------
-# Storage
-# ---------------------------------------------------------------------------
-# Each host has a second, blank ~894 GiB NVMe. It becomes the dedicated data
-# volume so IPFS blockstores never compete with the OS disk. The device name
-# differs per host, so the storage role detects it by shape rather than name.
-data_mount: /data
-
-# ---------------------------------------------------------------------------
-# k3s
-# ---------------------------------------------------------------------------
-k3s_version: v1.36.4+k3s1   # stable channel, checked 2026-09-15; upgrade with k3s-upgrade.yml
-
-# The route k3s-upgrade.yml walks to reach k3s_version, one minor at a time:
-# k3s and Kubernetes do not support skipping minors. Latest patch of each minor
-# from https://update.k3s.io/v1-release/channels (checked 2026-09-15), ending
-# at the stable channel. Kept here beside k3s_version so one file records both
-# the target and the route to it; the last entry MUST equal k3s_version.
-k3s_upgrade_path:
-  - v1.31.14+k3s1
-  - v1.32.13+k3s1
-  - v1.33.13+k3s2
-  - v1.34.11+k3s1
-  - v1.35.8+k3s1
-  - v1.36.4+k3s1
-
-# Traefik is disabled: we will choose an ingress deliberately when the services
-# land, rather than inheriting k3s's default. servicelb/local-path are kept.
-k3s_disable_components:
-  - traefik
-
-# ---------------------------------------------------------------------------
-# Kernel tuning for IPFS/libp2p workloads
-# ---------------------------------------------------------------------------
-# libp2p nodes hold very large numbers of concurrent connections and rely
-# heavily on UDP (QUIC), so the stock Ubuntu defaults are too small.
-sysctl_tuning:
-  fs.file-max: 2097152
-  fs.inotify.max_user_watches: 524288
-  fs.inotify.max_user_instances: 8192
-  net.core.rmem_max: 7500000
-  net.core.wmem_max: 7500000
-  net.core.somaxconn: 4096
-  net.ipv4.tcp_max_syn_backlog: 8192
-  net.ipv4.ip_local_port_range: "1024 65535"
-  # Host-network listeners that sit INSIDE the ephemeral range above. Without
-  # this, any outbound socket (needle's DHT crawl alone opens ~800) can be
-  # handed one of these numbers as its source port; a pod restarting under
-  # `Recreate` then fails to re-bind with "address already in use".
-  # Reserving only stops the kernel choosing them for outbound connections;
-  # explicit binds still work. Update when a host-network port is added:
-  #   443 Envoy (outside the range today, kept for safety)
-  #   4001 bootstrapper libp2p  4002 bootstrapper /ws (loopback)
-  #   4011 bootstrap-b libp2p   4012 bootstrap-b /ws (loopback)
-  #   4004-4007 needle libp2p (four instances)  4101 content kubo libp2p
-  #   4443 bootstrapper WSS (Envoy)  4453 bootstrap-b WSS (Envoy)
-  #   5011 bootstrapper API  5012 bootstrap-b API
-  #   5021 content kubo RPC API (loopback)
-  #   6443-6444 k3s API  8190-8193 needle APIs (loopback, four instances)
-  #   8000 Healthchecks (healthchecks_host only)
-  #   8443 monitoring Traefik HTTPS, 9800 its ping, 9801 its metrics (argocd_hub only,
-  #   host network: ipni/infra kubernetes/manifests/eu/lith1/monitoring/values/traefik.yaml)
-  #   9100 node-exporter (every box, host network: the chart's default in
-  #   ipni/infra kubernetes/platform/node-exporter)
-  #   9810 metrics proxy (Traefik), 9811 its ping (every box, host network:
-  #   ipni/infra kubernetes/platform/metrics-proxy/values.yaml)
-  #   4317-4318 trace collector OTLP gRPC and HTTP, 9812 its HTTP server
-  #   (loopback, every box, host network: ipni/infra
-  #   kubernetes/platform/alloy-traces/values.yaml)
-  #   8472/udp flannel VXLAN
-  #   8888 content ipfs-cluster Prometheus metrics (loopback; reserved ahead of
-  #   enabling them in k8s/content, scraped through the metrics proxy)
-  #   9094 content ipfs-cluster REST API (loopback)
-  #   9095 content ipfs-cluster IPFS proxy (loopback)
-  #   9096 content ipfs-cluster swarm
-  #   9097 content ipfs-cluster Pinning Service API (loopback)
-  #   9443 content pinning API over TLS (Envoy)  9904 its Envoy admin (loopback)
-  #   9901 route-origin Envoy admin  9902 bootstrap-wss Envoy admin
-  #   9903 bootstrap-b's bootstrap-wss Envoy admin
-  #   10010 containerd  10248-10259 kubelet/kube-proxy/k3s
-  net.ipv4.ip_local_reserved_ports: "443,4001-4002,4004-4007,4011-4012,4101,4317-4318,4443,4453,5011-5012,5021,6443-6444,8000,8190-8193,8443,8472,8888,9094-9097,9100,9443,9800-9801,9810-9812,9901-9904,10010,10248-10259"
-  net.ipv4.tcp_fin_timeout: 15
-  # Must equal what k3s's kube-proxy sets on every start: max(32768 * CPUs,
-  # 131072), i.e. 1048576 on these 32-core boxes. A fixed lower value both
-  # flapped against k3s on each restart and cut the conntrack table to a
-  # quarter of what Kubernetes itself chose for this hardware.
-  net.netfilter.nf_conntrack_max: "{{ [32768 * (ansible_processor_vcpus | int), 131072] | max }}"
-  vm.max_map_count: 262144
-
-nofile_limit: 1048576
-
-# ---------------------------------------------------------------------------
 # Bootstrappers (bootstrap.yml)
 # ---------------------------------------------------------------------------
 # Every box runs the primary instance, `bootstrap`; a box whose host_vars list
@@ -191,7 +37,7 @@ nofile_limit: 1048576
 # uid and the WSS hostname suffix come from the instance's row here, so every
 # consumer - the role, its manifests, the peering check, the content role and
 # scripts/bootstrap-dns.py - reads one table. A new row needs its ports added
-# to net.ipv4.ip_local_reserved_ports above. uid 10003 is the content kubo's.
+# to net.ipv4.ip_local_reserved_ports in group_vars/managed_boxes/main.yml. uid 10003 is the content kubo's.
 bootstrap_instance_table:
   bootstrap: {swarm_port: 4001, ws_port: 4002, api_port: 5011, wss_port: 4443, wss_admin_port: 9902, uid: 10002, suffix: ""}
   bootstrap-b: {swarm_port: 4011, ws_port: 4012, api_port: 5012, wss_port: 4453, wss_admin_port: 9903, uid: 10004, suffix: "-b"}
@@ -208,23 +54,3 @@ bootstrap_instances: >-
                                        {'host': inventory_hostname ~ bootstrap_instance_table[i.name].suffix})) -%}
   {%- endfor -%}
   {{ out }}
-
-# ---------------------------------------------------------------------------
-# Argo CD and monitoring (platform.yml)
-# ---------------------------------------------------------------------------
-# One Argo CD, on argocd_hub, deploys the monitoring stack in ipni/infra to
-# every box. It reaches the other boxes' API servers directly, so roles/argocd
-# opens 6443 on them to argocd_hub's address and nothing else. The trade-off:
-# argocd_hub holds a cluster-admin token for every box, so a compromise of it
-# reaches all of them. The monitoring hub (Prometheus, Loki, Alertmanager,
-# Grafana) runs on the same box, behind Traefik on :8443.
-argocd_hub: lith-1
-
-# Runs Healthchecks, the dead-man's switch for the hub: Alertmanager on
-# argocd_hub pings it every minute, and it alerts when the pings stop. Must not
-# be argocd_hub, or it would go down with the thing it watches.
-healthchecks_host: sing-1
-
-# The name each box has in Argo CD, and so in the `cluster` label on every
-# metric and log line. ipni/infra refers to the boxes by these names.
-argocd_cluster_name: "{{ inventory_hostname | replace('-', '') }}"

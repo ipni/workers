@@ -69,11 +69,12 @@
 # Removal is safe while containers run as uid 1000: userdel only refuses for
 # host processes (it skips processes whose root differs from its own, i.e.
 # containers), and a running container only ever sees the numeric uid.
-- name: Remove the unused provider `ubuntu` account
+- name: Remove the unused provider accounts
   ansible.builtin.user:
-    name: ubuntu
+    name: "{{ item }}"
     state: absent
     remove: true
+  loop: "{{ hardening_removed_accounts }}"
 
 # ---------------------------------------------------------------------------
 # 2. HARD GATE - prove the new access path before removing the old one
@@ -231,6 +232,35 @@
 # ---------------------------------------------------------------------------
 # 4. SSH lockdown - last, and only after the gate above passed
 # ---------------------------------------------------------------------------
+# Provider images (Cherry's Debian 13) ship 50-cloud-init.conf with
+# PasswordAuthentication yes, which sorts before 99-hardening.conf and so wins.
+# Remove it, and tell cloud-init not to write it again (its cloud.cfg has
+# ssh_pwauth: true). Only where hardening_fix_cloud_init_sshd is set (the
+# indexers): the IPFS boxes have no such file and are left as they are.
+- name: Look for cloud-init's config directory
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg.d
+  register: cloud_cfg_d
+  when: hardening_fix_cloud_init_sshd | bool
+
+- name: Stop cloud-init from turning SSH password login back on
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-ipni-ssh.cfg
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible: SSH is key-only (roles/hardening).
+      ssh_pwauth: false
+  when: hardening_fix_cloud_init_sshd | bool and (cloud_cfg_d.stat.isdir | default(false))
+
+- name: Remove cloud-init's sshd drop-in, which overrides 99-hardening.conf
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+    state: absent
+  notify: Reload sshd
+  when: hardening_fix_cloud_init_sshd | bool
+
 - name: Harden sshd configuration
   ansible.builtin.copy:
     dest: /etc/ssh/sshd_config.d/99-hardening.conf
@@ -287,6 +317,29 @@
   delay: 5
   until: "'POST_HARDENING_OK' in (post_check.stdout | default(''))"
   failed_when: "'POST_HARDENING_OK' not in (post_check.stdout | default(''))"
+
+# sshd takes the FIRST value it reads for each setting, and the drop-ins load in
+# name order, so a provider's 50-cloud-init.conf would beat 99-hardening.conf with
+# PasswordAuthentication yes and nothing would say so. Ask sshd what it settled on.
+- name: Read the settings sshd is actually using
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -T]
+  register: sshd_effective
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Fail unless root and password logins really are off
+  ansible.builtin.assert:
+    that:
+      - ('permitrootlogin ' ~ ssh_permit_root_login) in sshd_effective.stdout_lines
+      - ('passwordauthentication ' ~ ssh_password_authentication) in sshd_effective.stdout_lines
+    fail_msg: >-
+      {{ inventory_hostname }}: another file under /etc/ssh overrides
+      99-hardening.conf; sshd -T shows
+      {{ sshd_effective.stdout_lines | select('match', '^(permitrootlogin|passwordauthentication) ') | list }}.
+    quiet: true
+  when: not ansible_check_mode
 
 # ---------------------------------------------------------------------------
 # 5. Hand the rest of the play over to the hardened credentials.

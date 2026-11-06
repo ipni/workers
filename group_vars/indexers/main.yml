@@ -1,0 +1,42 @@
+---
+# Indexer boxes. Everything not set here comes from group_vars/managed_boxes.
+
+# Where the data volume is mounted, as on sf and sf2: ipni/infra's indexer
+# manifests use /ipni/indexer/... host paths. k3s and local-path live here too.
+data_mount: /ipni
+
+# `debian` is the Debian cloud image's login account, the same uid 1000 risk as
+# Ubuntu's (see roles/hardening/tasks/main.yml).
+hardening_removed_accounts:
+  - ubuntu
+  - debian
+
+# Point releases as well as security fixes, so packages keep up with Debian
+# stable and not only with its advisories. Debian's own defaults already allow
+# the release itself and Debian-Security; this adds -updates. Backports are
+# never matched. See "Package updates and reboots" in the README.
+common_unattended_extra_origins:
+  - "origin=Debian,codename=${distro_codename}-updates"
+
+# needrestart reports and restarts nothing, and the reboot state goes to a
+# file node-exporter can read.
+common_reboot_reporting: true
+
+# Cherry's Debian image ships 50-cloud-init.conf with PasswordAuthentication
+# yes; remove it (roles/hardening).
+hardening_fix_cloud_init_sshd: true
+
+# To upgrade k3s here ahead of the fleet (a canary), set k3s_version and
+# k3s_upgrade_path in this file: they override group_vars/managed_boxes.
+#
+# Indexers run the stable channel's latest, ahead of the IPFS boxes (1.36).
+# Checked 2026-11-05 at https://update.k3s.io/v1-release/channels.
+k3s_version: v1.37.2+k3s1
+k3s_upgrade_path:
+  - v1.31.14+k3s1
+  - v1.32.13+k3s1
+  - v1.33.13+k3s2
+  - v1.34.11+k3s1
+  - v1.35.8+k3s1
+  - v1.36.4+k3s1
+  - v1.37.2+k3s1

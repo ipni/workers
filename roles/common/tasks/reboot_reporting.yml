@@ -1,0 +1,84 @@
+---
+# Nothing here reboots or restarts anything. It makes "this box needs a reboot"
+# something a person or an alert can see.
+
+- name: Install needrestart
+  ansible.builtin.apt:
+    name: needrestart
+    state: present
+
+# The default in a non-interactive apt run can be to restart services. `l` only
+# lists them. Restarting k3s would be survivable, but this box decides nothing
+# on its own.
+- name: Keep needrestart to listing what needs a restart
+  ansible.builtin.copy:
+    dest: /etc/needrestart/conf.d/50-ipni.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      $nrconf{restart} = 'l';
+
+- name: Create the node-exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ common_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Two signals: the marker Debian's kernel hook leaves, and needrestart's verdict
+# on the running kernel (KSTA: 1 current, 2 ABI change, 3 newer version).
+- name: Install the reboot-required reporter
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/ipni-reboot-metric
+    mode: "0755"
+    owner: root
+    group: root
+    content: |
+      #!/bin/sh
+      # Managed by Ansible. Writes node_reboot_required for node-exporter.
+      set -eu
+      required=0
+      [ -e /var/run/reboot-required ] && required=1
+      ksta=$(needrestart -b 2>/dev/null | sed -n 's/^NEEDRESTART-KSTA: //p')
+      case "${ksta:-1}" in 2|3) required=1 ;; esac
+      tmp="{{ common_textfile_dir }}/.reboot.prom.$$"
+      printf '# HELP node_reboot_required 1 when this box is waiting for a reboot.\n# TYPE node_reboot_required gauge\nnode_reboot_required %s\n' "$required" > "$tmp"
+      chmod 0644 "$tmp"
+      mv "$tmp" "{{ common_textfile_dir }}/reboot.prom"
+
+- name: Install the reboot-required reporter's unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ipni-reboot-metric.service
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      [Unit]
+      Description=Report whether this box is waiting for a reboot
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/ipni-reboot-metric
+
+- name: Install the reboot-required reporter's timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ipni-reboot-metric.timer
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      [Unit]
+      Description=Report hourly whether this box is waiting for a reboot
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=1h
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the reboot-required timer
+  ansible.builtin.systemd:
+    name: ipni-reboot-metric.timer
+    enabled: true
+    state: started
+    daemon_reload: true

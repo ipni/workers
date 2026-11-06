@@ -2,7 +2,7 @@
 # A box Argo CD on argocd_hub manages from outside.
 
 # 6443 is otherwise closed to everything but the SSH tunnel; see the firewall
-# section of group_vars/ipfs_nodes/main.yml.
+# section of group_vars/managed_boxes/main.yml.
 - name: Allow the Argo CD hub, and only the hub, to reach the API server
   ansible.builtin.include_role:
     name: ufw_allowlist

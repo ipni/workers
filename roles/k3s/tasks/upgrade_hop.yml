@@ -44,8 +44,18 @@
         group: root
         mode: "0700"
 
+    # What this hop must not disturb, compared at the end. A container ID only
+    # changes when the container is replaced, whatever the pod reports.
+    - name: Record the running containers before the upgrade
+      ansible.builtin.command:
+        argv: "{{ k3s_list_containers }}"
+      register: k3s_containers_before
+      changed_when: false
+
     # Stopping k3s first gives a consistent copy of the SQLite database.
-    # Running containers are not stopped by this (k3s uses KillMode=process).
+    # Running containers are not stopped by this: KillMode=process kills only
+    # k3s itself. Its containerd child dies with it (Pdeathsig), but each
+    # container's shim is its own process and carries on.
     - name: Stop k3s for a consistent datastore backup
       ansible.builtin.systemd:
         name: k3s
@@ -116,3 +126,33 @@
       retries: 3
       delay: 20
       until: k3s_deployments.rc == 0
+
+    # Fails this box, so with production_rollout the next box is left alone.
+    # kube-system is only reported: its packaged components (CoreDNS and so on)
+    # roll when k3s ships them a new image. That is expected, and it is why a
+    # container there can change. Anything else being replaced breaks the
+    # promise this upgrade relies on. It also trips if something else replaced a
+    # pod during the hop, such as an Argo CD sync: read the list, then re-run,
+    # since this hop is already done.
+    - name: Read the running containers after the upgrade
+      ansible.builtin.command:
+        argv: "{{ k3s_list_containers }}"
+      register: k3s_containers_after
+      changed_when: false
+
+    - name: Report containers this hop replaced
+      vars:
+        replaced: "{{ k3s_containers_before.stdout_lines | difference(k3s_containers_after.stdout_lines) }}"
+      ansible.builtin.debug:
+        msg: "{{ k3s_hop_version }}: {{ replaced | length }} of {{ k3s_containers_before.stdout_lines | length }} containers replaced: {{ replaced }}"
+
+    - name: Fail if the hop replaced a container outside kube-system
+      vars:
+        replaced: "{{ k3s_containers_before.stdout_lines | difference(k3s_containers_after.stdout_lines) | reject('match', '^kube-system/') | list }}"
+      ansible.builtin.assert:
+        that: replaced | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }}: upgrading to {{ k3s_hop_version }} replaced
+          these containers, and the upgrade should not have: {{ replaced }}.
+          Stopping here so the next box is not touched.
+        quiet: true

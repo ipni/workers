@@ -1,0 +1,21 @@
+---
+# The indexer test box, Cherry Servers in Chicago.
+site: chicago             # the location, for the site= node label
+
+# The test layout for the next indexers (README, "Indexer boxes"). Installed by
+# hand first: on each of the three disks the provider's EFI partition, then a
+# 300 GB partition, the three in an md RAID1 with ext4 for the OS, and the rest
+# left unallocated. site.yml then creates partition 3 in that space on each
+# disk, one md RAID5 over the three, and XFS on it at data_mount (/ipni).
+storage_mode: md_xfs
+storage_md:
+  name: ipni
+  level: 5
+  partition_number: 3
+  # Whole disks, by /dev/disk/by-id (nvme-<model>_<serial>, without -partN),
+  # from `ls -l /dev/disk/by-id/` on the rebuilt box. All three were switched to
+  # 4096-byte sectors before the install (README, "Indexer boxes").
+  disks:
+    - /dev/disk/by-id/nvme-Micron_7450_MTFDKCC15T3TFR_2217388B0293
+    - /dev/disk/by-id/nvme-Micron_7450_MTFDKCC15T3TFR_2217388B02AA
+    - /dev/disk/by-id/nvme-MTFDKCC15T3TGP-1BK1DABYY_46241074EFA2

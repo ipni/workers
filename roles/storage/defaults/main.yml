@@ -1,0 +1,16 @@
+---
+# ext4_blank_nvme  the one blank NVMe, ext4 at data_mount (the IPFS boxes)
+# md_xfs           an md array over a partition on each disk, XFS (storage_md)
+storage_mode: ext4_blank_nvme
+
+# md_xfs: name, level (1, 5, 6 or 10), partition_number (the partition this
+# creates in the free space after the OS's partitions) and disks (whole disks
+# by /dev/disk/by-id). Listed per box in host_vars, because a disk layout is
+# never guessed. See host_vars/indexers-chic1/main.yml.
+storage_md: {}
+# The filesystem label; fstab mounts by it.
+storage_md_label: ipnidata
+# Passed to mdadm --create only.
+storage_md_chunk_kib: 512
+# A disk with less free space than this after its last partition stops the run.
+storage_md_min_free_gib: 1024
