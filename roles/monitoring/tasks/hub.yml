@@ -29,7 +29,7 @@
     ufw_allowlist_port: "8443"
     ufw_allowlist_comment: monitoring ingest
     ufw_allowlist_sources: >-
-      {{ groups['ipfs_nodes'] | reject('equalto', argocd_hub)
+      {{ groups['managed_boxes'] | reject('equalto', argocd_hub)
          | map('extract', hostvars, 'ansible_host') | list
          + monitoring_ingest_extra_sources }}
 

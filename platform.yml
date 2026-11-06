@@ -5,7 +5,7 @@
 # first install Argo CD manages itself, and everything else it deploys, from
 # ipni/infra; see docs/03-monitoring.md there.
 #
-#   ansible-playbook platform.yml                  # all three boxes
+#   ansible-playbook platform.yml                  # every managed box
 #   ansible-playbook platform.yml --check --diff   # dry run
 #
 # Requires site.yml to have run first (admin user, k3s, ufw, reserved ports),
@@ -19,7 +19,7 @@
 # only the boxes in the run, and leaves the others as an earlier run left them.
 
 - name: Argo CD and the monitoring stack's prerequisites
-  hosts: ipfs_nodes
+  hosts: managed_boxes
   remote_user: "{{ admin_user }}"
   become: true
   gather_facts: false

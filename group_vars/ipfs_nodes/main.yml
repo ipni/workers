@@ -54,23 +54,3 @@ bootstrap_instances: >-
                                        {'host': inventory_hostname ~ bootstrap_instance_table[i.name].suffix})) -%}
   {%- endfor -%}
   {{ out }}
-
-# ---------------------------------------------------------------------------
-# Argo CD and monitoring (platform.yml)
-# ---------------------------------------------------------------------------
-# One Argo CD, on argocd_hub, deploys the monitoring stack in ipni/infra to
-# every box. It reaches the other boxes' API servers directly, so roles/argocd
-# opens 6443 on them to argocd_hub's address and nothing else. The trade-off:
-# argocd_hub holds a cluster-admin token for every box, so a compromise of it
-# reaches all of them. The monitoring hub (Prometheus, Loki, Alertmanager,
-# Grafana) runs on the same box, behind Traefik on :8443.
-argocd_hub: lith-1
-
-# Runs Healthchecks, the dead-man's switch for the hub: Alertmanager on
-# argocd_hub pings it every minute, and it alerts when the pings stop. Must not
-# be argocd_hub, or it would go down with the thing it watches.
-healthchecks_host: sing-1
-
-# The name each box has in Argo CD, and so in the `cluster` label on every
-# metric and log line. ipni/infra refers to the boxes by these names.
-argocd_cluster_name: "{{ inventory_hostname | replace('-', '') }}"

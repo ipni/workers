@@ -1764,6 +1764,13 @@ appear in output even at `-vvv`.
 Recovery is via the **provider KVM/web console** using the console password in
 the vault. SSH has no password fallback by design.
 
+On Cherry Servers (the indexers) the console is the server's Supermicro BMC:
+the portal's Console → Connect, then the BMC login, then Remote Control →
+iKVM/HTML5, and `root` at the Debian prompt. The BMC login and the root
+password are in 1Password. Type the password with the iKVM's on-screen
+keyboard: the iKVM sends a US layout, so typing on any other layout sends
+different characters and the login fails.
+
 ## CI
 
 Nothing in CI talks to a box; there is no environment to test against. What it
