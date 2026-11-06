@@ -1,6 +1,6 @@
 ---
 # Ports of the content cluster node. Must match k8s/content/deployment.yaml and
-# net.ipv4.ip_local_reserved_ports in group_vars/ipfs_nodes/main.yml.
+# net.ipv4.ip_local_reserved_ports in group_vars/managed_boxes/main.yml.
 content_kubo_swarm_port: 4101     # public, TCP + UDP
 content_kubo_api_port: 5021       # loopback
 content_cluster_metrics_port: 8888  # loopback (Prometheus metrics)

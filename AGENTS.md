@@ -25,8 +25,9 @@ ansible infra_boxes -m ping                         # no sudo needed
 ```
 
 **indexers** (`indexers-chic1`, 84.32.71.3, the indexer test box) are built by this repo
-but are not `ipfs_nodes`: Debian, `site.yml` and `k3s-upgrade.yml` only. Shared
-settings are in `group_vars/managed_boxes/`. See "Indexer boxes" in the README.
+but are not `ipfs_nodes`: Debian, and only `site.yml`, `k3s-upgrade.yml` and
+`platform.yml` (Argo CD on lith-1 manages them). Shared settings are in
+`group_vars/managed_boxes/`. See "Indexer boxes" in the README.
 Merge a new box only after it is built and its host key is pinned, or CI's
 `site.yml` runs fail on it.
 

@@ -37,7 +37,7 @@ production_rollout: true
 # uid and the WSS hostname suffix come from the instance's row here, so every
 # consumer - the role, its manifests, the peering check, the content role and
 # scripts/bootstrap-dns.py - reads one table. A new row needs its ports added
-# to net.ipv4.ip_local_reserved_ports above. uid 10003 is the content kubo's.
+# to net.ipv4.ip_local_reserved_ports in group_vars/managed_boxes/main.yml. uid 10003 is the content kubo's.
 bootstrap_instance_table:
   bootstrap: {swarm_port: 4001, ws_port: 4002, api_port: 5011, wss_port: 4443, wss_admin_port: 9902, uid: 10002, suffix: ""}
   bootstrap-b: {swarm_port: 4011, ws_port: 4012, api_port: 5012, wss_port: 4453, wss_admin_port: 9903, uid: 10004, suffix: "-b"}

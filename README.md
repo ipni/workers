@@ -1901,8 +1901,8 @@ turn an unrelated pull request red.
 ```
 ansible.cfg               inventory, vault and SSH defaults
 inventory/hosts.yml       the boxes and their groups
-group_vars/managed_boxes/ what every built box shares (admin user, firewall, k3s, sysctl)
-group_vars/ipfs_nodes/    the IPFS boxes' own settings (rollout, bootstrappers, Argo CD)
+group_vars/managed_boxes/ what every built box shares (admin user, firewall, k3s, sysctl, Argo CD)
+group_vars/ipfs_nodes/    the IPFS boxes' own settings (rollout, bootstrappers)
 group_vars/indexers/      the indexers' own settings
 host_vars/<box>/main.yml  an indexer's site and storage
 host_vars/<box>/vault.yml   encrypted per-box credentials (gitignored, see Secrets)
