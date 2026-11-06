@@ -22,6 +22,10 @@ common_unattended_extra_origins:
 # file node-exporter can read.
 common_reboot_reporting: true
 
+# Cherry's Debian image ships 50-cloud-init.conf with PasswordAuthentication
+# yes; remove it (roles/hardening).
+hardening_fix_cloud_init_sshd: true
+
 # To upgrade k3s here ahead of the fleet (a canary), set k3s_version and
 # k3s_upgrade_path in this file: they override group_vars/managed_boxes.
 #

@@ -7,3 +7,8 @@ cve_2026_98432_ruleset: /etc/nftables.d/cve-2026-98432.nft
 # Provider login accounts removed from the box; group_vars/indexers adds Debian's.
 hardening_removed_accounts:
   - ubuntu
+
+# Remove cloud-init's 50-cloud-init.conf sshd drop-in (PasswordAuthentication
+# yes, which beats 99-hardening.conf) and set ssh_pwauth: false. Off by default
+# so the IPFS boxes are left as they are; group_vars/indexers turns it on.
+hardening_fix_cloud_init_sshd: false
