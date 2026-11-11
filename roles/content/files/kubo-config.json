@@ -6,7 +6,7 @@
     "API": "/ip4/127.0.0.1/tcp/5021",
     "Announce": [],
     "AppendAnnounce": [],
-    "Gateway": null,
+    "Gateway": "/ip4/127.0.0.1/tcp/8181",
     "NoAnnounce": [
       "/ip4/10.0.0.0/ipcidr/8",
       "/ip4/100.64.0.0/ipcidr/10",
@@ -102,8 +102,8 @@
     "DisableHTMLErrors": null,
     "ExposeRoutingAPI": null,
     "HTTPHeaders": {},
-    "NoDNSLink": false,
-    "NoFetch": false,
+    "NoDNSLink": true,
+    "NoFetch": true,
     "PublicGateways": null,
     "RootRedirect": ""
   },
