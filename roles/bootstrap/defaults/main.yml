@@ -12,6 +12,18 @@ bootstrap_namespace: bootstrap
 # libp2p swarm port (TCP, and UDP for QUIC / WebTransport / WebRTC-direct).
 bootstrap_swarm_port: 4001
 
+# The kubo image (k8s/bootstrap/kustomization.yaml.j2): this default, or the
+# instance's own kubo_image ({name, digest}) from bootstrap_extra_instances.
+#
+# ipfs/kubo v0.43.1 (published 2026-09-15 00:52 UTC), multi-arch index, pinned
+# by digest. Same image as content (roles/content/defaults/main.yml). Shipyard
+# stops maintaining kubo on 2026-09-30: upgrades are deliberate, and go-libp2p
+# / kubo security advisories need watching.
+bootstrap_default_kubo_image:
+  name: ipfs/kubo
+  digest: sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
+bootstrap_kubo_image: "{{ bootstrap_default_kubo_image }}"
+
 # Loopback-only RPC API (probes, metrics, `ipfs` CLI via kubectl exec).
 bootstrap_api_port: 5011
 bootstrap_api: "/ip4/127.0.0.1/tcp/{{ bootstrap_api_port }}"

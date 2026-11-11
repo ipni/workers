@@ -9,5 +9,18 @@ bootstrap_legacy_name: ny5
 # Further kubo instances on this box, each with its own legacy identity.
 # Ports come from bootstrap_instance_table (group_vars/ipfs_nodes); the
 # key is vault_<name with - as _>_privkey in vault.yml.
+#
+# bootstrap-b runs the canary for the kubo inbound-slot leak
+# (libp2p/go-libp2p#3564): the same image as sing-1's content node (see
+# host_vars/sing-1/content.yml), ipfs/kubo v0.43.1 plus libp2p/go-libp2p#3568
+# and nothing else. bootstrap on this box, the same traffic on the same box,
+# stays on upstream v0.43.1 as its control. Remove kubo_image once a kubo
+# release has the fix, or if the canary misbehaves, and re-run
+# bootstrap.yml -l chic-1.
 bootstrap_extra_instances:
-  - {name: bootstrap-b, peer_id: QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN, legacy_name: sv15}
+  - name: bootstrap-b
+    peer_id: QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN
+    legacy_name: sv15
+    kubo_image:
+      name: ghcr.io/ipni/kubo
+      digest: sha256:44f66498beffd0136a9fe619ed109b29f8961488d6a8e7a492ccf0b4b065028c
