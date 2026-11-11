@@ -87,10 +87,10 @@ static_resources:
                 # request and, with spawn_upstream_span, one for the call to
                 # needle (which instance, how long). The span names are the
                 # route decorators below, never the path: a path carries a CID,
-                # and every span name becomes a metric series. needle does not
-                # join these traces yet: v1.0.0 drops the traceparent Envoy
-                # sends (NEEDLE_TRACING_AUTH is unset), and its own sampling
-                # never fires (ipni/infra#163).
+                # and every span name becomes a metric series. needle joins
+                # these traces: it trusts the traceparent Envoy sends
+                # (NEEDLE_TRACING_TRUST_TRACEPARENT in k8s/needle), so it samples
+                # exactly these requests and adds its own spans below them.
                 #
                 # Only this sampling decides. A client cannot ask to be traced:
                 # client_sampling ignores x-client-trace-id, and the early
