@@ -261,7 +261,21 @@
   notify: Reload sshd
   when: hardening_fix_cloud_init_sshd | bool
 
+# Post-quantum hybrid key exchange, offered ahead of the classical algorithms
+# so OpenSSH 10 clients stop warning. sshd refuses to start on a name it does
+# not know, and mlkem768x25519-sha256 needs OpenSSH 9.9: Ubuntu 24.04 has 9.6
+# (sntrup761x25519 only), Debian 13 has 10.0. So offer only the ones this
+# box's OpenSSH lists; the client and sshd come from the same source package.
+- name: List the key exchange algorithms this box's OpenSSH supports
+  ansible.builtin.command:
+    argv: [ssh, -Q, kex]
+  register: ssh_supported_kex
+  changed_when: false
+  check_mode: false
+
 - name: Harden sshd configuration
+  vars:
+    hardening_pq_kex_supported: "{{ hardening_pq_kex_algorithms | select('in', ssh_supported_kex.stdout_lines) | list }}"
   ansible.builtin.copy:
     dest: /etc/ssh/sshd_config.d/99-hardening.conf
     mode: "0644"
@@ -286,7 +300,7 @@
       ClientAliveInterval 300
       ClientAliveCountMax 2
       # Modern algorithms only
-      KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+      KexAlgorithms {{ (hardening_pq_kex_supported + ['curve25519-sha256', 'curve25519-sha256@libssh.org', 'diffie-hellman-group16-sha512']) | join(',') }}
       Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
       MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
     validate: '/usr/sbin/sshd -t -f %s'
