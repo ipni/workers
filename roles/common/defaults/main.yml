@@ -46,8 +46,9 @@ common_distro_packages:
 # Origins allowed on top of the distribution's own 50unattended-upgrades.
 common_unattended_extra_origins: []
 
-# needrestart in list-only mode, and a metric saying a reboot is pending. Off on
-# the IPFS boxes, whose behaviour this must not change.
+# The node_reboot_required metric (an hourly timer writing a textfile for
+# node-exporter). needrestart's list-only mode is not part of this: every box
+# gets it. Off on the IPFS boxes, whose node-exporter does not read the file.
 common_reboot_reporting: false
 
 # node-exporter reads *.prom from here once it is given

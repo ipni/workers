@@ -11,15 +11,23 @@ hardening_removed_accounts:
   - ubuntu
   - debian
 
-# Point releases as well as security fixes, so packages keep up with Debian
-# stable and not only with its advisories. Debian's own defaults already allow
-# the release itself and Debian-Security; this adds -updates. Backports are
-# never matched. See "Package updates and reboots" in the README.
+# The release itself, its security archive and its point releases (-updates),
+# so packages keep up with Debian stable and not only with its advisories.
+# Backports are never matched.
+#
+# Matched by origin and codename only. Debian's own defaults also require
+# label=Debian / label=Debian-Security, and Cherry's mirror rewrites the labels
+# (`Label: debian trixie-security`, `Codename: trixie-security`), so on
+# indexers-chic1 they matched nothing: unattended-upgrades logged "No packages
+# found" daily with 9 trixie-security updates pending (2026-11-11). Origin and
+# codename hold on Cherry's mirror and on Debian's own. See "Package updates
+# and reboots" in the README.
 common_unattended_extra_origins:
+  - "origin=Debian,codename=${distro_codename}"
+  - "origin=Debian,codename=${distro_codename}-security"
   - "origin=Debian,codename=${distro_codename}-updates"
 
-# needrestart reports and restarts nothing, and the reboot state goes to a
-# file node-exporter can read.
+# The reboot state goes to a file node-exporter can read.
 common_reboot_reporting: true
 
 # Cherry's Debian image ships 50-cloud-init.conf with PasswordAuthentication

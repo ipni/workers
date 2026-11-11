@@ -336,12 +336,32 @@ would fail until the box is built and pinned. If root takes neither your key nor
 
 ### Package updates and reboots
 
-| | Policy on an indexer |
-|---|---|
-| What updates | `unattended-upgrades`, daily: Debian stable, its security archive and `-updates`. Never backports. |
-| Reboots | Never automatic. |
-| Services | Packages that restart their own service on upgrade still do (ssh, chrony, fail2ban). Established SSH sessions survive. k3s is not an apt package, so apt never restarts k3s or containers. `needrestart` only lists what is left running on old libraries. |
-| Kernels | Installed but inactive until a reboot. |
+| | IPFS boxes (Ubuntu) | Indexers (Debian) |
+|---|---|---|
+| What updates | `unattended-upgrades`, daily: `noble-security` only, Ubuntu's default. | `unattended-upgrades`, daily: Debian stable, its security archive and `-updates`. Never backports. |
+| Reboots | Never automatic. | Never automatic. |
+| Services | Packages that restart their own service on upgrade still do (ssh, chrony, fail2ban). Established SSH sessions survive. k3s is not an apt package, so apt never restarts k3s or containers. `needrestart` only lists what is left running on old libraries. | Same. |
+| Kernels | Installed but inactive until a reboot. | Same. |
+
+Two things on Cherry's images silently stopped this, both found on 2026-11-11:
+
+- **Ubuntu: periodic apt switched off.** The image ships
+  `/etc/apt/apt.conf.d/docker-disable-periodic-update` with
+  `APT::Periodic::Enable "0"`. It sorts after everything of ours, so the
+  timers fired and did nothing. `common` deletes it.
+- **Debian: relabelled suites.** Cherry's mirror rewrites `Label:` (to
+  `debian trixie-security` and so on), so Debian's default
+  `label=Debian-Security` patterns matched nothing and unattended-upgrades
+  reported "No packages found" every day. `group_vars/indexers` matches by
+  origin and codename instead, which hold on Cherry's mirror and on Debian's.
+
+`common` then asks apt what it settled on (`apt-config shell` for
+`APT::Periodic::Enable` and `APT::Periodic::Unattended-Upgrade`) and fails the
+run if periodic apt is off or unattended upgrades are not on, the way
+`hardening` checks `sshd -T`. The check is skipped in a dry run. It cannot see
+an origin pattern that matches nothing; for that, look at
+`/var/log/unattended-upgrades/unattended-upgrades.log` and
+`apt list --upgradable` on the box.
 
 A pending reboot shows in three places: `/var/run/reboot-required`, the `reboot:`
 line in every `site.yml` summary, and the `node_reboot_required` metric, which an
@@ -349,9 +369,12 @@ hourly timer writes to `/var/lib/node_exporter/textfile/reboot.prom`. The metric
 reaches Prometheus only once ipni/infra's node-exporter is given that directory
 (`--collector.textfile.directory`, with a host mount) and an alert is added.
 
-To reboot: one box at a time. Every container restarts.
+The metric is written on indexers only (`common_reboot_reporting`); the IPFS
+boxes have the marker file and the summary line.
 
-The IPFS boxes keep their existing update policy. They only gain the `reboot:` summary line.
+To reboot: one box at a time. Every container restarts, needle included, and
+needle stays degraded for tens of minutes after it is Ready, so reboot an IPFS
+box only once needle is warm on the other two.
 
 ## needle
 
