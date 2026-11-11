@@ -121,6 +121,13 @@
     proto: tcp
     comment: content pinning API
 
+- name: Allow gateway origin clients (read-only kubo gateway over TLS, via Envoy)
+  community.general.ufw:
+    rule: allow
+    port: "{{ content_gateway_port }}"
+    proto: tcp
+    comment: content gateway origin
+
 # ---------------------------------------------------------------------------
 # Per-box settings, as two Secrets:
 #   kubo-config      the full kubo config: files/kubo-config.json (committed,
@@ -137,7 +144,9 @@
 #     bootstrapper).
 #   AutoConf and AutoTLS off, no delegated routers/publishers, relay service
 #     off - no dependency on Shipyard-operated services.
-#   Addresses.Gateway null - no HTTP gateway. API on 127.0.0.1:5021, swarm 4101.
+#   Addresses.Gateway 127.0.0.1:8181, read-only: NoFetch (serves only blocks this
+#     node holds) and NoDNSLink, published only through k8s/content-gateway.
+#     API on 127.0.0.1:5021, swarm 4101.
 #   Datastore.StorageMax 90GB - only the GC threshold (GC is not enabled).
 #   Swarm.ConnMgr 600/200 - what this node really uses (about 300 conns).
 #   Resource manager: System.ConnsInbound 65536, set in
@@ -388,6 +397,9 @@
 
 - name: Publish the pinning API over TLS
   ansible.builtin.include_tasks: pin_api.yml
+
+- name: Publish the read-only gateway over TLS
+  ansible.builtin.include_tasks: gateway.yml
 
 # ---------------------------------------------------------------------------
 # Pinset. roles/content/vars/pinset.yml is the source of truth. It is read

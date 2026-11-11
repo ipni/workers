@@ -27,6 +27,22 @@ content_pin_issuer: letsencrypt-prod
 # README), so this only catches a hand-typed one.
 content_pin_min_password_length: 32
 
+# ---------------------------------------------------------------------------
+# Read-only HTTP gateway for dist.ipfs.tech: kubo's gateway on loopback
+# (NoFetch: it serves only blocks this node holds), published by Envoy
+# (k8s/content-gateway) over TLS on every box under one name, as the origin
+# behind the dist.ipfs.tech Cloudflare Worker. The port is one Cloudflare
+# can reach (8443 is taken by another workload on lith-1). The certificate
+# comes from DNS-01 in the ipfs.io zone, with its own issuers and token
+# (vault_cloudflare_dns_token_ipfs_io: the ipni.io token cannot see ipfs.io).
+# Must match k8s/content-gateway and files/kubo-config.json.
+# ---------------------------------------------------------------------------
+content_gateway_hostname: dist-origin.ipfs.io
+content_gateway_port: 2053        # public, TLS
+content_gateway_kubo_port: 8181   # loopback (kubo gateway, behind Envoy)
+content_gateway_admin_port: 9905  # loopback, the gateway Envoy's admin
+content_gateway_issuer: letsencrypt-ipfs-io-prod
+
 # Public bootstrap peers the content kubo dials, after this project's own
 # bootstrappers (/dnsaddr/bootstrap.ipni.io, one entry per bootstrapper
 # instance, added by the role). The same public list the bootstrappers use
@@ -67,8 +83,11 @@ content_size_gate_gb: 5
 # Explicit per-entry override of the size gate, e.g.
 #   -e '{"content_size_gate_allow": ["dist.ipfs.tech"]}'
 # dist.ipfs.tech (binary distributions, not a website) estimated ~128 GB on
-# 2026-09-15, more than the 100 GiB content-repo claim: resize first.
-content_size_gate_allow: []
+# 2026-09-15, more than the 100 GiB content-repo claim, which is only a label
+# (see k8s/content/pvc.yaml): the NVMe is the bound. Allowed by name, and only
+# this entry; it is pinned directly with ipfs-cluster-ctl, not through the
+# playbook's pin timeout.
+content_size_gate_allow: [dist.ipfs.tech]
 
 # Entries in the pinset that are not to be pinned, by name. Never pinned, and
 # reported by name on every run. Empty: everything in pinset.yml is in scope.

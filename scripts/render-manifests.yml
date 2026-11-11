@@ -34,6 +34,10 @@
     # so `-e dest=rendered` would report success and write somewhere else
     # entirely. Anchor it to the repo root and say so.
     render_dest: "{{ dest if dest.startswith('/') else repo_root ~ '/' ~ dest }}"
+    # Envoy's basic-auth users for POST /add on the pinning API. A deploy hashes
+    # them from the vault (roles/content/tasks/pin_api.yml); one placeholder
+    # entry here, in the same htpasswd SHA1 form.
+    content_pin_basic_users: ["render:{SHA}AAAAAAAAAAAAAAAAAAAAAAAAAAA="]
   tasks:
     - name: Find the manifest directories
       ansible.builtin.find:

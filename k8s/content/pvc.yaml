@@ -5,6 +5,12 @@
 # local-path ignores it, and kubo's Datastore.StorageMax is only the automatic
 # GC threshold (GC is not enabled and never removes pinned blocks). What is
 # pinned - on every box - is the only bound; check sizes before pinning.
+#
+# The 100Gi is a label, not a limit, and it is not raised for larger pins: the
+# storage class (k3s's local-storage addon) does not allow volume expansion, so
+# Kubernetes rejects a size change on the bound claim and the apply would fail.
+# The real limit is the NVMe under /data (about 820 GB free per box on
+# 2026-10-21). dist.ipfs.tech (~128 GB) is pinned past the label on purpose.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

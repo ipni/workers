@@ -1,0 +1,149 @@
+---
+# Read-only HTTP gateway: kubo's gateway (loopback {{ content_gateway_kubo_port }}, NoFetch) published by
+# Envoy (k8s/content-gateway) over TLS as
+# https://{{ content_gateway_hostname }}:{{ content_gateway_port }} on every box. It is the origin
+# behind the dist.ipfs.tech Worker. The certificate comes from cert-manager by
+# DNS-01 in the ipfs.io zone, with its own token: the ipni.io token used by
+# pin_api.yml cannot see that zone. cert-manager is installed by bootstrap.yml.
+
+- name: Fail unless cert-manager and the ipfs.io token are available
+  ansible.builtin.assert:
+    that:
+      - content_cm_crd.stdout | length > 0
+      - vault_cloudflare_dns_token_ipfs_io is defined and vault_cloudflare_dns_token_ipfs_io | length > 0
+    fail_msg: >-
+      The gateway certificate needs cert-manager (checked by pin_api.yml) and
+      vault_cloudflare_dns_token_ipfs_io (group_vars/ipfs_nodes/vault.yml,
+      Zone:DNS:Edit on ipfs.io).
+    quiet: true
+
+- name: Create the gateway certificate
+  when: not ansible_check_mode or (content_ns.stdout | length > 0)
+  block:
+    - name: Install the ipfs.io Cloudflare API token for DNS-01 challenges
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: cloudflare-api-token-ipfs-io
+            namespace: content
+          data:
+            api-token: "{{ vault_cloudflare_dns_token_ipfs_io | b64encode }}"
+      no_log: true
+
+    - name: Create the Let's Encrypt issuers for ipfs.io
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: "{{ item.name }}"
+            namespace: content
+          spec:
+            acme:
+              server: "{{ item.server }}"
+              privateKeySecretRef: { name: "{{ item.name }}-account-key" }
+              solvers:
+                - selector: { dnsZones: ["{{ content_gateway_hostname | regex_replace('^[^.]+[.]', '') }}"] }
+                  dns01:
+                    cloudflare:
+                      apiTokenSecretRef: { name: cloudflare-api-token-ipfs-io, key: api-token }
+      loop:
+        - { name: letsencrypt-ipfs-io-prod, server: "https://acme-v02.api.letsencrypt.org/directory" }
+        - { name: letsencrypt-ipfs-io-staging, server: "https://acme-staging-v02.api.letsencrypt.org/directory" }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Request the gateway certificate
+      kubernetes.core.k8s:
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: content-gateway
+            namespace: content
+          spec:
+            secretName: content-gateway-tls
+            dnsNames: ["{{ content_gateway_hostname }}"]
+            privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+            issuerRef: { group: cert-manager.io, kind: Issuer, name: "{{ content_gateway_issuer }}" }
+
+    - name: Wait for the gateway certificate to be issued
+      ansible.builtin.command:
+        argv:
+          - k3s
+          - kubectl
+          - --namespace=content
+          - get
+          - certificate/content-gateway
+          - secret/content-gateway-tls
+          - --ignore-not-found
+          - -o
+          - >-
+            jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{.metadata.annotations.cert-manager\.io/issuer-name}{" "}{end}
+      register: content_gateway_cert_state
+      changed_when: false
+      retries: 60
+      delay: 10
+      until: content_gateway_cert_state.stdout.split() == ['True', content_gateway_issuer]
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Show why the gateway certificate is not issued
+      ansible.builtin.command:
+        argv: [k3s, kubectl, --namespace=content, describe, certificate/content-gateway,
+               certificaterequests, orders.acme.cert-manager.io, challenges.acme.cert-manager.io]
+      changed_when: false
+      failed_when: true
+      when:
+        - not ansible_check_mode
+        - content_gateway_cert_state.stdout.split() != ['True', content_gateway_issuer]
+
+    - name: Deploy the gateway proxy
+      ansible.builtin.include_role:
+        name: kustomize_apply
+      vars:
+        kustomize_app: content-gateway
+        kustomize_namespace: content
+        kustomize_deployment: content-gateway
+
+# From the controller, as a client sees it: the certificate verifies for the
+# published name, and the proxy answers health and refuses what it should.
+# --resolve pins the request to this box, whatever DNS says.
+- name: Check the gateway origin answers health over TLS
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20",
+           --resolve, "{{ content_gateway_hostname }}:{{ content_gateway_port }}:{{ ansible_host }}",
+           "https://{{ content_gateway_hostname }}:{{ content_gateway_port }}/__gateway/health"]
+  delegate_to: localhost
+  become: false
+  register: content_gateway_health
+  changed_when: false
+  failed_when: content_gateway_health.stdout != '200'
+  when: not ansible_check_mode
+
+- name: Check the gateway origin refuses everything but GET and HEAD under /ipfs/
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20", -X, "{{ item.method }}",
+           --resolve, "{{ content_gateway_hostname }}:{{ content_gateway_port }}:{{ ansible_host }}",
+           "https://{{ content_gateway_hostname }}:{{ content_gateway_port }}{{ item.path }}"]
+  delegate_to: localhost
+  become: false
+  register: content_gateway_refused
+  changed_when: false
+  failed_when: content_gateway_refused.stdout != '403'
+  loop:
+    - { method: POST, path: /ipfs/bafkqaaa }
+    - { method: GET, path: /ipns/dist.ipfs.tech }
+    - { method: GET, path: /api/v0/version }
+  loop_control:
+    label: "{{ item.method }} {{ item.path }}"
+  when: not ansible_check_mode
