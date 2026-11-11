@@ -67,8 +67,11 @@ content_size_gate_gb: 5
 # Explicit per-entry override of the size gate, e.g.
 #   -e '{"content_size_gate_allow": ["dist.ipfs.tech"]}'
 # dist.ipfs.tech (binary distributions, not a website) estimated ~128 GB on
-# 2026-09-15, more than the 100 GiB content-repo claim: resize first.
-content_size_gate_allow: []
+# 2026-09-15, more than the 100 GiB content-repo claim, which is only a label
+# (see k8s/content/pvc.yaml): the NVMe is the bound. Allowed by name, and only
+# this entry; it is pinned directly with ipfs-cluster-ctl, not through the
+# playbook's pin timeout.
+content_size_gate_allow: [dist.ipfs.tech]
 
 # Entries in the pinset that are not to be pinned, by name. Never pinned, and
 # reported by name on every run. Empty: everything in pinset.yml is in scope.
