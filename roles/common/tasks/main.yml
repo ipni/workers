@@ -225,10 +225,8 @@
 # Cherry's Ubuntu image ships this file with `APT::Periodic::Enable "0"`. It
 # belongs to no package and is not ours, and it sorts after 20auto-upgrades and
 # 99*, so it wins: apt-daily and apt-daily-upgrade start and exit at once, and
-# nothing above ever runs. Found 2026-11-11 on sing-1, lith-1 and chic-1: no
-# /var/log/unattended-upgrades at all, package lists weeks old, openssh-server
-# one security release behind and 72-80 -security upgrades pending on each.
-# Removed rather than overridden, so no file of ours has to sort after it.
+# nothing above ever runs. Found 2026-11-11 on the IPFS boxes: no
+# /var/log/unattended-upgrades at all and package lists weeks old. Removed rather than overridden, so no file of ours has to sort after it.
 - name: Remove the provider's switch that turns periodic apt off
   ansible.builtin.file:
     path: /etc/apt/apt.conf.d/docker-disable-periodic-update

@@ -17,9 +17,9 @@ hardening_removed_accounts:
 #
 # Matched by origin and codename only. Debian's own defaults also require
 # label=Debian / label=Debian-Security, and Cherry's mirror rewrites the labels
-# (`Label: debian trixie-security`, `Codename: trixie-security`), so on
-# indexers-chic1 they matched nothing: unattended-upgrades logged "No packages
-# found" daily with 9 trixie-security updates pending (2026-11-11). Origin and
+# (`Label: debian trixie-security`, `Codename: trixie-security`), so they
+# matched nothing: unattended-upgrades logged "No packages found" daily
+# (found 2026-11-11). Origin and
 # codename hold on Cherry's mirror and on Debian's own. See "Package updates
 # and reboots" in the README.
 common_unattended_extra_origins:
