@@ -32,6 +32,7 @@
     bootstrap_wss_port: "{{ bs.wss_port }}"
     bootstrap_wss_admin_port: "{{ bs.wss_admin_port }}"
     bootstrap_kubo_uid: "{{ bs.uid }}"
+    bootstrap_kubo_image: "{{ bs.kubo_image | default(bootstrap_default_kubo_image) }}"
     bootstrap_instance_peer_id: "{{ bs.peer_id }}"
     # vault_bootstrap_privkey, vault_bootstrap_b_privkey, ... Looked up by
     # name so a missing one is reported by the identity preflight, not here.

@@ -1,0 +1,29 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: content
+
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: content
+      app.kubernetes.io/part-of: ipfs-workers
+
+images:
+  # Pinned by digest in roles/content/defaults/main.yml (content_kubo_image,
+  # content_cluster_image), where a box can override them in host_vars: that
+  # is how one box runs a canary kubo while the others stay on the release.
+  - name: kubo
+    newName: {{ content_kubo_image.name }}
+    digest: {{ content_kubo_image.digest }}
+  - name: ipfs-cluster
+    newName: {{ content_cluster_image.name }}
+    digest: {{ content_cluster_image.digest }}
+
+# The content-cluster Secret (cluster secret, peer identity, peer lists) is
+# deliberately NOT here: it is created by roles/content from ansible-vault.

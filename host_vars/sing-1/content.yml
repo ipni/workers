@@ -5,3 +5,16 @@
 # vault_content_kubo_privkey in vault.yml next to this file.
 content_cluster_peer_id: 12D3KooWNzxaQEZCCw7c9RANwUieUbp9em6No7KrT45L3FLbAcsZ
 content_kubo_peer_id: 12D3KooWDkwTCdWYVxnZCq6VYWsNjAGakCrqm7Zx3G2RSTR6dbsj
+
+# Canary for the kubo inbound-slot leak (libp2p/go-libp2p#3564). The fix,
+# libp2p/go-libp2p#3568, is merged (da148e11) but in no release. This image is
+# ipfs/kubo v0.43.1 (acc53c0) built by kubo's own Dockerfile, with go-libp2p
+# replaced by the module v0.43.1 already uses (lidel/go-libp2p@9c4ee60) plus
+# that five-line fix, and nothing else: same dependencies, Go and build
+# settings, and the same version string (0.43.1-acc53c0) as upstream. amd64
+# only, pushed by hand on 2026-11-11. lith-1 and chic-1 stay on upstream
+# v0.43.1 as the control. Remove this once a kubo release has the fix, or if
+# the canary misbehaves, and re-run content.yml -l sing-1.
+content_kubo_image:
+  name: ghcr.io/ipni/kubo
+  digest: sha256:44f66498beffd0136a9fe619ed109b29f8961488d6a8e7a492ccf0b4b065028c
