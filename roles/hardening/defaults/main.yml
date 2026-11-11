@@ -12,3 +12,10 @@ hardening_removed_accounts:
 # yes, which beats 99-hardening.conf) and set ssh_pwauth: false. Off by default
 # so the IPFS boxes are left as they are; group_vars/indexers turns it on.
 hardening_fix_cloud_init_sshd: false
+
+# Post-quantum hybrid key exchange for sshd, in order of preference, ahead of
+# the classical KexAlgorithms. Each is offered only where the box's OpenSSH has
+# it (tasks/main.yml): mlkem768x25519-sha256 needs 9.9, sntrup761x25519 8.5.
+hardening_pq_kex_algorithms:
+  - mlkem768x25519-sha256
+  - sntrup761x25519-sha512@openssh.com
