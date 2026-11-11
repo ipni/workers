@@ -117,6 +117,36 @@
         - not ansible_check_mode
         - content_pin_cert_state.stdout.split() != ['True', content_pin_issuer]
 
+    # Envoy's basic auth takes htpasswd SHA1 entries ("name:{SHA}<base64>").
+    # They are computed here, on the controller, from the same vault users
+    # ipfs-cluster authenticates its own routes with, so the two stay in step.
+    # Sorted, so an unchanged user list renders an unchanged config and does
+    # not restart the proxy. The password goes in the environment, never on a
+    # command line.
+    - name: Hash the pinning users for Envoy's basic auth on POST /add
+      ansible.builtin.shell: set -o pipefail; printf %s "$PW" | openssl dgst -sha1 -binary | base64
+      args:
+        executable: /bin/bash
+      environment:
+        PW: "{{ item.value }}"
+      delegate_to: localhost
+      become: false
+      loop: "{{ vault_content_pin_users | dict2items | sort(attribute='key') }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: content_pin_hashes
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Collect the htpasswd entries
+      ansible.builtin.set_fact:
+        content_pin_basic_users: >-
+          {{ content_pin_hashes.results | map(attribute='item.key')
+             | zip(content_pin_hashes.results | map(attribute='stdout'))
+             | map('join', ':{SHA}') | list }}
+      no_log: true
+
     - name: Deploy the pinning API proxy
       ansible.builtin.include_role:
         name: kustomize_apply
@@ -155,6 +185,43 @@
   register: content_pin_delete
   changed_when: false
   failed_when: content_pin_delete.stdout != '403'
+  when: not ansible_check_mode
+
+# POST /add is the one route of ipfs-cluster's REST API that is published
+# (`ipfs-cluster-ctl add`, used by ipfs-deploy-action), authenticated by Envoy.
+# Without credentials, or with wrong ones, it must be refused before ipfs-cluster
+# sees it; no body is sent, so nothing is ever added.
+- name: Check POST /add needs credentials
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20", -X, POST,
+           "--resolve", "{{ content_pin_hostname }}:{{ content_pin_port }}:{{ ansible_host }}",
+           "https://{{ content_pin_hostname }}:{{ content_pin_port }}/add"]
+  delegate_to: localhost
+  become: false
+  register: content_pin_add_anon
+  changed_when: false
+  failed_when: content_pin_add_anon.stdout != '401'
+  when: not ansible_check_mode
+
+# Everything but POST /add stays refused. (GETs go to the Pinning Service API
+# on 9097, which has no REST API endpoints, so they cannot reach it either.)
+- name: Check the rest of the REST API is not published
+  ansible.builtin.command:
+    argv: [curl, -sS, -o, /dev/null, -w, "%{http_code}", --max-time, "20", -X, "{{ item.method }}",
+           "--resolve", "{{ content_pin_hostname }}:{{ content_pin_port }}:{{ ansible_host }}",
+           "https://{{ content_pin_hostname }}:{{ content_pin_port }}{{ item.path }}"]
+  delegate_to: localhost
+  become: false
+  register: content_pin_rest_refused
+  changed_when: false
+  failed_when: content_pin_rest_refused.stdout != '403'
+  loop:
+    - { method: PUT, path: /add }
+    - { method: DELETE, path: /add }
+    - { method: POST, path: /peers }
+    - { method: POST, path: /pins/bafkqaaa }
+  loop_control:
+    label: "{{ item.method }} {{ item.path }}"
   when: not ansible_check_mode
 
 # The credentials go to curl on stdin (-K -), never on its command line.
