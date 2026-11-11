@@ -1301,6 +1301,13 @@ ansible-playbook content.yml --check --diff   # dry run: reads DNSLink and the p
 | lith-1 | `12D3KooWQSgVevfuy33SToBfYoCexqvvhgqYp8oGZ8r3CAesguRo` | `12D3KooWRcTH1HzbFt7UCSVaYScStt5wPr4bJo3aXHuvqPk6Gmgr` |
 | chic-1 | `12D3KooWQ7PRw91uNk6e27NCym8CK1v39muL8omoDJzVsub3qZbV` | `12D3KooWKWfhxDGhs7DBgiqGmhCaj4SBoSbeEN2skHLbFsLZJCVS` |
 
+**Images.** kubo and ipfs-cluster are pinned by digest in
+`roles/content/defaults/main.yml` (`content_kubo_image`,
+`content_cluster_image`). A box can set its own in `host_vars/<box>/content.yml`
+to run a canary while the others stay on the release; deploy it with
+`-l <box>`. sing-1 runs one now: kubo v0.43.1 with the go-libp2p inbound-slot
+leak fix (see the comment there).
+
 **Ports.**
 
 | Port | Listener | Exposure |

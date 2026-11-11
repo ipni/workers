@@ -8,6 +8,22 @@ content_cluster_api_port: 9094    # loopback (REST API)
 content_cluster_swarm_port: 9096  # TCP, the other boxes only
 content_pinsvc_port: 9097         # loopback (Pinning Service API, behind Envoy)
 
+# Images, pinned by digest (k8s/content/kustomization.yaml.j2). A box may set
+# its own in host_vars to run a canary; scripts/recover-upstream-pinset.sh
+# always uses these defaults.
+#
+# ipfs/kubo v0.43.1 (published 2026-09-15 00:52 UTC, the current v0.43.x;
+# checked 2026-09-15), multi-arch index. Same image as k8s/bootstrap.
+content_kubo_image:
+  name: ipfs/kubo
+  digest: sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
+# ipfs/ipfs-cluster v1.1.6 (published 2026-05-11, the latest release; checked
+# 2026-09-15), multi-arch index. The project publishes to Docker Hub as
+# ipfs/ipfs-cluster.
+content_cluster_image:
+  name: ipfs/ipfs-cluster
+  digest: sha256:a83266c524f1c0bc81d14fe3c8b46c5b83a7b2d8432fb8a50300f27d3c863dcd
+
 # ---------------------------------------------------------------------------
 # Remote pinning: ipfs-cluster's Pinning Service API (the API `ipfs pin remote`
 # speaks), served over TLS by Envoy (k8s/content-pin) on every box under one

@@ -113,13 +113,13 @@ capture_listing() {
     exit 2
   fi
 
-  # The same kubo and ipfs-cluster images the content cluster runs, by digest.
+  # The kubo and ipfs-cluster images the content cluster runs by default, by
+  # digest (a box's canary override in host_vars is not used here).
   local images kubo_image cluster_image
   images=$(python3 - <<'PY'
 import yaml
-k = yaml.safe_load(open("k8s/content/kustomization.yaml"))
-imgs = {i["name"]: f'{i["newName"]}@{i["digest"]}' for i in k["images"]}
-print(imgs["kubo"], imgs["ipfs-cluster"])
+d = yaml.safe_load(open("roles/content/defaults/main.yml"))
+print(*(f'{d[k]["name"]}@{d[k]["digest"]}' for k in ("content_kubo_image", "content_cluster_image")))
 PY
 )
   read -r kubo_image cluster_image <<<"$images"
