@@ -1,0 +1,18 @@
+# Managed by Ansible (roles/common). Changes made here are overwritten.
+#
+# The release, -updates and -backports come from the provider's mirror. The
+# security pocket comes from Ubuntu itself, as on a stock Ubuntu install, so a
+# mirror that stops updating cannot hold security fixes back. See "Package
+# updates and reboots" in the README.
+{% set release = ansible_distribution_release %}
+Types: deb
+URIs: {{ common_apt_mirror_uri }}
+Suites: {{ release }} {{ release }}-updates {{ release }}-backports
+Components: {{ common_apt_components | join(' ') }}
+Signed-By: {{ common_apt_mirror_keyring }}
+
+Types: deb
+URIs: {{ common_apt_security_uri }}
+Suites: {{ release }}-security
+Components: {{ common_apt_components | join(' ') }}
+Signed-By: {{ common_apt_security_keyring }}

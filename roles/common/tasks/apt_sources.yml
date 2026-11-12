@@ -1,0 +1,90 @@
+---
+# Ubuntu only (main.yml): where the package lists come from. The indexers keep
+# their Debian image's own sources.
+#
+# Cherry's image takes every pocket, -security included, from Cherry's mirror,
+# re-signed with Cherry's key. repo.cherryservers.com resolves to a mirror
+# inside each datacenter, and one of them stopped updating for weeks: `apt-get
+# update` kept "hitting" the old index without an error, so that box quietly
+# stopped getting security fixes while the others did not. This takes the
+# security pocket from security.ubuntu.com, signed by Ubuntu's own key, as a
+# stock Ubuntu install does, and keeps the rest on the mirror.
+#
+# The whole file is ours, so if a reinstall or cloud-init rewrites it, the next
+# run puts it back. Runs before main.yml's "Update apt cache", so everything
+# after it installs from the new lists.
+
+- name: Find the keyrings the package sources are signed with
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ common_apt_mirror_keyring }}"
+    - "{{ common_apt_security_keyring }}"
+  register: common_apt_keyrings
+
+# A source whose keyring is missing makes every `apt-get update` fail for it.
+- name: Fail if a keyring is missing
+  ansible.builtin.assert:
+    that: common_apt_keyrings.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: missing
+      {{ common_apt_keyrings.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }};
+      the security keyring comes from the ubuntu-keyring package.
+    quiet: true
+
+- name: Take the security pocket from Ubuntu and the rest from the mirror
+  ansible.builtin.template:
+    src: ubuntu.sources.j2
+    dest: /etc/apt/sources.list.d/ubuntu.sources
+    owner: root
+    group: root
+    mode: "0644"
+  register: common_apt_sources
+
+# apt names the file after the URI: security.ubuntu.com_ubuntu_dists_... It
+# adds a missing trailing slash first, so this does too.
+- name: Work out where apt keeps the security index from the configured source
+  ansible.builtin.set_fact:
+    common_apt_security_index_path: >-
+      /var/lib/apt/lists/{{ (common_apt_security_uri | regex_replace('^[a-z]+://', '') | regex_replace('/+$', '')
+      ~ '/') | replace('/', '_') }}dists_{{ ansible_distribution_release }}-security_InRelease
+
+- name: Look for the security index from the configured source
+  ansible.builtin.stat:
+    path: "{{ common_apt_security_index_path }}"
+  register: common_apt_security_index
+
+# "Update apt cache" in main.yml skips a cache less than an hour old, which
+# would leave the rest of the play on the old lists. Keyed on the index as well
+# as the file, so a run that wrote the file and then failed here refreshes on
+# the next run too. Not reported as a change, like that task: the change is the
+# file above, which a dry run shows.
+- name: Refresh the package lists from the new sources
+  ansible.builtin.apt:
+    update_cache: true
+  register: common_apt_refresh
+  retries: 3
+  delay: 10
+  until: common_apt_refresh is succeeded
+  changed_when: false
+  when: common_apt_sources is changed or not common_apt_security_index.stat.exists
+
+# apt treats a source it could not reach as a warning, not a failure, as long
+# as another one answered. So check the index is really there now, and stop
+# the run on this box if it is not, rather than carry on without it. The next
+# run refreshes again (above). Skipped in a dry run, which refreshes nothing.
+- name: Look again for the security index after the refresh
+  ansible.builtin.stat:
+    path: "{{ common_apt_security_index_path }}"
+  register: common_apt_security_index_after
+  when: not ansible_check_mode
+
+- name: Fail unless the security index from the configured source is there
+  ansible.builtin.assert:
+    that: common_apt_security_index_after.stat.exists
+    fail_msg: >-
+      {{ inventory_hostname }}: no {{ common_apt_security_index_path }} after
+      `apt-get update`; {{ common_apt_security_uri }} was probably unreachable.
+      The sources file is in place; re-run once it answers.
+    quiet: true
+  when: not ansible_check_mode

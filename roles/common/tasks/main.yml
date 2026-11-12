@@ -23,12 +23,25 @@
   when: current_tz.stdout | trim != 'UTC'
   changed_when: true
 
+# Both before the first refresh below: the hook reporting the lists' age is in
+# place for it, and it reads the sources the box should have.
+- name: Report how old the security package lists are
+  ansible.builtin.import_tasks: apt_lists_metric.yml
+
+- name: Take Ubuntu's security pocket from Ubuntu itself
+  ansible.builtin.import_tasks: apt_sources.yml
+  when: ansible_distribution == 'Ubuntu'
+
 # Refreshing the package lists changes nothing installed. Reported as a change,
 # it would be one on every run, and in every dry run an approver reads.
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
+  register: apt_cache
+  retries: 3
+  delay: 10
+  until: apt_cache is succeeded
   changed_when: false
 
 # Gated: see common_apt_upgrade in defaults/main.yml for why this does not run
