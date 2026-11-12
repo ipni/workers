@@ -8,9 +8,12 @@
 #   seeing security fixes shows up. It also grows when the archive simply
 #   publishes nothing new, so compare it across boxes that read the same
 #   source rather than only against a fixed age.
-# node_apt_lists_refresh_timestamp_seconds: the last package-list refresh apt
-#   reported as a success (0: none since this was installed). Old means the
-#   refresh itself is not running or failing, not that the archive is quiet.
+# node_apt_lists_refresh_timestamp_seconds: the last package-list refresh in
+#   which at least one source answered (0: none since this was installed).
+#   That is what apt's Post-Invoke-Success means: it still runs when one
+#   source fails and another answers. So old means the refresh is not running
+#   at all, or no source answers; it does not show one source failing (the
+#   security index above does).
 #
 # Timestamps rather than ages: an age is frozen at whatever it was when the
 # file was last written, so it would stop growing in exactly the case it is
@@ -54,7 +57,7 @@
         printf '# HELP node_apt_security_lists_timestamp_seconds When the newest security package index on this box was published (0: none).\n'
         printf '# TYPE node_apt_security_lists_timestamp_seconds gauge\n'
         printf 'node_apt_security_lists_timestamp_seconds %s\n' "$newest"
-        printf '# HELP node_apt_lists_refresh_timestamp_seconds When apt last reported a package-list refresh as a success (0: never).\n'
+        printf '# HELP node_apt_lists_refresh_timestamp_seconds When a package-list refresh last got an answer from at least one source (0: never).\n'
         printf '# TYPE node_apt_lists_refresh_timestamp_seconds gauge\n'
         printf 'node_apt_lists_refresh_timestamp_seconds %s\n' "$refreshed"
       } > "$tmp"

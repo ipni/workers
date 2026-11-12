@@ -397,15 +397,22 @@ refresh, on every box:
 | Metric | What it is | Old means |
 |---|---|---|
 | `node_apt_security_lists_timestamp_seconds` | When the newest `<release>-security` index on the box was published (the `Date:` of its `InRelease`; 0: none). | The box's security source is stale or unreachable, or the archive has simply published nothing new. |
-| `node_apt_lists_refresh_timestamp_seconds` | The last refresh apt reported as a success (`common_apt_refresh_stamp`; 0: none yet). | The refresh is not running or is failing. |
+| `node_apt_lists_refresh_timestamp_seconds` | The last refresh in which at least one source answered (`common_apt_refresh_stamp`, touched by apt's `Post-Invoke-Success`, which runs even when another source failed; 0: none yet). | The refresh is not running at all, or no source answers. One unreachable source does not show here. |
 
 They are timestamps rather than ages, so they keep getting older when the
 lists stop refreshing; the age is `time() - <metric>`. A quiet archive also
 makes the first one grow, and how quiet `noble-security` can get has not been
-measured yet. The IPFS boxes all read the same upstream index, though, so the
-dependable signal is one IPFS box's security index more than a day behind
-another's. Add a fixed age (a week, say) only once the `Date:` has been watched
-for a while. Like `node_reboot_required`, these reach Prometheus only once
+measured yet. Three alerts between them cover the failures:
+
+- one IPFS box's security index more than a day behind another's (they all
+  read the same upstream index): one box's source is stale or unreachable;
+- the refresh timestamp more than a day or two old: the refresh has stopped;
+- the security index older than a generous fixed age, a week say: the backstop
+  for `security.ubuntu.com` being unreachable from every box at once, which
+  the first alert cannot see. Tighten it once the `Date:` has been watched for
+  a while.
+
+Like `node_reboot_required`, these reach Prometheus only once
 ipni/infra's node-exporter reads the textfile directory, and the alerts belong
 with the fleet rules there. Until then, on the box:
 
