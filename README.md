@@ -367,6 +367,41 @@ an origin pattern that matches nothing; for that, look at
 `/var/log/unattended-upgrades/unattended-upgrades.log` and
 `apt list --upgradable` on the box.
 
+**Where the IPFS boxes' packages come from.** `common` writes
+`/etc/apt/sources.list.d/ubuntu.sources` (`templates/ubuntu.sources.j2`): the
+release, `-updates` and `-backports` from Cherry's mirror, signed with
+Cherry's key, as the image has them, and `<release>-security` from
+`security.ubuntu.com`, signed with Ubuntu's own key (`ubuntu-keyring`), as on a
+stock Ubuntu install. `repo.cherryservers.com` resolves to a mirror inside each
+datacenter, and one of them stopped updating for weeks. `apt-get update` kept
+"hitting" the old index without an error, so unattended-upgrades on that box
+quietly found nothing to install while the other boxes kept getting fixes.
+Taking the security pocket from upstream means a fix never waits on a mirror.
+It costs a little outbound traffic, and an upstream outage only delays one
+night's run. If a security update needs a newer version of something from
+`-updates` that the mirror does not have yet, apt holds that package back
+until it does; nothing breaks. The URIs and keyrings are `common_apt_*` in
+`roles/common/defaults/main.yml`. The indexers keep their Debian image's
+sources.
+
+**How old the security lists are.** `node_apt_security_lists_timestamp_seconds`
+is when the newest `<release>-security` index on the box was published (the
+`Date:` of its `InRelease`; 0 if there is none). An apt hook rewrites it after
+every package-list refresh, into
+`/var/lib/node_exporter/textfile/apt-security-lists.prom`, on every box. It is
+a timestamp rather than an age so that it keeps getting older when the lists
+stop refreshing; the age is `time() - node_apt_security_lists_timestamp_seconds`.
+The security pocket normally gets a new index every few days at most, and the
+IPFS boxes all read the same one, so an alert would fire on either: the lists
+more than about three days old, or a day behind another IPFS box's. Like
+`node_reboot_required`, it reaches Prometheus only once ipni/infra's
+node-exporter reads the textfile directory, and the alert belongs with the
+fleet rules there. Until then, on the box:
+
+```bash
+ansible ipfs_nodes -u ipni -m shell -a 'cat /var/lib/node_exporter/textfile/apt-security-lists.prom'
+```
+
 A pending reboot shows in three places: `/var/run/reboot-required`, the `reboot:`
 line in every `site.yml` summary, and the `node_reboot_required` metric, which an
 hourly timer writes to `/var/lib/node_exporter/textfile/reboot.prom`. The metric

@@ -1,0 +1,51 @@
+---
+# Ubuntu only (main.yml): where the package lists come from. The indexers keep
+# their Debian image's own sources.
+#
+# Cherry's image takes every pocket, -security included, from Cherry's mirror,
+# re-signed with Cherry's key. repo.cherryservers.com resolves to a mirror
+# inside each datacenter, and one of them stopped updating for weeks: `apt-get
+# update` kept "hitting" the old index without an error, so that box quietly
+# stopped getting security fixes while the others did not. This takes the
+# security pocket from security.ubuntu.com, signed by Ubuntu's own key, as a
+# stock Ubuntu install does, and keeps the rest on the mirror.
+#
+# The whole file is ours, so if a reinstall or cloud-init rewrites it, the next
+# run puts it back. Runs before main.yml's "Update apt cache", so everything
+# after it installs from the new lists.
+
+- name: Find the keyrings the package sources are signed with
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ common_apt_mirror_keyring }}"
+    - "{{ common_apt_security_keyring }}"
+  register: common_apt_keyrings
+
+# A source whose keyring is missing makes every `apt-get update` fail for it.
+- name: Fail if a keyring is missing
+  ansible.builtin.assert:
+    that: common_apt_keyrings.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: missing
+      {{ common_apt_keyrings.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }};
+      the security keyring comes from the ubuntu-keyring package.
+    quiet: true
+
+- name: Take the security pocket from Ubuntu and the rest from the mirror
+  ansible.builtin.template:
+    src: ubuntu.sources.j2
+    dest: /etc/apt/sources.list.d/ubuntu.sources
+    owner: root
+    group: root
+    mode: "0644"
+  register: common_apt_sources
+
+# "Update apt cache" in main.yml skips a cache less than an hour old, which
+# would leave the rest of the play on the old lists. Not reported as a change,
+# like that task: the change is the file above, which a dry run shows.
+- name: Refresh the package lists from the new sources
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+  when: common_apt_sources is changed

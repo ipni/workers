@@ -54,3 +54,12 @@ common_reboot_reporting: false
 # node-exporter reads *.prom from here once it is given
 # --collector.textfile.directory (ipni/infra kubernetes/platform/node-exporter).
 common_textfile_dir: /var/lib/node_exporter/textfile
+
+# Ubuntu's package sources (tasks/apt_sources.yml): the release, -updates and
+# -backports from the provider's mirror, signed with the provider's key; the
+# security pocket from Ubuntu, signed with Ubuntu's.
+common_apt_mirror_uri: http://repo.cherryservers.com/ubuntu/
+common_apt_mirror_keyring: /usr/share/keyrings/cherryservers-signing-public.gpg
+common_apt_security_uri: http://security.ubuntu.com/ubuntu/
+common_apt_security_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+common_apt_components: [main, universe, restricted, multiverse]
