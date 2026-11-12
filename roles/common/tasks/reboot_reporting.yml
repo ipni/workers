@@ -1,22 +1,7 @@
 ---
 # Nothing here reboots or restarts anything. It makes "this box needs a reboot"
 # something a person or an alert can see.
-
-- name: Install needrestart
-  ansible.builtin.apt:
-    name: needrestart
-    state: present
-
-# The default in a non-interactive apt run can be to restart services. `l` only
-# lists them. Restarting k3s would be survivable, but this box decides nothing
-# on its own.
-- name: Keep needrestart to listing what needs a restart
-  ansible.builtin.copy:
-    dest: /etc/needrestart/conf.d/50-ipni.conf
-    mode: "0644"
-    content: |
-      # Managed by Ansible.
-      $nrconf{restart} = 'l';
+# needrestart itself, in list-only mode, is installed on every box in main.yml.
 
 - name: Create the node-exporter textfile directory
   ansible.builtin.file:
