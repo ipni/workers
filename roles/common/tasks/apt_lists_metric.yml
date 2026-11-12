@@ -1,18 +1,23 @@
 ---
-# node_apt_security_lists_timestamp_seconds: when the newest security index
-# this box has was published (the `Date:` of its <release>-security InRelease).
-# A mirror that stops updating still answers `apt-get update` without an error,
-# so this is how a box that has quietly stopped seeing security fixes shows up.
+# Two timestamps, for node-exporter's textfile collector (common_textfile_dir):
 #
-# A timestamp rather than an age: an age is frozen at whatever it was when the
+# node_apt_security_lists_timestamp_seconds: when the newest security index
+#   this box has was published (the `Date:` of its <release>-security
+#   InRelease; 0: none). A mirror that stops updating still answers `apt-get
+#   update` without an error, so this is how a box that has quietly stopped
+#   seeing security fixes shows up. It also grows when the archive simply
+#   publishes nothing new, so compare it across boxes that read the same
+#   source rather than only against a fixed age.
+# node_apt_lists_refresh_timestamp_seconds: the last package-list refresh apt
+#   reported as a success (0: none since this was installed). Old means the
+#   refresh itself is not running or failing, not that the archive is quiet.
+#
+# Timestamps rather than ages: an age is frozen at whatever it was when the
 # file was last written, so it would stop growing in exactly the case it is
-# for, a box whose lists stop refreshing. Alert on
-# `time() - node_apt_security_lists_timestamp_seconds`. 0 means no security
-# index at all.
+# for, a box whose lists stop refreshing. Alert on `time() - <metric>`.
 #
 # Rewritten after every package-list refresh (an apt hook) and on every run of
-# this role. Read by node-exporter's textfile collector, see
-# common_textfile_dir.
+# this role.
 
 - name: Create the node-exporter textfile directory
   ansible.builtin.file:
@@ -22,7 +27,7 @@
     group: root
     mode: "0755"
 
-- name: Install the security-lists age reporter
+- name: Install the package-list age reporter
   ansible.builtin.copy:
     dest: /usr/local/sbin/ipni-apt-lists-metric
     mode: "0755"
@@ -30,8 +35,8 @@
     group: root
     content: |
       #!/bin/sh
-      # Managed by Ansible. Writes node_apt_security_lists_timestamp_seconds
-      # for node-exporter: the Date: of the newest security index apt has.
+      # Managed by Ansible. Writes node_apt_security_lists_timestamp_seconds and
+      # node_apt_lists_refresh_timestamp_seconds for node-exporter.
       set -eu
       newest=0
       for f in /var/lib/apt/lists/*_dists_{{ ansible_distribution_release }}-security_InRelease; do
@@ -41,14 +46,26 @@
         if [ -n "$d" ] && dt=$(date -d "$d" +%s 2>/dev/null); then t=$dt; fi
         if [ "$t" -gt "$newest" ]; then newest=$t; fi
       done
-      tmp="{{ common_textfile_dir }}/.apt-security-lists.prom.$$"
-      printf '# HELP node_apt_security_lists_timestamp_seconds When the newest security package index on this box was published (0: none).\n# TYPE node_apt_security_lists_timestamp_seconds gauge\nnode_apt_security_lists_timestamp_seconds %s\n' "$newest" > "$tmp"
+      refreshed=0
+      stamp={{ common_apt_refresh_stamp }}
+      [ -e "$stamp" ] && refreshed=$(stat -c %Y "$stamp")
+      tmp="{{ common_textfile_dir }}/.apt-lists.prom.$$"
+      {
+        printf '# HELP node_apt_security_lists_timestamp_seconds When the newest security package index on this box was published (0: none).\n'
+        printf '# TYPE node_apt_security_lists_timestamp_seconds gauge\n'
+        printf 'node_apt_security_lists_timestamp_seconds %s\n' "$newest"
+        printf '# HELP node_apt_lists_refresh_timestamp_seconds When apt last reported a package-list refresh as a success (0: never).\n'
+        printf '# TYPE node_apt_lists_refresh_timestamp_seconds gauge\n'
+        printf 'node_apt_lists_refresh_timestamp_seconds %s\n' "$refreshed"
+      } > "$tmp"
       chmod 0644 "$tmp"
-      mv "$tmp" "{{ common_textfile_dir }}/apt-security-lists.prom"
+      mv "$tmp" "{{ common_textfile_dir }}/apt-lists.prom"
 
-# Post-Invoke, not Post-Invoke-Success: a refresh that partly fails still
-# leaves lists behind worth reporting. Never fails the refresh itself.
-- name: Report the security lists' age after every package-list refresh
+# Our own stamp: Ubuntu's update-success-stamp comes from update-notifier,
+# which Debian does not have. Post-Invoke-Success touches it and reports; the
+# Post-Invoke entry reports after a refresh apt counts as failed too, when the
+# lists left behind are still worth reporting. Neither fails the refresh.
+- name: Report the package lists' age after every refresh
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/80ipni-apt-lists-metric
     mode: "0644"
@@ -56,11 +73,12 @@
     group: root
     content: |
       // Managed by Ansible.
+      APT::Update::Post-Invoke-Success { "touch {{ common_apt_refresh_stamp }}; /usr/local/sbin/ipni-apt-lists-metric || true"; };
       APT::Update::Post-Invoke { "/usr/local/sbin/ipni-apt-lists-metric || true"; };
 
 # So the file exists from the first run, not only after the next refresh.
 # Skipped in a dry run, where the reporter may not be installed yet.
-- name: Report the security lists' age now
+- name: Report the package lists' age now
   ansible.builtin.command: /usr/local/sbin/ipni-apt-lists-metric
   changed_when: false
   when: not ansible_check_mode

@@ -41,11 +41,26 @@
     mode: "0644"
   register: common_apt_sources
 
+# apt names the file after the URI: security.ubuntu.com_ubuntu_dists_...
+- name: Look for the security index from the configured source
+  ansible.builtin.stat:
+    path: >-
+      /var/lib/apt/lists/{{ common_apt_security_uri | regex_replace('^[a-z]+://', '') | replace('/', '_')
+      }}dists_{{ ansible_distribution_release }}-security_InRelease
+  register: common_apt_security_index
+
 # "Update apt cache" in main.yml skips a cache less than an hour old, which
-# would leave the rest of the play on the old lists. Not reported as a change,
+# would leave the rest of the play on the old lists. Keyed on the index as well
+# as the file, so a run that wrote the file and then failed here refreshes on
+# the next run too. A failure after the retries stops the run on this box: it
+# would otherwise carry on without a security index. Not reported as a change,
 # like that task: the change is the file above, which a dry run shows.
 - name: Refresh the package lists from the new sources
   ansible.builtin.apt:
     update_cache: true
+  register: common_apt_refresh
+  retries: 3
+  delay: 10
+  until: common_apt_refresh is succeeded
   changed_when: false
-  when: common_apt_sources is changed
+  when: common_apt_sources is changed or not common_apt_security_index.stat.exists

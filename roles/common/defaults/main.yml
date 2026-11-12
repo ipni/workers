@@ -63,3 +63,7 @@ common_apt_mirror_keyring: /usr/share/keyrings/cherryservers-signing-public.gpg
 common_apt_security_uri: http://security.ubuntu.com/ubuntu/
 common_apt_security_keyring: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 common_apt_components: [main, universe, restricted, multiverse]
+
+# Touched by an apt hook after each successful package-list refresh, for
+# node_apt_lists_refresh_timestamp_seconds (tasks/apt_lists_metric.yml).
+common_apt_refresh_stamp: /var/lib/apt/periodic/ipni-update-success-stamp

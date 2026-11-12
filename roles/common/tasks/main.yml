@@ -38,6 +38,10 @@
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
+  register: apt_cache
+  retries: 3
+  delay: 10
+  until: apt_cache is succeeded
   changed_when: false
 
 # Gated: see common_apt_upgrade in defaults/main.yml for why this does not run

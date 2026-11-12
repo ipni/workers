@@ -377,29 +377,40 @@ datacenter, and one of them stopped updating for weeks. `apt-get update` kept
 "hitting" the old index without an error, so unattended-upgrades on that box
 quietly found nothing to install while the other boxes kept getting fixes.
 Taking the security pocket from upstream means a fix never waits on a mirror.
-It costs a little outbound traffic, and an upstream outage only delays one
-night's run. If a security update needs a newer version of something from
-`-updates` that the mirror does not have yet, apt holds that package back
-until it does; nothing breaks. The URIs and keyrings are `common_apt_*` in
-`roles/common/defaults/main.yml`. The indexers keep their Debian image's
-sources.
+It costs a little outbound traffic. If `security.ubuntu.com` is unreachable,
+unattended-upgrades finds nothing new that night and catches up on the next
+run, but a `site.yml` run stops on the box where the refresh fails (after
+three tries) rather than carrying on without a security index.
 
-**How old the security lists are.** `node_apt_security_lists_timestamp_seconds`
-is when the newest `<release>-security` index on the box was published (the
-`Date:` of its `InRelease`; 0 if there is none). An apt hook rewrites it after
-every package-list refresh, into
-`/var/lib/node_exporter/textfile/apt-security-lists.prom`, on every box. It is
-a timestamp rather than an age so that it keeps getting older when the lists
-stop refreshing; the age is `time() - node_apt_security_lists_timestamp_seconds`.
-The security pocket normally gets a new index every few days at most, and the
-IPFS boxes all read the same one, so an alert would fire on either: the lists
-more than about three days old, or a day behind another IPFS box's. Like
-`node_reboot_required`, it reaches Prometheus only once ipni/infra's
-node-exporter reads the textfile directory, and the alert belongs with the
-fleet rules there. Until then, on the box:
+A security update that needs a version only `-updates` has stays pending:
+unattended-upgrades does not install from `-updates` (see the table above),
+whether or not the mirror has it. Upgrade that one by hand. Ubuntu builds
+security updates against the release and security pockets, so this is rare.
+
+The URIs and keyrings are `common_apt_*` in `roles/common/defaults/main.yml`.
+The indexers keep their Debian image's sources.
+
+**How old the package lists are.** An apt hook writes two timestamps to
+`/var/lib/node_exporter/textfile/apt-lists.prom` after every package-list
+refresh, on every box:
+
+| Metric | What it is | Old means |
+|---|---|---|
+| `node_apt_security_lists_timestamp_seconds` | When the newest `<release>-security` index on the box was published (the `Date:` of its `InRelease`; 0: none). | The box's security source is stale or unreachable, or the archive has simply published nothing new. |
+| `node_apt_lists_refresh_timestamp_seconds` | The last refresh apt reported as a success (`common_apt_refresh_stamp`; 0: none yet). | The refresh is not running or is failing. |
+
+They are timestamps rather than ages, so they keep getting older when the
+lists stop refreshing; the age is `time() - <metric>`. A quiet archive also
+makes the first one grow, and how quiet `noble-security` can get has not been
+measured yet. The IPFS boxes all read the same upstream index, though, so the
+dependable signal is one IPFS box's security index more than a day behind
+another's. Add a fixed age (a week, say) only once the `Date:` has been watched
+for a while. Like `node_reboot_required`, these reach Prometheus only once
+ipni/infra's node-exporter reads the textfile directory, and the alerts belong
+with the fleet rules there. Until then, on the box:
 
 ```bash
-ansible ipfs_nodes -u ipni -m shell -a 'cat /var/lib/node_exporter/textfile/apt-security-lists.prom'
+ansible ipfs_nodes -u ipni -m shell -a 'cat /var/lib/node_exporter/textfile/apt-lists.prom'
 ```
 
 A pending reboot shows in three places: `/var/run/reboot-required`, the `reboot:`
