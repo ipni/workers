@@ -295,6 +295,10 @@
       AllowAgentForwarding no
       AllowTcpForwarding yes
       MaxAuthTries 3
+      # zlib after login buys nothing on these links, and OpenSSH before 10.6
+      # has decompression bugs behind it (CVE-2026-106582, CVE-2026-106585)
+      # that Debian 13's 10.0 has not had backported.
+      Compression no
       MaxSessions 10
       LoginGraceTime 30
       ClientAliveInterval 300
