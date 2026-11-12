@@ -190,6 +190,24 @@
 # ---------------------------------------------------------------------------
 # Automatic security updates
 # ---------------------------------------------------------------------------
+# A package upgrade can restart services through needrestart, and Ubuntu 24.04's
+# default in a non-interactive run is to restart them. `l` only lists them: k3s
+# and everything it runs restart when a person decides, not at 06:00 on every
+# box at once. First in this section, so it is in place before anything below
+# turns unattended upgrades on, and stays in place if the play fails later.
+- name: Install needrestart
+  ansible.builtin.apt:
+    name: needrestart
+    state: present
+
+- name: Keep needrestart to listing what needs a restart
+  ansible.builtin.copy:
+    dest: /etc/needrestart/conf.d/50-ipni.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible.
+      $nrconf{restart} = 'l';
+
 - name: Enable unattended security upgrades
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/20auto-upgrades
@@ -199,10 +217,11 @@
       APT::Periodic::Unattended-Upgrade "1";
       APT::Periodic::AutocleanInterval "7";
 
-# With the defaults this keeps the distribution's own allowed origins, which on
-# Ubuntu (Cherry's mirror included) is -security only. An indexer adds
-# origin-and-codename patterns, because Debian's label-based defaults match
-# nothing on Cherry's mirror: see group_vars/indexers.
+# With the defaults this keeps the distribution's own allowed origins. On Ubuntu
+# that is noble, noble-security and the two ESM security origins (see "Package
+# updates and reboots" in the README). An indexer adds origin-and-codename
+# patterns, because Debian's label-based defaults match nothing on Cherry's
+# mirror: see group_vars/indexers.
 - name: Configure unattended-upgrades to security only, no auto-reboot
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/51-ipfs-unattended
@@ -226,31 +245,28 @@
 # belongs to no package and is not ours, and it sorts after 20auto-upgrades and
 # 99*, so it wins: apt-daily and apt-daily-upgrade start and exit at once, and
 # nothing above ever runs. Found 2026-11-11 on the IPFS boxes: no
-# /var/log/unattended-upgrades at all and package lists weeks old. Removed rather than overridden, so no file of ours has to sort after it.
+# /var/log/unattended-upgrades at all and package lists weeks old. Removed
+# rather than overridden, so no file of ours has to sort after it.
 - name: Remove the provider's switch that turns periodic apt off
   ansible.builtin.file:
     path: /etc/apt/apt.conf.d/docker-disable-periodic-update
     state: absent
 
-# A package upgrade on a box can restart services through needrestart. `l` only
-# lists them: k3s and everything it runs restart when a person decides, not at
-# 06:00 on every box at once. Set before the first unattended run picks it up.
-- name: Install needrestart
-  ansible.builtin.apt:
-    name: needrestart
-    state: present
-
-- name: Keep needrestart to listing what needs a restart
-  ansible.builtin.copy:
-    dest: /etc/needrestart/conf.d/50-ipni.conf
-    mode: "0644"
-    content: |
-      # Managed by Ansible.
-      $nrconf{restart} = 'l';
+# apt-daily refreshes the package lists, apt-daily-upgrade installs. Both ship
+# enabled, but nothing above helps if either is masked or stopped.
+- name: Keep the apt timers enabled and running
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
 
 # apt reads every file under apt.conf.d and the last value wins, so a file
-# someone else drops in can quietly switch the timers off again, as above. Ask
-# apt what it settled on. Skipped in a dry run, where the removal has not
+# someone else drops in can quietly switch this off again, as above: all of it,
+# or just the list refresh, which would leave upgrades running on stale lists.
+# Ask apt what it settled on. Skipped in a dry run, where the removal has not
 # happened and the answer would still be the old one.
 - name: Read the periodic apt settings apt is actually using
   ansible.builtin.command:
@@ -259,6 +275,8 @@
       - shell
       - enable
       - APT::Periodic::Enable
+      - update
+      - APT::Periodic::Update-Package-Lists
       - unattended
       - APT::Periodic::Unattended-Upgrade
   register: apt_periodic_effective
@@ -266,10 +284,11 @@
   check_mode: false
   when: not ansible_check_mode
 
-- name: Fail unless unattended upgrades really run
+- name: Fail unless the package lists refresh and unattended upgrades run
   ansible.builtin.assert:
     that:
       - "\"enable='0'\" not in apt_periodic_effective.stdout_lines"
+      - "\"update='1'\" in apt_periodic_effective.stdout_lines"
       - "\"unattended='1'\" in apt_periodic_effective.stdout_lines"
     fail_msg: >-
       {{ inventory_hostname }}: another file under /etc/apt/apt.conf.d turns
