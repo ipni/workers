@@ -41,12 +41,13 @@
     mode: "0644"
   register: common_apt_sources
 
-# apt names the file after the URI: security.ubuntu.com_ubuntu_dists_...
+# apt names the file after the URI: security.ubuntu.com_ubuntu_dists_... It
+# adds a missing trailing slash first, so this does too.
 - name: Work out where apt keeps the security index from the configured source
   ansible.builtin.set_fact:
     common_apt_security_index_path: >-
-      /var/lib/apt/lists/{{ common_apt_security_uri | regex_replace('^[a-z]+://', '') | replace('/', '_')
-      }}dists_{{ ansible_distribution_release }}-security_InRelease
+      /var/lib/apt/lists/{{ (common_apt_security_uri | regex_replace('^[a-z]+://', '') | regex_replace('/+$', '')
+      ~ '/') | replace('/', '_') }}dists_{{ ansible_distribution_release }}-security_InRelease
 
 - name: Look for the security index from the configured source
   ansible.builtin.stat:
