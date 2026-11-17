@@ -1385,10 +1385,11 @@ ansible-playbook content.yml --check --diff   # dry run: reads DNSLink and the p
 `roles/content/defaults/main.yml` (`content_kubo_image`,
 `content_cluster_image`). A box can set its own in `host_vars/<box>/content.yml`
 to run a canary while the others stay on the release; deploy it with
-`-l <box>`. sing-1 runs one now: kubo v0.43.1 with the go-libp2p inbound-slot
-leak fix (see the comment there). A bootstrapper instance can do the same with
-`kubo_image` in its `bootstrap_extra_instances` entry; chic-1's `bootstrap-b`
-runs the same canary, with `bootstrap` on the same box as its control.
+`-l <box>`. A bootstrapper instance can do the same with `kubo_image` in its
+`bootstrap_extra_instances` entry. kubo is not an ipfs/kubo release for now:
+it is v0.43.1 rebuilt on go-libp2p v0.52.0, which fixes the inbound-slot leak
+(see the comment in `roles/content/defaults/main.yml`); the bootstrappers run
+the same image.
 
 **Ports.**
 

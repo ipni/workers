@@ -12,11 +12,25 @@ content_pinsvc_port: 9097         # loopback (Pinning Service API, behind Envoy)
 # its own in host_vars to run a canary; scripts/recover-upstream-pinset.sh
 # always uses these defaults.
 #
-# ipfs/kubo v0.43.1 (published 2026-09-15 00:52 UTC, the current v0.43.x;
-# checked 2026-09-15), multi-arch index. Same image as k8s/bootstrap.
+# kubo v0.43.1 rebuilt on go-libp2p v0.52.0, the first release with the fix
+# for the inbound-slot leak (libp2p/go-libp2p#3564, fixed by #3568). No kubo
+# release uses it yet: v0.43.1 replaces go-libp2p with lidel/go-libp2p@9c4ee60
+# (v0.49 plus a quic-go bump), so this is ipfs/kubo v0.43.1 (acc53c0) built by
+# kubo's own Dockerfile with that replace pointed at go-libp2p v0.52.0 and
+# go mod tidy. That also raises shared dependencies (quic-go 0.62 -> 0.64.1,
+# golang.org/x/*, prometheus client_golang 1.25); Go 1.26.5, the build
+# settings and the version string (0.43.1-acc53c0) match upstream. amd64 only,
+# pushed by hand on 2026-11-16 as v0.43.1-libp2p-v0.52.0. Same image as
+# k8s/bootstrap. Go back to an ipfs/kubo release once one ships
+# go-libp2p >= v0.52.0 (ipfs/kubo#11480).
+#
+# From 2026-11-11 to 2026-11-16 sing-1 ran v0.43.1 plus only the fix and leaked
+# nothing, while lith-1 and chic-1 on upstream v0.43.1 leaked 700-800 slots a
+# day. Upstream v0.43.1, to roll back to: ipfs/kubo
+# sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48.
 content_kubo_image:
-  name: ipfs/kubo
-  digest: sha256:b293923d66e490e70ced64df42ea7a6cf7eac2740e3fb29101df18070fa7be48
+  name: ghcr.io/ipni/kubo
+  digest: sha256:71d7b748f567865787543119c773512a27536f9e0537c90e7dd1bd12ab153df1
 # ipfs/ipfs-cluster v1.1.6 (published 2026-05-11, the latest release; checked
 # 2026-09-15), multi-arch index. The project publishes to Docker Hub as
 # ipfs/ipfs-cluster.
