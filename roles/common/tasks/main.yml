@@ -73,6 +73,23 @@
     name: "{{ common_base_packages + common_distro_packages[ansible_distribution] | default([]) }}"
     state: present
 
+# Which kernel line the box follows (common_kernel_packages in defaults). Only
+# the meta-packages: removing one never removes an installed kernel, and the
+# new kernel only runs after a reboot, which stays manual.
+- name: Install the kernel meta-package the box should follow
+  ansible.builtin.apt:
+    name: "{{ common_kernel_packages[ansible_distribution] | default([]) }}"
+    state: present
+  when: common_kernel_packages[ansible_distribution] | default([]) | length > 0
+
+- name: Remove kernel meta-packages that pin an older line
+  ansible.builtin.apt:
+    name: "{{ common_kernel_packages_absent[ansible_distribution] | default([]) }}"
+    state: absent
+    autoremove: false
+    purge: false
+  when: common_kernel_packages_absent[ansible_distribution] | default([]) | length > 0
+
 - name: Enable and start chrony for time sync
   ansible.builtin.systemd:
     name: chrony
