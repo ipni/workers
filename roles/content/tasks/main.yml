@@ -577,9 +577,18 @@
     # `files stat` needs only the root block: its cumulative size comes from the
     # links' recorded sizes, so an oversized DAG is gated without fetching it.
     # Failing to find the root at all means the entry is unretrievable.
-    - name: Find each missing root and estimate its size
+    #
+    # Each fetch below runs under coreutils timeout on the box, 30s past ipfs's
+    # own --timeout: `kubectl exec` can hang after ipfs has given up (seen on
+    # chic-1 on 2026-11-17 with cluster.ipfs.io's new root), and the kill turns
+    # that into rc 124, reported with the entry like any other failure. The
+    # task timeout stays as a backstop only; Ansible fails a timed-out task
+    # whatever failed_when says, hence ignore_errors, so even then the run
+    # reports the entry instead of stopping.
+    - name: Find each missing root and estimate its size  # noqa ignore-errors
       ansible.builtin.command:
-        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
+        argv: [timeout, --kill-after=10, "{{ content_root_timeout | int + 30 }}",
+               k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
                ipfs, --api=/ip4/127.0.0.1/tcp/5021, "--timeout={{ content_root_timeout }}s",
                files, stat, --format=<cumulsize>, "/ipfs/{{ item.cid }}"]
       loop: "{{ content_pin_state.missing }}"
@@ -588,7 +597,8 @@
       register: content_pin_estimate
       changed_when: false
       failed_when: false   # upstream-cluster: failed loudly below; dnslink: reported
-      timeout: "{{ content_root_timeout | int + 60 }}"
+      ignore_errors: true  # the task timeout (backstop); see above
+      timeout: "{{ content_root_timeout | int + 90 }}"
       when: not ansible_check_mode
 
     # source: upstream-cluster content is not re-resolvable: the recorded CID is
@@ -610,7 +620,7 @@
               if not r.skipped | default(false) and r.rc | default(1) != 0
                and r.item.source in ['upstream-cluster', 'local'] -%}
            {%- set _ = l.append({'name': r.item.name, 'cid': r.item.cid,
-                                 'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
+                                 'error': ('timed out' if r.rc | default(0) == 124 else r.stderr | default('', true) | trim or r.msg | default('') | trim)}) -%}
          {%- endfor -%}
          {{ l }}
       loop_control:
@@ -620,11 +630,14 @@
     # Fetches the whole DAG (which the pin would fetch anyway), so it runs only
     # for entries whose estimate is under the gate, and not for entries allowed
     # past the gate by content_size_gate_allow.
-    - name: Measure each missing entry under the size gate (fetches its blocks)
+    # Under coreutils timeout, as the root estimate above, and for the same
+    # reason.
+    - name: Measure each missing entry under the size gate (fetches its blocks)  # noqa ignore-errors
       vars:
         gate_bytes: "{{ (content_size_gate_gb | float * 1000000000) | int }}"
       ansible.builtin.command:
-        argv: [k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
+        argv: [timeout, --kill-after=10, "{{ content_pin_timeout | int + 30 }}",
+               k3s, kubectl, --namespace=content, exec, deploy/content, -c, kubo, --,
                ipfs, --api=/ip4/127.0.0.1/tcp/5021, "--timeout={{ content_pin_timeout }}s",
                dag, stat, --progress=false, --enc=json, "{{ item.item.cid }}"]
       loop: >-
@@ -639,7 +652,8 @@
       register: content_pin_dagstat
       changed_when: false
       failed_when: false
-      timeout: "{{ content_pin_timeout | int + 60 }}"
+      ignore_errors: true  # the task timeout (backstop); see the root estimate
+      timeout: "{{ content_pin_timeout | int + 90 }}"
       when: item.stdout | trim | int <= gate_bytes | int
 
     - name: Fail loudly for upstream-cluster content that could not be fetched  # noqa ignore-errors
@@ -655,7 +669,7 @@
               if not r.skipped | default(false) and r.rc | default(1) != 0
                and r.item.item.source in ['upstream-cluster', 'local'] -%}
           {%- set _ = l.append({'name': r.item.item.name, 'cid': r.item.item.cid,
-                                'error': r.stderr | default('', true) | trim or r.msg | default('') | trim}) -%}
+                                'error': ('timed out' if r.rc | default(0) == 124 else r.stderr | default('', true) | trim or r.msg | default('') | trim)}) -%}
         {%- endfor -%}
         {{ l }}
       loop_control:
@@ -679,14 +693,14 @@
             {%- set m = measured[c.key] | default(none) -%}
             {%- if est.rc | default(1) != 0 -%}
               {%- set _ = d.unretrievable.append({'name': c.name, 'cid': c.cid, 'source': c.source, 'snapshot': c.snapshot,
-                    'error': 'root not found: ' ~ (est.stderr | default('', true) | trim or est.msg | default('') | trim)}) -%}
+                    'error': 'root not found: ' ~ ('timed out' if est.rc | default(0) == 124 else est.stderr | default('', true) | trim or est.msg | default('') | trim)}) -%}
             {%- elif c.name in content_size_gate_allow -%}
               {%- set _ = d.pin.append(c | combine({'size': est.stdout | trim | int, 'size_from': 'estimate, gate overridden'})) -%}
             {%- elif est.stdout | trim | int > gate_bytes | int -%}
               {%- set _ = d.gated.append({'name': c.name, 'cid': c.cid, 'size': est.stdout | trim | int, 'size_from': 'root estimate'}) -%}
             {%- elif m is none or m.rc | default(1) != 0 -%}
               {%- set _ = d.unretrievable.append({'name': c.name, 'cid': c.cid, 'source': c.source, 'snapshot': c.snapshot,
-                    'error': 'DAG not fetched: ' ~ ((m.stderr | default('', true) | trim or m.msg | default('') | trim)
+                    'error': 'DAG not fetched: ' ~ (('timed out' if m.rc | default(0) == 124 else m.stderr | default('', true) | trim or m.msg | default('') | trim)
                                                        if m is not none else 'not measured')}) -%}
             {%- elif (m.stdout | from_json).TotalSize | int > gate_bytes | int -%}
               {%- set _ = d.gated.append({'name': c.name, 'cid': c.cid, 'size': (m.stdout | from_json).TotalSize | int, 'size_from': 'dag stat'}) -%}
