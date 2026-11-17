@@ -16,11 +16,11 @@ labels:
       app.kubernetes.io/part-of: ipfs-workers
 
 # Same Envoy as k8s/route-origin and k8s/bootstrap-wss: envoyproxy/envoy
-# distroless-v1.39.1 (2026-08-27), pinned by index digest.
+# distroless-v1.39.6 (2026-10-27), pinned by index digest.
 images:
   - name: envoy
     newName: envoyproxy/envoy
-    digest: sha256:eb2c01c13125d1629637cb4e4cce7207009fb7cc2c8027f9742758549d15b6f4
+    digest: sha256:1cac8b3a2f72d5a0918f54d7b49e68aae0b0ba325c2d50c8a9a3fff7a4d1f994
 
 configMapGenerator:
   - name: content-pin-envoy-config
