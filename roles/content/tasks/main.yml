@@ -581,10 +581,10 @@
     # Each fetch below runs under coreutils timeout on the box, 30s past ipfs's
     # own --timeout: `kubectl exec` can hang after ipfs has given up (seen on
     # chic-1 on 2026-11-17 with cluster.ipfs.io's new root), and the kill turns
-    # that into rc 124, reported with the entry like any other failure. The
-    # task timeout stays as a backstop only; Ansible fails a timed-out task
-    # whatever failed_when says, hence ignore_errors, so even then the run
-    # reports the entry instead of stopping.
+    # that into rc 124 (137 if it took the KILL), reported with the entry as
+    # "timed out". The task timeout stays as a backstop only; Ansible fails a
+    # timed-out task whatever failed_when says, hence ignore_errors, so even
+    # then the run reports the entry instead of stopping.
     - name: Find each missing root and estimate its size  # noqa ignore-errors
       ansible.builtin.command:
         argv: [timeout, --kill-after=10, "{{ content_root_timeout | int + 30 }}",
@@ -620,7 +620,7 @@
               if not r.skipped | default(false) and r.rc | default(1) != 0
                and r.item.source in ['upstream-cluster', 'local'] -%}
            {%- set _ = l.append({'name': r.item.name, 'cid': r.item.cid,
-                                 'error': ('timed out' if r.rc | default(0) == 124 else r.stderr | default('', true) | trim or r.msg | default('') | trim)}) -%}
+                                 'error': ('timed out' if r.rc | default(0) in [124, 137] else r.stderr | default('', true) | trim or r.msg | default('') | trim)}) -%}
          {%- endfor -%}
          {{ l }}
       loop_control:
@@ -669,7 +669,7 @@
               if not r.skipped | default(false) and r.rc | default(1) != 0
                and r.item.item.source in ['upstream-cluster', 'local'] -%}
           {%- set _ = l.append({'name': r.item.item.name, 'cid': r.item.item.cid,
-                                'error': ('timed out' if r.rc | default(0) == 124 else r.stderr | default('', true) | trim or r.msg | default('') | trim)}) -%}
+                                'error': ('timed out' if r.rc | default(0) in [124, 137] else r.stderr | default('', true) | trim or r.msg | default('') | trim)}) -%}
         {%- endfor -%}
         {{ l }}
       loop_control:
@@ -693,14 +693,14 @@
             {%- set m = measured[c.key] | default(none) -%}
             {%- if est.rc | default(1) != 0 -%}
               {%- set _ = d.unretrievable.append({'name': c.name, 'cid': c.cid, 'source': c.source, 'snapshot': c.snapshot,
-                    'error': 'root not found: ' ~ ('timed out' if est.rc | default(0) == 124 else est.stderr | default('', true) | trim or est.msg | default('') | trim)}) -%}
+                    'error': 'root not found: ' ~ ('timed out' if est.rc | default(0) in [124, 137] else est.stderr | default('', true) | trim or est.msg | default('') | trim)}) -%}
             {%- elif c.name in content_size_gate_allow -%}
               {%- set _ = d.pin.append(c | combine({'size': est.stdout | trim | int, 'size_from': 'estimate, gate overridden'})) -%}
             {%- elif est.stdout | trim | int > gate_bytes | int -%}
               {%- set _ = d.gated.append({'name': c.name, 'cid': c.cid, 'size': est.stdout | trim | int, 'size_from': 'root estimate'}) -%}
             {%- elif m is none or m.rc | default(1) != 0 -%}
               {%- set _ = d.unretrievable.append({'name': c.name, 'cid': c.cid, 'source': c.source, 'snapshot': c.snapshot,
-                    'error': 'DAG not fetched: ' ~ (('timed out' if m.rc | default(0) == 124 else m.stderr | default('', true) | trim or m.msg | default('') | trim)
+                    'error': 'DAG not fetched: ' ~ (('timed out' if m.rc | default(0) in [124, 137] else m.stderr | default('', true) | trim or m.msg | default('') | trim)
                                                        if m is not none else 'not measured')}) -%}
             {%- elif (m.stdout | from_json).TotalSize | int > gate_bytes | int -%}
               {%- set _ = d.gated.append({'name': c.name, 'cid': c.cid, 'size': (m.stdout | from_json).TotalSize | int, 'size_from': 'dag stat'}) -%}
