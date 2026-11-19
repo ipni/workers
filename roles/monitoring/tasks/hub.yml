@@ -12,8 +12,31 @@
       cert-manager needs it for the monitoring certificate, as for the WSS one.
     quiet: true
 
+# Grafana and Argo CD only take connections that present the ipni.io zone's
+# Authenticated Origin Pulls certificate (certs/origin-pull-client.crt, set as
+# the zone-level certificate by ipni/terraform-deployments); Traefik checks it
+# against certs/origin-pull-ca.crt (ipni/infra, monitoring/origin-pull.yaml).
+# Once it expires, Cloudflare keeps presenting it and Traefik refuses both.
+- name: Fail if the origin-pull client certificate is close to expiry
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ route_origin_pull_client_cert_file }}"
+      - -noout
+      - -checkend
+      - "{{ (route_origin_cert_min_days | int) * 86400 }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+  check_mode: false
+
 # The same pinned list as the route-origin allowlist on 443; platform.yml reads
-# it from roles/route_origin/defaults.
+# it from roles/route_origin/defaults. It only narrows who can connect: any
+# Cloudflare account connects from these ranges. The client certificate above
+# is what limits Grafana and Argo CD to the ipni.io zone.
 - name: Allow Cloudflare's edge to reach the monitoring hub
   ansible.builtin.include_role:
     name: ufw_allowlist

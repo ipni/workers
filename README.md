@@ -679,10 +679,22 @@ fails the deploy.
 
 ### Deferred: Authenticated Origin Pulls
 
-**Prepared but not enabled.** It waits until it is known which Cloudflare zones
-will send traffic to these origins: `ipni.io` today, plus the live router's
-zone once the boxes join it. Enforcing it before every such zone presents the
-certificate would refuse that zone's traffic.
+**Zone-level AOP is on for `ipni.io`; Envoy does not enforce it yet.** The
+`ipni.io` zone presents `certs/origin-pull-client.crt` to every origin (set by
+ipni/terraform-deployments, `cloudflare/ipni.io-public-utilities/aop.tf`, with the key from the
+`IPNI_IO_AOP_CLIENT_KEY` repository secret there). Traefik on lith-1 already
+requires it for `monitoring.ipni.io` and `argocd.ipni.io` (ipni/infra,
+`kubernetes/manifests/eu/lith1/monitoring/origin-pull.yaml`), so **if it
+expires, Grafana and Argo CD behind Cloudflare go dark too**;
+`roles/monitoring` fails deploys 30 days before.
+
+Envoy waits until it is known which Cloudflare zones will send traffic to these
+origins: `ipni.io` today, plus the live router's zone once the boxes join it.
+Enforcing it before every such zone presents a certificate would refuse that
+zone's traffic. **Don't upload `certs/origin-pull-client.crt`, or any other
+certificate from this CA, to another zone:** Traefik trusts the CA, so that
+zone could reach the monitoring hub. Give the router's zone a client
+certificate from a second CA, and have Envoy trust both.
 
 Already in place:
 
@@ -697,11 +709,10 @@ Already in place:
 
 To enable, **in this order**:
 
-1. In **every** zone that proxies to these origins: SSL/TLS → Origin Server →
-   Authenticated Origin Pulls → zone-level **Upload certificate**. Paste
-   `certs/origin-pull-client.crt` and the key from
-   `ansible-vault view group_vars/ipfs_nodes/vault.yml`, then switch zone-level
-   AOP **On**. Origins that do not request a client certificate never see it,
+1. In **every** zone that proxies to these origins, upload a zone-level
+   client certificate and switch zone-level AOP **On** (done for `ipni.io`,
+   in Terraform; the router's zone needs one from a second CA, see above).
+   Origins that do not request a client certificate never see it,
    so other sites in the zone are unaffected. Do **not** use Cloudflare's shared
    global AOP certificate: every Cloudflare customer has it.
 2. Add to the `DownstreamTlsContext` in `k8s/route-origin/envoy.yaml.j2`:
@@ -1937,7 +1948,8 @@ turn an unrelated pull request red.
       use `/version`, expecting `Client: needle`.
 - [ ] **Enable Authenticated Origin Pulls** once the zones are known (see
       "Deferred: Authenticated Origin Pulls"). The `delegated-ipfs.dev` zone
-      must also get the client certificate.
+      also needs a client certificate, from a second CA: one from ours would
+      also let it reach the monitoring hub.
 - [ ] Add the Cloudflare rate limiting rule (see Cloudflare configuration).
 - [ ] Tune needle resources and Envoy's rate limits against real traffic metrics.
 - [ ] **Three sites have no CID anywhere:** `docs.libp2p.io`, `ipld.io` and
