@@ -681,7 +681,7 @@ fails the deploy.
 
 **Zone-level AOP is on for `ipni.io`; Envoy does not enforce it yet.** The
 `ipni.io` zone presents `certs/origin-pull-client.crt` to every origin (set by
-ipni/terraform-deployments, `cloudflare/ipni.io/aop.tf`, with the key from the
+ipni/terraform-deployments, `cloudflare/ipni.io-public-utilities/aop.tf`, with the key from the
 `IPNI_IO_AOP_CLIENT_KEY` repository secret there). Traefik on lith-1 already
 requires it for `monitoring.ipni.io` and `argocd.ipni.io` (ipni/infra,
 `kubernetes/manifests/eu/lith1/monitoring/origin-pull.yaml`), so **if it
