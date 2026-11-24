@@ -4,11 +4,11 @@
 site: amsterdam           # the location, for the site= node label
 
 # The indexer layout (README, "Indexer boxes"), installed by hand first: Debian
-# 13 on an md RAID1 (ext4, /, 300 GB) over partition 2 of the three 14 TB NVMe
+# 13 on an md RAID1 (ext4, /, 300 GB) over partition 2 of the three 15.36 TB NVMe
 # disks, the rest of each disk left unallocated, all three switched to
 # 4096-byte sectors before the install. site.yml then creates partition 3 on
 # each disk, one md RAID5 over the three (/dev/md/ipni), and XFS (label
-# ipnidata) on it at data_mount (/ipni), about 28 TB.
+# ipnidata) on it at data_mount (/ipni), about 27 TiB.
 storage_mode: md_xfs
 storage_md:
   name: ipni
