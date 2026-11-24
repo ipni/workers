@@ -1,0 +1,23 @@
+# Cherry Servers, Amsterdam. Delivered as "innocent-bonefish"; site.yml renames
+# it to its inventory name, indexers-ams1, the hostname and the k3s node name.
+site: amsterdam           # the location, for the site= node label
+
+# The indexer layout (README, "Indexer boxes"), installed by hand first: Debian
+# 13 on an md RAID1 (ext4, /, 300 GB) over partition 2 of the three 14 TB NVMe
+# disks, the rest of each disk left unallocated, all three switched to
+# 4096-byte sectors before the install. site.yml then creates partition 3 on
+# each disk, one md RAID5 over the three (/dev/md/ipni), and XFS (label
+# ipnidata) on it at data_mount (/ipni), about 28 TB.
+storage_mode: md_xfs
+storage_md:
+  name: ipni
+  level: 5
+  partition_number: 3
+  # Whole disks, by /dev/disk/by-id (nvme-<model>_<serial>, without -partN),
+  # from `ls -l /dev/disk/by-id/` on the installed box: Kingston SEDC3000ME15T3,
+  # in the order nvme0n1, nvme1n1, nvme2n1. All three were switched to
+  # 4096-byte sectors before the install (README, "Indexer boxes").
+  disks:
+    - /dev/disk/by-id/nvme-KINGSTON_SEDC3000ME15T3_TW254700244
+    - /dev/disk/by-id/nvme-KINGSTON_SEDC3000ME15T3_TW261701564
+    - /dev/disk/by-id/nvme-KINGSTON_SEDC3000ME15T3_TW254700686
