@@ -261,6 +261,17 @@
   notify: Reload sshd
   when: hardening_fix_cloud_init_sshd | bool
 
+# Cherry's Debian 13 image also ships its own 01-cherry.conf, with
+# PermitRootLogin yes and PasswordAuthentication yes. It sorts before
+# 99-hardening.conf, so it wins the same way (found on indexers-ams1,
+# 2026-11-24, by the sshd -T check below).
+- name: Remove Cherry's sshd drop-in, which overrides 99-hardening.conf
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/01-cherry.conf
+    state: absent
+  notify: Reload sshd
+  when: hardening_fix_cloud_init_sshd | bool
+
 # Post-quantum hybrid key exchange, offered ahead of the classical algorithms
 # so OpenSSH 10 clients stop warning. sshd refuses to start on a name it does
 # not know, and mlkem768x25519-sha256 needs OpenSSH 9.9: Ubuntu 24.04 has 9.6
