@@ -1,6 +1,6 @@
 ---
 # Cherry Servers, Amsterdam. Delivered as "innocent-bonefish"; site.yml renames
-# it to its inventory name, indexers-ams1, the hostname and the k3s node name.
+# it to its inventory name, indexers-amst1, the hostname and the k3s node name.
 site: amsterdam           # the location, for the site= node label
 
 # The indexer layout (README, "Indexer boxes"), installed by hand first: Debian

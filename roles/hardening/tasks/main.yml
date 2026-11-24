@@ -263,7 +263,7 @@
 
 # Cherry's Debian 13 image also ships its own 01-cherry.conf, with
 # PermitRootLogin yes and PasswordAuthentication yes. It sorts before
-# 99-hardening.conf, so it wins the same way (found on indexers-ams1,
+# 99-hardening.conf, so it wins the same way (found on indexers-amst1,
 # 2026-11-24, by the sshd -T check below).
 - name: Remove Cherry's sshd drop-in, which overrides 99-hardening.conf
   ansible.builtin.file:
