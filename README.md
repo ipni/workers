@@ -282,7 +282,8 @@ k3s will not start until the data volume is mounted, so pods cannot write to the
 OS disk after a failed import or assembly.
 
 **The indexer test layout** (`indexers-chic1`, three 15.36 TB NVMe), meant to become
-the layout for sf and sf2 once it has proved itself:
+the layout for sf and sf2 once it has proved itself. `indexers-amst1`
+(Amsterdam, three 15.36 TB Kingston SEDC3000ME NVMe) is built the same way:
 
 | Part | Where | Layout | Filesystem |
 |------|-------|--------|------------|
@@ -309,11 +310,16 @@ installed OS:
 ```bash
 nvme id-ns -H /dev/nvme0n1 | grep 'LBA Format'   # which format number is 4096
 mdadm --stop --scan                              # if the rescue system assembled the old RAID
-nvme format /dev/nvme0n1 --lbaf=1                # each drive; erases it
+nvme format /dev/nvme0n1 --lbaf=<n>              # each drive; erases it
 lsblk -d -o NAME,PHY-SEC,LOG-SEC                 # LOG-SEC 4096 on each
 ```
 
-Cherry's Debian 13 reinstall boots on 4096-byte drives (indexers-chic1, 2026-11). A
+`<n>` is the format with a 4096-byte data size and no metadata, and it differs
+between drives: 1 on the Micron 7450s, 2 on indexers-amst1's Kingstons, where 1
+is 512 bytes with 8 of metadata. Read it from the first command; never assume it.
+
+Cherry's Debian 13 reinstall boots on 4096-byte drives (indexers-chic1 and
+indexers-amst1, 2026-11). A
 `PHY-SEC` of 262144 on the 7450s is their preferred write size, not a sector
 size; partitions on whole MiB and the 512 KiB chunk are multiples of it.
 
