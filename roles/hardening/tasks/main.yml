@@ -241,7 +241,7 @@
   ansible.builtin.stat:
     path: /etc/cloud/cloud.cfg.d
   register: cloud_cfg_d
-  when: hardening_fix_cloud_init_sshd | bool
+  when: hardening_fix_cloud_init_sshd | bool or hardening_fix_cloud_init_apt | bool
 
 - name: Stop cloud-init from turning SSH password login back on
   ansible.builtin.copy:
@@ -253,6 +253,32 @@
       # Managed by Ansible: SSH is key-only (roles/hardening).
       ssh_pwauth: false
   when: hardening_fix_cloud_init_sshd | bool and (cloud_cfg_d.stat.isdir | default(false))
+
+# On Cherry's Debian 13, cloud-init's apt-configure crashed with
+# KeyError: 'security' (indexers-amst1): with no apt mirrors configured, it
+# reads them from the datasource and expects both. It does that before it looks
+# at generate_mirrorlists or preserve_sources_list, so naming the mirrors is what
+# avoids the crash. The other two keys keep it from writing any apt sources or
+# mirror lists (the image's 01_debian_cloud.cfg sets generate_mirrorlists: true),
+# so the URIs go unused unless higher-priority config turns that back on.
+- name: Stop cloud-init's apt-configure from crashing and keep its hands off apt sources
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-ipni-apt.cfg
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Managed by Ansible: leave apt sources alone (roles/hardening).
+      apt:
+        generate_mirrorlists: false
+        preserve_sources_list: true
+        primary:
+          - arches: [default]
+            uri: http://deb.debian.org/debian
+        security:
+          - arches: [default]
+            uri: http://deb.debian.org/debian-security
+  when: hardening_fix_cloud_init_apt | bool and (cloud_cfg_d.stat.isdir | default(false))
 
 - name: Remove cloud-init's sshd drop-in, which overrides 99-hardening.conf
   ansible.builtin.file:
