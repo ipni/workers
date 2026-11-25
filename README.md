@@ -175,6 +175,9 @@ To watch for attempts on a box:
 `sudo tcpdump -ni any 'tcp[tcpflags] & tcp-syn != 0 and ip[0] & 0xf != 5'`.
 Undo instantly with `sudo systemctl stop cve-2026-98432-filter`, which deletes
 the table; set `off` to remove it for good once the fixed kernel is in.
+On the IPFS boxes the fixed kernel is the HWE 7.0 line (`7.0.0-43` or later,
+see "Which kernel the IPFS boxes boot"); the 6.17 kernels they ran until then
+are never fixed.
 
 **sf and sf2** (ipni/infra's indexers) get the same filter from `cve.yml`,
 which runs only these tasks, on the `infra_boxes` group. Those boxes are not
@@ -342,6 +345,19 @@ would fail until the box is built and pinned. If root takes neither your key nor
 | Reboots | Never automatic. | Never automatic. |
 | Services | Packages that restart their own service on upgrade still do (ssh, chrony, fail2ban). Established SSH sessions survive. k3s is not an apt package, so apt never restarts k3s or containers. `needrestart` only lists what is left running on old libraries. | Same. |
 | Kernels | Installed but inactive until a reboot. | Same. |
+
+**Which kernel the IPFS boxes boot.** `common` installs
+`linux-generic-hwe-24.04`, Ubuntu's HWE kernel line for noble (7.0 since
+2026-11), and removes `linux-generic-6.17`, the meta-package Cherry's image
+ships, which stays on 6.17 forever. Ubuntu stopped fixing 6.17, and GRUB boots
+the highest installed version, so without this a reboot lands on 6.17 again.
+Removing the meta-package removes no kernel: the old ones stay installed as a
+fallback in GRUB's "Advanced options" until someone purges them. Check what a
+box will boot before rebooting it:
+
+```bash
+ansible ipfs_nodes -u ipni -m shell -a 'uname -r; ls -1 /boot/vmlinuz-* | sort -V | tail -1'
+```
 
 Two things on Cherry's images silently stopped this, both found on 2026-11-11:
 

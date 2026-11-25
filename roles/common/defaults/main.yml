@@ -43,6 +43,25 @@ common_distro_packages:
   Ubuntu: [dnsutils]
   Debian: [sudo, bind9-dnsutils, apparmor]
 
+# The kernel line each box follows, as meta-packages (tasks/main.yml).
+#
+# Cherry's Ubuntu image ships `linux-generic-6.17`, a meta-package for the
+# 6.17 HWE kernel that never moves to a newer line. Ubuntu ended linux-hwe-6.17
+# and will not fix it: CVE-2026-98432, for one, is marked "end of life" there
+# (ubuntu.com/security/CVE-2026-98432, read 2026-11-16). GRUB boots the highest
+# installed version (GRUB_DEFAULT=0), so the boxes would keep booting 6.17
+# even with the fixed 6.8 GA kernel installed beside it.
+#
+# `linux-generic-hwe-24.04` follows Ubuntu's HWE line for noble, now 7.0
+# (26.04's kernel, the last HWE line 24.04 gets), fixed for that CVE from
+# 7.0.0-43. It is published in noble-security, so unattended-upgrades keeps it
+# patched. Nothing here reboots; see "Package updates and reboots" in the README.
+common_kernel_packages:
+  Ubuntu: [linux-generic-hwe-24.04]
+
+common_kernel_packages_absent:
+  Ubuntu: [linux-generic-6.17]
+
 # Origins allowed on top of the distribution's own 50unattended-upgrades.
 common_unattended_extra_origins: []
 
