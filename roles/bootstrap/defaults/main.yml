@@ -15,16 +15,14 @@ bootstrap_swarm_port: 4001
 # The kubo image (k8s/bootstrap/kustomization.yaml.j2): this default, or the
 # instance's own kubo_image ({name, digest}) from bootstrap_extra_instances.
 #
-# kubo v0.43.1 rebuilt on go-libp2p v0.52.0, which fixes the inbound-slot leak
-# (libp2p/go-libp2p#3564). Same image as content: see
-# roles/content/defaults/main.yml for how it is built and how to roll back.
-# From 2026-11-11 to 2026-11-16 chic-1's bootstrap-b ran v0.43.1 plus only the
-# fix and leaked nothing, while the other bootstrappers leaked 270-470 slots a
-# day. Shipyard stopped maintaining kubo on 2026-09-30: upgrades are
-# deliberate, and go-libp2p / kubo security advisories need watching.
+# ipfs/kubo v0.43.2 (published 2026-11-24 16:13 UTC), multi-arch index, pinned
+# by digest. Same image as content (roles/content/defaults/main.yml, which says
+# what it fixes and what ran before it). Shipyard stopped maintaining kubo on
+# 2026-09-30: upgrades are deliberate, and go-libp2p / kubo security
+# advisories need watching.
 bootstrap_default_kubo_image:
-  name: ghcr.io/ipni/kubo
-  digest: sha256:71d7b748f567865787543119c773512a27536f9e0537c90e7dd1bd12ab153df1
+  name: ipfs/kubo
+  digest: sha256:31b965f24ee47e3cb3832a5e3973f5102dd643932a9621a8c2fd7dbe5a0a799b
 bootstrap_kubo_image: "{{ bootstrap_default_kubo_image }}"
 
 # Loopback-only RPC API (probes, metrics, `ipfs` CLI via kubectl exec).
