@@ -1088,7 +1088,7 @@ its IPFS work on 2026-09-30**
 ([announcement](https://ipshipyard.com/blog/2026-the-end-of-ipfs-at-shipyard/)):
 kubo loses its maintainers, and the official bootstrap nodes and
 `delegated-ipfs.dev` lose their operator. So the image is pinned by digest
-(v0.43.1), upgrades are deliberate, and nothing depends on Shipyard-run services
+(v0.43.2), upgrades are deliberate, and nothing depends on Shipyard-run services
 (autoconf is off, AutoTLS is off).
 
 **The identity is permanent.** A PeerID is published in DNS and hardcoded by
@@ -1386,10 +1386,9 @@ ansible-playbook content.yml --check --diff   # dry run: reads DNSLink and the p
 `content_cluster_image`). A box can set its own in `host_vars/<box>/content.yml`
 to run a canary while the others stay on the release; deploy it with
 `-l <box>`. A bootstrapper instance can do the same with `kubo_image` in its
-`bootstrap_extra_instances` entry. kubo is not an ipfs/kubo release for now:
-it is v0.43.1 rebuilt on go-libp2p v0.52.0, which fixes the inbound-slot leak
-(see the comment in `roles/content/defaults/main.yml`); the bootstrappers run
-the same image.
+`bootstrap_extra_instances` entry. kubo is ipfs/kubo v0.43.2, which fixes the
+inbound-slot leak (see the comment in `roles/content/defaults/main.yml`); the
+bootstrappers run the same image.
 
 **Ports.**
 
