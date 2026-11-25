@@ -574,7 +574,7 @@ origin IP; the proxied names above resolve to Cloudflare.
 | lith-1 | route-lith-1-origin.ipni.io | 46.166.169.131 |
 | chic-1 | route-chic-1-origin.ipni.io | 84.32.48.211   |
 
-Envoy (`k8s/route-origin`, `roles/route_origin`, v1.39.1 pinned by digest)
+Envoy (`k8s/route-origin`, `roles/route_origin`, v1.39.6 pinned by digest)
 terminates TLS with a **Cloudflare Origin CA certificate**.
 
 - **Paths are allowlisted, not blocklisted.** Only `/routing/v1/*` and
